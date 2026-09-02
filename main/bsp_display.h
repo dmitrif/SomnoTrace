@@ -31,15 +31,16 @@
 esp_err_t bsp_display_init(void);
 /* Optional board UI hook used by touch-capable targets to request Wi-Fi setup. */
 void bsp_display_set_setup_callback(void (*callback)(void));
-/* Called once networking/NVS and both BLE services have completed init. */
-void bsp_display_enable_touch_services(void);
+/* Called once BLE initialization has completed. Each flag controls the
+ * corresponding native pairing UI without assuming partial init is safe. */
+void bsp_display_enable_touch_services(bool as11_ready, bool oximeter_ready);
 void bsp_display_show_number(uint32_t value);
 void bsp_display_show_lines(const char *title, const char *const *lines, int n_lines);
 
-/* Persistent amber notice banner across the bottom of the status screen.
- * Survives any subsequent bsp_display_show_lines() call, so transient
- * messages cannot hide it. Pass NULL or "" to clear. */
+/* Transient amber notice banner. Pass NULL or "" to clear. */
 void bsp_display_set_notice(const char *text);
+/* Persistent fault banner for conditions that require user intervention. */
+void bsp_display_set_critical_notice(const char *text);
 void bsp_display_set_wifi_connected(bool connected);
 void bsp_display_set_as11_paired(bool paired);
 void bsp_display_set_sd_ready(bool ready);

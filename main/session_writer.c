@@ -465,7 +465,7 @@ static void io_fail(session_writer_t *s, const char *what)
                  what, strerror(errno));
         ESP_LOGE(TAG, "STORAGE FAILURE (%s) — errno=%d (%s)",
                  what, errno, strerror(errno));
-        bsp_display_set_notice("SD write error");
+        bsp_display_set_critical_notice("SD write error");
     } else {
         ESP_LOGW(TAG, "storage error #%u (%s)", (unsigned)s->io_errors, what);
     }

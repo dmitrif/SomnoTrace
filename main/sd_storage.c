@@ -247,12 +247,12 @@ bool sd_storage_reserve_for_recording(void)
         if (free_bytes < SD_FLOOR_BYTES) {
             ESP_LOGE(TAG, "below hard floor (%llu KB) — refusing to record",
                      (unsigned long long)(free_bytes / 1024));
-            bsp_display_set_notice("SD full");
+            bsp_display_set_critical_notice("SD full");
             return false;
         }
     }
 
-    bsp_display_set_notice("SD nearly full");
+    bsp_display_set_critical_notice("SD nearly full");
     return true;
 }
 

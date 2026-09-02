@@ -28,6 +28,7 @@
 #include "lvgl.h"
 #include "net_provision.h"
 #include "oximeter.h"
+#include "sd_storage.h"
 #include "therapy_alert.h"
 #include "touch_history.h"
 
@@ -50,10 +51,13 @@ typedef struct {
     int64_t therapy_start_us;
     int16_t flow[FLOW_POINTS];
     unsigned flow_head;
+    unsigned flow_version;
     char title[48];
     char status[192];
     char attention[256];
     char notice[64];
+    int64_t notice_expires_us;
+    bool notice_critical;
 } ui_state_t;
 
 typedef struct {
@@ -76,7 +80,17 @@ typedef struct {
     size_t ox_count;
     unsigned ox_version;
     bool ox_busy;
+    esp_err_t history_result;
 } ui_service_state_t;
+
+typedef enum {
+    BLE_UI_IDLE,
+    BLE_UI_SCAN_AS11,
+    BLE_UI_SCAN_OX,
+    BLE_UI_PAIR_AS11,
+    BLE_UI_PAIR_OX,
+    BLE_UI_FORGET,
+} ble_ui_operation_t;
 
 static const char *TAG = "display_7b";
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -92,7 +106,15 @@ static void (*s_setup_callback)(void);
 static uint32_t s_flush_count;
 static uint32_t s_flush_timeouts;
 static uint32_t s_touch_read_errors;
+static lv_coord_t s_last_touch_x;
+static lv_coord_t s_last_touch_y;
 static bool s_touch_services_ready;
+static bool s_as11_service_ready;
+static bool s_ox_service_ready;
+static bool s_therapy_command_busy;
+static bool s_therapy_command_target;
+static ble_ui_operation_t s_ble_operation;
+static int64_t s_ble_operation_started_us;
 
 static lv_obj_t *s_title_label;
 static lv_obj_t *s_clock_label;
@@ -108,6 +130,7 @@ static lv_obj_t *s_flow_lim_label;
 static lv_obj_t *s_runtime_label;
 static lv_obj_t *s_notice_label;
 static lv_obj_t *s_therapy_button_label;
+static lv_obj_t *s_therapy_button;
 static lv_obj_t *s_attention_card;
 static lv_obj_t *s_attention_title;
 static lv_obj_t *s_attention_body;
@@ -122,6 +145,7 @@ static lv_obj_t *s_history_detail;
 static lv_obj_t *s_as11_status;
 static lv_obj_t *s_as11_dropdown;
 static lv_obj_t *s_as11_pair_button;
+static lv_obj_t *s_passkey_confirm_button;
 static lv_obj_t *s_passkey;
 static lv_obj_t *s_ox_status;
 static lv_obj_t *s_ox_dropdown;
@@ -133,11 +157,36 @@ static lv_obj_t *s_wifi_ssid;
 static lv_obj_t *s_wifi_password;
 static lv_obj_t *s_system_details;
 static lv_obj_t *s_keyboard;
+static lv_obj_t *s_wake_overlay;
 static unsigned s_seen_history_version;
 static unsigned s_seen_as11_version;
 static unsigned s_seen_ox_version;
 static int s_history_selection;
 static bool s_settings_synced;
+static bool s_settings_save_busy;
+static unsigned s_settings_save_generation;
+static char s_saved_wifi_ssid[NETPROV_SSID_MAXLEN + 1];
+
+static bool begin_ble_operation(ble_ui_operation_t operation)
+{
+    bool started = false;
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_ble_operation == BLE_UI_IDLE) {
+        s_ble_operation = operation;
+        s_ble_operation_started_us = esp_timer_get_time();
+        started = true;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return started;
+}
+
+static void end_ble_operation(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_ble_operation = BLE_UI_IDLE;
+    s_ble_operation_started_us = 0;
+    portEXIT_CRITICAL(&s_state_lock);
+}
 
 static bool lock_lvgl(TickType_t timeout)
 {
@@ -192,11 +241,18 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
         point_result = esp_lcd_touch_get_data(touch, &point, &count, 1);
     }
     if (read_result == ESP_OK && point_result == ESP_OK && count) {
-        data->point.x = point.x;
-        data->point.y = point.y;
+        s_last_touch_x = point.x < WAVESHARE_7B_H_RES ? point.x
+                                                       : WAVESHARE_7B_H_RES - 1;
+        s_last_touch_y = point.y < WAVESHARE_7B_V_RES ? point.y
+                                                       : WAVESHARE_7B_V_RES - 1;
+        data->point.x = s_last_touch_x;
+        data->point.y = s_last_touch_y;
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
-        if (touch && read_result != ESP_OK) s_touch_read_errors++;
+        data->point.x = s_last_touch_x;
+        data->point.y = s_last_touch_y;
+        if (touch && (read_result != ESP_OK || point_result != ESP_OK))
+            s_touch_read_errors++;
         data->state = LV_INDEV_STATE_RELEASED;
     }
 }
@@ -263,10 +319,26 @@ static lv_obj_t *make_section_title(lv_obj_t *parent, const char *text, int x, i
 static void save_settings_task(void *arg)
 {
     (void)arg;
-    device_settings_t settings = *device_settings_get();
-    esp_err_t result = device_settings_save(&settings);
-    bsp_display_set_notice(result == ESP_OK ? "Settings saved" : "Could not save settings");
-    vTaskDelete(NULL);
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        portENTER_CRITICAL(&s_state_lock);
+        unsigned generation = s_settings_save_generation;
+        portEXIT_CRITICAL(&s_state_lock);
+
+        device_settings_t settings = *device_settings_get();
+        esp_err_t result = device_settings_save(&settings);
+
+        portENTER_CRITICAL(&s_state_lock);
+        bool latest = generation == s_settings_save_generation;
+        if (latest) s_settings_save_busy = false;
+        portEXIT_CRITICAL(&s_state_lock);
+        if (latest) {
+            bsp_display_set_notice(result == ESP_OK ? "Settings saved"
+                                                    : "Could not save settings");
+            vTaskDelete(NULL);
+            return;
+        }
+    }
 }
 
 static void queue_settings_save(void)
@@ -275,8 +347,18 @@ static void queue_settings_save(void)
         bsp_display_set_notice("Settings service is still starting");
         return;
     }
-    if (xTaskCreate(save_settings_task, "ui_settings", 3072, NULL, 3, NULL) != pdPASS)
+    portENTER_CRITICAL(&s_state_lock);
+    s_settings_save_generation++;
+    bool start_worker = !s_settings_save_busy;
+    if (start_worker) s_settings_save_busy = true;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (start_worker &&
+        xTaskCreate(save_settings_task, "ui_settings", 3072, NULL, 3, NULL) != pdPASS) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_settings_save_busy = false;
+        portEXIT_CRITICAL(&s_state_lock);
         bsp_display_set_notice("Unable to save settings");
+    }
 }
 
 static void brightness_cb(lv_event_t *event)
@@ -285,7 +367,7 @@ static void brightness_cb(lv_event_t *event)
     int value = lv_slider_get_value(lv_event_get_target(event));
     if (code == LV_EVENT_VALUE_CHANGED) {
         device_settings_set_brightness((uint8_t)value);
-        lv_label_set_text_fmt(s_settings_brightness_value, "%d.%d%%", value / 10, value % 10);
+        lv_label_set_text_fmt(s_settings_brightness_value, "%d / 200", value);
     } else if (code == LV_EVENT_RELEASED) {
         queue_settings_save();
     }
@@ -318,6 +400,7 @@ static void history_task(void *arg)
     } else {
         s_services.history_count = 0;
     }
+    s_services.history_result = result;
     s_services.history_busy = false;
     s_services.history_version++;
     portEXIT_CRITICAL(&s_state_lock);
@@ -341,7 +424,9 @@ static void device_scan_task(void *arg)
 {
     bool oxygen = (intptr_t)arg == 1;
     cJSON *results = NULL;
-    esp_err_t result = oxygen ? oximeter_scan(7) : as11_ble_scan(7);
+    esp_err_t result = bsp_display_is_therapy_active()
+                       ? ESP_ERR_INVALID_STATE
+                       : (oxygen ? oximeter_scan(7) : as11_ble_scan(7));
     if (result == ESP_OK)
         results = oxygen ? oximeter_get_scan_results() : as11_ble_get_scan_results();
 
@@ -379,12 +464,15 @@ static void device_scan_task(void *arg)
         s_services.as11_version++;
     }
     portEXIT_CRITICAL(&s_state_lock);
+    end_ble_operation();
     vTaskDelete(NULL);
 }
 
 static void scan_cb(lv_event_t *event)
 {
-    if (!s_touch_services_ready) {
+    bool oxygen = (intptr_t)lv_event_get_user_data(event) == 1;
+    if (!s_touch_services_ready || (oxygen ? !s_ox_service_ready
+                                          : !s_as11_service_ready)) {
         bsp_display_set_notice("Pairing services are still starting");
         return;
     }
@@ -392,15 +480,14 @@ static void scan_cb(lv_event_t *event)
         bsp_display_set_notice("Stop therapy before scanning for devices");
         return;
     }
-    bool oxygen = (intptr_t)lv_event_get_user_data(event) == 1;
-    portENTER_CRITICAL(&s_state_lock);
-    bool busy = oxygen ? s_services.ox_busy : s_services.as11_busy;
-    if (!busy) {
-        if (oxygen) s_services.ox_busy = true;
-        else s_services.as11_busy = true;
+    if (!begin_ble_operation(oxygen ? BLE_UI_SCAN_OX : BLE_UI_SCAN_AS11)) {
+        bsp_display_set_notice("Another Bluetooth action is already running");
+        return;
     }
+    portENTER_CRITICAL(&s_state_lock);
+    if (oxygen) s_services.ox_busy = true;
+    else s_services.as11_busy = true;
     portEXIT_CRITICAL(&s_state_lock);
-    if (busy) return;
     bsp_display_set_notice(oxygen ? "Scanning for O2 rings..." : "Scanning for AirSense 11...");
     if (xTaskCreate(device_scan_task, oxygen ? "ui_scan_ox" : "ui_scan_as11",
                     8192, (void *)(intptr_t)(oxygen ? 1 : 0), 4, NULL) != pdPASS) {
@@ -408,6 +495,7 @@ static void scan_cb(lv_event_t *event)
         if (oxygen) s_services.ox_busy = false;
         else s_services.as11_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
+        end_ble_operation();
     }
 }
 
@@ -425,10 +513,12 @@ static void device_action_task(void *arg)
 {
     device_job_t *job = arg;
     esp_err_t result = ESP_FAIL;
-    if (job->action == DEVICE_PAIR_AS11) {
+    if (bsp_display_is_therapy_active()) {
+        result = ESP_ERR_INVALID_STATE;
+    } else if (job->action == DEVICE_PAIR_AS11) {
         result = as11_ble_start_pair(job->addr);
     } else if (job->action == DEVICE_PAIR_OX) {
-        result = oximeter_pair(job->addr, job->driver);
+        result = oximeter_pair(job->addr, OX_DRIVER_AUTO);
     } else if (job->action == DEVICE_CONFIRM_AS11) {
         result = as11_ble_confirm_pair(job->passkey);
     } else if (job->action == DEVICE_FORGET_AS11) {
@@ -437,13 +527,18 @@ static void device_action_task(void *arg)
         result = oximeter_forget();
     }
     bsp_display_set_notice(result == ESP_OK ? "Device action started" : "Device action failed");
+    if (result != ESP_OK || job->action == DEVICE_FORGET_AS11 ||
+        job->action == DEVICE_FORGET_OX) end_ble_operation();
     free(job);
     vTaskDelete(NULL);
 }
 
 static void device_action_cb(lv_event_t *event)
 {
-    if (!s_touch_services_ready) {
+    device_action_t action = (device_action_t)(intptr_t)lv_event_get_user_data(event);
+    bool oxygen = action == DEVICE_PAIR_OX || action == DEVICE_FORGET_OX;
+    if (!s_touch_services_ready || (oxygen ? !s_ox_service_ready
+                                          : !s_as11_service_ready)) {
         bsp_display_set_notice("Pairing services are still starting");
         return;
     }
@@ -451,9 +546,18 @@ static void device_action_cb(lv_event_t *event)
         bsp_display_set_notice("Stop therapy before changing paired devices");
         return;
     }
-    device_action_t action = (device_action_t)(intptr_t)lv_event_get_user_data(event);
+    ble_ui_operation_t operation =
+        action == DEVICE_PAIR_AS11 || action == DEVICE_CONFIRM_AS11 ? BLE_UI_PAIR_AS11 :
+        action == DEVICE_PAIR_OX ? BLE_UI_PAIR_OX : BLE_UI_FORGET;
+    bool continuing_passkey = action == DEVICE_CONFIRM_AS11 &&
+                              s_ble_operation == BLE_UI_PAIR_AS11;
+    if (!continuing_passkey && !begin_ble_operation(operation)) {
+        bsp_display_set_notice("Another Bluetooth action is already running");
+        return;
+    }
     device_job_t *job = calloc(1, sizeof(*job));
     if (!job) {
+        if (!continuing_passkey) end_ble_operation();
         bsp_display_set_notice("Unable to allocate pairing job");
         return;
     }
@@ -471,7 +575,7 @@ static void device_action_cb(lv_event_t *event)
         portENTER_CRITICAL(&s_state_lock);
         if (selected < s_services.ox_count) {
             strlcpy(job->addr, s_services.ox[selected].addr, sizeof(job->addr));
-            job->driver = s_services.ox[selected].driver;
+            job->driver = OX_DRIVER_AUTO;
         }
         portEXIT_CRITICAL(&s_state_lock);
     } else if (action == DEVICE_CONFIRM_AS11) {
@@ -479,17 +583,20 @@ static void device_action_cb(lv_event_t *event)
     }
     if ((action == DEVICE_PAIR_AS11 || action == DEVICE_PAIR_OX) && !job->addr[0]) {
         free(job);
+        if (!continuing_passkey) end_ble_operation();
         bsp_display_set_notice("Scan and select a device first");
         return;
     }
     if (action == DEVICE_CONFIRM_AS11 && strlen(job->passkey) != 4) {
         free(job);
+        if (!continuing_passkey) end_ble_operation();
         bsp_display_set_notice("Enter the 4-digit AirSense code");
         return;
     }
     if (xTaskCreate(device_action_task, "ui_pair", 6144,
                     job, 4, NULL) != pdPASS) {
         free(job);
+        if (!continuing_passkey) end_ble_operation();
         bsp_display_set_notice("Unable to start pairing action");
     }
 }
@@ -500,11 +607,21 @@ static void forget_dialog_cb(lv_event_t *event)
     const char *button = lv_msgbox_get_active_btn_text(dialog);
     if (!button) return;
     if (!strcmp(button, "Forget")) {
+        if (!begin_ble_operation(BLE_UI_FORGET)) {
+            bsp_display_set_notice("Another Bluetooth action is already running");
+            lv_msgbox_close(dialog);
+            return;
+        }
         device_job_t *job = calloc(1, sizeof(*job));
         if (job) {
             job->action = (device_action_t)(intptr_t)lv_event_get_user_data(event);
             if (xTaskCreate(device_action_task, "ui_forget", 4096,
-                            job, 4, NULL) != pdPASS) free(job);
+                            job, 4, NULL) != pdPASS) {
+                free(job);
+                end_ble_operation();
+            }
+        } else {
+            end_ble_operation();
         }
     }
     lv_msgbox_close(dialog);
@@ -548,8 +665,10 @@ static void text_focus_cb(lv_event_t *event)
     if (lv_event_get_code(event) == LV_EVENT_FOCUSED) {
         lv_keyboard_set_mode(s_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_keyboard, lv_event_get_target(event));
-        lv_obj_set_pos(s_keyboard, 90, 264);
-        lv_obj_set_size(s_keyboard, 844, 280);
+        /* Use the otherwise-idle left settings panel as a full-height editor;
+         * the focused network field remains visible on the right. */
+        lv_obj_set_pos(s_keyboard, 16, 84);
+        lv_obj_set_size(s_keyboard, 484, 430);
         lv_obj_clear_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_keyboard);
     }
@@ -579,13 +698,30 @@ static void reboot_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(500));
+    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
+        bsp_display_set_notice("Restart cancelled: therapy recording is active");
+        vTaskDelete(NULL);
+        return;
+    }
+    if (!sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 1000)) {
+        bsp_display_set_notice("Restart cancelled: microSD is busy");
+        vTaskDelete(NULL);
+        return;
+    }
+    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
+        sd_storage_lease_release(SD_LEASE_DESTRUCTIVE);
+        bsp_display_set_notice("Restart cancelled: therapy recording started");
+        vTaskDelete(NULL);
+        return;
+    }
+    sd_storage_deinit();
     esp_restart();
 }
 
 static void reboot_cb(lv_event_t *event)
 {
     (void)event;
-    if (bsp_display_is_therapy_active()) {
+    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
         bsp_display_set_notice("Stop therapy before restarting");
         return;
     }
@@ -596,6 +732,7 @@ static void reboot_cb(lv_event_t *event)
 typedef struct {
     char ssid[NETPROV_SSID_MAXLEN + 1];
     char password[NETPROV_PASS_MAXLEN + 1];
+    bool keep_password;
 } wifi_job_t;
 
 static void wifi_save_task(void *arg)
@@ -604,13 +741,14 @@ static void wifi_save_task(void *arg)
     struct netprov_config cfg = {0};
     netprov_load_config(&cfg);
     strlcpy(cfg.wifi[0].ssid, job->ssid, sizeof(cfg.wifi[0].ssid));
-    strlcpy(cfg.wifi[0].pass, job->password, sizeof(cfg.wifi[0].pass));
+    if (!job->keep_password)
+        strlcpy(cfg.wifi[0].pass, job->password, sizeof(cfg.wifi[0].pass));
     esp_err_t result = netprov_save_config(&cfg);
     free(job);
     if (result == ESP_OK) {
         bsp_display_set_notice("Wi-Fi saved; restarting...");
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
+        reboot_task(NULL);
+        return;
     }
     bsp_display_set_notice("Could not save Wi-Fi settings");
     vTaskDelete(NULL);
@@ -637,6 +775,7 @@ static void wifi_save_cb(lv_event_t *event)
     if (!job) return;
     strlcpy(job->ssid, ssid, sizeof(job->ssid));
     strlcpy(job->password, password ? password : "", sizeof(job->password));
+    job->keep_password = !job->password[0] && !strcmp(job->ssid, s_saved_wifi_ssid);
     lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
     if (xTaskCreate(wifi_save_task, "ui_wifi_save", 4096, job, 4, NULL) != pdPASS) {
         free(job);
@@ -648,20 +787,29 @@ static void tabview_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) return;
     if (lv_tabview_get_tab_act(s_tabview) == 1) start_history_load();
-    if (s_keyboard) lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+    if (s_keyboard) {
+        lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(s_keyboard, NULL);
+    }
 }
 
 static void action_task(void *arg)
 {
     intptr_t action = (intptr_t)arg;
     esp_err_t result = ESP_OK;
-    if (action == 1) {
-        if (bsp_display_is_therapy_active()) result = as11_ble_stop_therapy();
-        else result = as11_ble_start_therapy();
+    if (action == 5 || action == 6) {
+        bool start = action == 5;
+        bool active = bsp_display_is_therapy_active();
+        if (active != start) {
+            result = start ? as11_ble_start_therapy() : as11_ble_stop_therapy();
+        }
     } else if (action == 2) {
         therapy_alert_acknowledge();
     }
-    if (action == 1) {
+    if (action == 5 || action == 6) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_therapy_command_busy = false;
+        portEXIT_CRITICAL(&s_state_lock);
         bsp_display_set_notice(result == ESP_OK ? "Therapy command sent" :
                                                   "Therapy command failed");
     } else if (action == 2) {
@@ -673,7 +821,25 @@ static void action_task(void *arg)
 static void action_cb(lv_event_t *event)
 {
     intptr_t action = (intptr_t)lv_event_get_user_data(event);
-    if (action == 1 || action == 2) {
+    if (action == 1) {
+        portENTER_CRITICAL(&s_state_lock);
+        bool busy = s_therapy_command_busy;
+        bool start = !s_state.therapy;
+        if (!busy) {
+            s_therapy_command_busy = true;
+            s_therapy_command_target = start;
+        }
+        portEXIT_CRITICAL(&s_state_lock);
+        if (busy) return;
+        bsp_display_set_notice(start ? "Starting therapy..." : "Stopping therapy...");
+        if (xTaskCreate(action_task, "ui_therapy", 4096,
+                        (void *)(intptr_t)(start ? 5 : 6), 4, NULL) != pdPASS) {
+            portENTER_CRITICAL(&s_state_lock);
+            s_therapy_command_busy = false;
+            portEXIT_CRITICAL(&s_state_lock);
+            bsp_display_set_notice("Unable to start therapy action");
+        }
+    } else if (action == 2) {
         if (xTaskCreate(action_task, "ui_action", 4096,
                         (void *)action, 4, NULL) != pdPASS) {
             bsp_display_set_notice("Unable to start touch action");
@@ -697,6 +863,15 @@ static void wake_cb(lv_event_t *event)
     bool backlight = s_backlight;
     portEXIT_CRITICAL(&s_state_lock);
     if (!backlight) bsp_display_set_backlight(true);
+}
+
+static void wake_overlay_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        /* This object is above every control while dark, so the wake gesture
+         * cannot also activate the button that happens to be underneath it. */
+        bsp_display_set_backlight(true);
+    }
 }
 
 static void diagnostics_cb(lv_event_t *event)
@@ -795,6 +970,9 @@ static void build_ui(void)
     lv_obj_set_style_border_width(s_tabview, 0, 0);
     lv_obj_set_style_pad_all(s_tabview, 0, LV_PART_MAIN);
     lv_obj_add_event_cb(s_tabview, tabview_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    /* Navigation is button-driven. Disabling swipe prevents a graph gesture
+     * from accidentally changing pages. */
+    lv_obj_clear_flag(lv_tabview_get_content(s_tabview), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *tab_buttons = lv_tabview_get_tab_btns(s_tabview);
     lv_obj_set_style_bg_color(tab_buttons, lv_color_hex(0x0d1829), 0);
     lv_obj_set_style_text_font(tab_buttons, &lv_font_montserrat_18, 0);
@@ -898,10 +1076,10 @@ static void build_ui(void)
     lv_obj_set_pos(s_runtime_label, 122, 231);
     lv_obj_set_style_text_font(s_runtime_label, &lv_font_montserrat_18, 0);
 
-    lv_obj_t *therapy_button = make_touch_button(live, 16, 340, 238, 74,
-                                                 "Start therapy", 0x087f8c,
-                                                 action_cb, 1);
-    s_therapy_button_label = lv_obj_get_child(therapy_button, 0);
+    s_therapy_button = make_touch_button(live, 16, 340, 238, 74,
+                                         "Start therapy", 0x087f8c,
+                                         action_cb, 1);
+    s_therapy_button_label = lv_obj_get_child(s_therapy_button, 0);
     make_touch_button(live, 266, 340, 238, 74, "Acknowledge", 0x365083, action_cb, 2);
     make_touch_button(live, 516, 340, 238, 74, "Wi-Fi setup", 0x6652a3, action_cb, 3);
     make_touch_button(live, 766, 340, 242, 74, "Screen off", 0x29364b, action_cb, 4);
@@ -977,8 +1155,10 @@ static void build_ui(void)
     lv_obj_set_size(s_passkey, 245, 62);
     lv_obj_set_style_text_font(s_passkey, &lv_font_montserrat_22, 0);
     lv_obj_add_event_cb(s_passkey, passkey_focus_cb, LV_EVENT_FOCUSED, NULL);
-    make_touch_button(as_card, 261, 278, 184, 62, "Confirm code", 0x6652a3,
-                      device_action_cb, DEVICE_CONFIRM_AS11);
+    s_passkey_confirm_button = make_touch_button(as_card, 261, 278, 184, 62,
+                                                  "Confirm code", 0x6652a3,
+                                                  device_action_cb,
+                                                  DEVICE_CONFIRM_AS11);
 
     lv_obj_t *ox_card = make_card(s_pages[2], 516, 12, 492, 440);
     make_section_title(ox_card, "O2 ring", 0, 0);
@@ -1023,9 +1203,8 @@ static void build_ui(void)
     lv_slider_set_range(s_settings_brightness, 1, 200);
     lv_slider_set_value(s_settings_brightness, device_settings_get()->brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(s_settings_brightness, brightness_cb, LV_EVENT_ALL, NULL);
-    lv_label_set_text_fmt(s_settings_brightness_value, "%d.%d%%",
-                          device_settings_get()->brightness / 10,
-                          device_settings_get()->brightness % 10);
+    lv_label_set_text_fmt(s_settings_brightness_value, "%d / 200",
+                          device_settings_get()->brightness);
     lv_obj_t *therapy_caption = lv_label_create(display_card);
     lv_label_set_text(therapy_caption, "During therapy");
     lv_obj_set_pos(therapy_caption, 0, 174);
@@ -1069,7 +1248,7 @@ static void build_ui(void)
     lv_obj_set_style_text_font(s_wifi_ssid, &lv_font_montserrat_18, 0);
     lv_obj_add_event_cb(s_wifi_ssid, text_focus_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_t *password_caption = lv_label_create(network_card);
-    lv_label_set_text(password_caption, "Password (leave blank for an open network)");
+    lv_label_set_text(password_caption, "Password (blank keeps it for the same network)");
     lv_obj_set_pos(password_caption, 0, 236);
     lv_obj_set_style_text_color(password_caption, lv_color_hex(0x91a3bd), 0);
     s_wifi_password = lv_textarea_create(network_card);
@@ -1130,6 +1309,17 @@ static void build_ui(void)
     lv_obj_set_style_bg_color(s_keyboard, lv_color_hex(0x172640), 0);
     lv_obj_add_event_cb(s_keyboard, keyboard_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+
+    s_wake_overlay = lv_obj_create(screen);
+    lv_obj_set_pos(s_wake_overlay, 0, 0);
+    lv_obj_set_size(s_wake_overlay, WAVESHARE_7B_H_RES, WAVESHARE_7B_V_RES);
+    lv_obj_set_style_bg_color(s_wake_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wake_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_wake_overlay, 0, 0);
+    lv_obj_clear_flag(s_wake_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_wake_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_wake_overlay, wake_overlay_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_flag(s_wake_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void refresh_history_widgets(void)
@@ -1142,8 +1332,20 @@ static void refresh_history_widgets(void)
     if (services.history_version != s_seen_history_version) {
         s_seen_history_version = services.history_version;
         if (services.history_count == 0) {
-            lv_label_set_text(s_history_status, "No completed sessions found");
+            if (services.history_result == ESP_ERR_INVALID_STATE) {
+                lv_label_set_text(s_history_status, "History is unavailable while recording");
+            } else if (services.history_result == ESP_ERR_TIMEOUT) {
+                lv_label_set_text(s_history_status, "microSD is busy; try Refresh again");
+            } else if (services.history_result == ESP_ERR_NOT_FOUND) {
+                lv_label_set_text(s_history_status, "microSD history is unavailable");
+            } else {
+                lv_label_set_text(s_history_status, "No completed sessions found");
+            }
             s_history_selection = -1;
+            lv_label_set_text(s_history_detail,
+                              services.history_result == ESP_OK
+                              ? "No completed sessions are stored on this card."
+                              : "History could not be read. Recording and live therapy remain available.");
         } else {
             lv_label_set_text_fmt(s_history_status, "%u recent night%s",
                                   (unsigned)services.history_count,
@@ -1172,24 +1374,44 @@ static void refresh_history_widgets(void)
                s_history_selection < (int)services.history_count) {
         touch_history_day_t *day = &services.history[s_history_selection];
         if (day->has_summary) {
+            char usage[32];
+            char ahi[32];
+            char pressure[32];
+            char leak[32];
+            if (day->has_usage) snprintf(usage, sizeof(usage), "%d h %02d min",
+                                         day->usage_min / 60, day->usage_min % 60);
+            else strlcpy(usage, "Unavailable", sizeof(usage));
+            if (day->has_ahi) snprintf(ahi, sizeof(ahi), "%.1f / hour", day->ahi);
+            else strlcpy(ahi, "Unavailable", sizeof(ahi));
+            if (day->has_pressure_p95)
+                snprintf(pressure, sizeof(pressure), "%.1f cmH2O", day->pressure_p95);
+            else strlcpy(pressure, "Unavailable", sizeof(pressure));
+            if (day->has_leak_p95)
+                snprintf(leak, sizeof(leak), "%.1f L/min", day->leak_p95);
+            else strlcpy(leak, "Unavailable", sizeof(leak));
             lv_label_set_text_fmt(s_history_detail,
-                                  "%.4s-%.2s-%.2s\n\n"
-                                  "Usage                 %d h %02d min\n"
+                                  "Night of %.4s-%.2s-%.2s\n\n"
+                                  "Usage                 %s\n"
                                   "Sessions              %d\n"
-                                  "AHI                   %.1f / hour\n"
-                                  "95%% pressure          %.1f cmH2O\n"
-                                  "95%% leak              %.1f L/min",
+                                  "Device-reported AHI   %s\n"
+                                  "95%% pressure          %s\n"
+                                  "95%% leak              %s\n\n"
+                                  "For trend review; not a diagnosis or prescription.",
                                   day->day, day->day + 4, day->day + 6,
-                                  day->usage_min / 60, day->usage_min % 60,
-                                  day->sessions, day->ahi,
-                                  day->pressure_p95, day->leak_p95);
+                                  usage, day->sessions, ahi, pressure, leak);
         } else {
             lv_label_set_text_fmt(s_history_detail,
-                                  "%.4s-%.2s-%.2s\n\n%d session%s recorded\n\n"
+                                  "Night of %.4s-%.2s-%.2s\n\n%d session%s recorded\n\n"
                                   "Summary metrics are not available for this night yet.",
                                   day->day, day->day + 4, day->day + 6,
                                   day->sessions, day->sessions == 1 ? "" : "s");
         }
+    }
+
+    for (int i = 0; i < HISTORY_MAX_DAYS; ++i) {
+        lv_obj_set_style_bg_color(s_history_rows[i],
+                                  lv_color_hex(i == s_history_selection
+                                               ? 0x365083 : 0x1b2a42), 0);
     }
 }
 
@@ -1215,14 +1437,20 @@ static void refresh_device_dropdown(bool oxygen, const ui_service_state_t *servi
     lv_dropdown_set_options(dropdown, options);
 }
 
-static void refresh_secondary_pages(const ui_state_t *state)
+static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
 {
     ui_service_state_t services;
+    ble_ui_operation_t ble_operation;
+    int64_t ble_started;
     portENTER_CRITICAL(&s_state_lock);
     services = s_services;
+    ble_operation = s_ble_operation;
+    ble_started = s_ble_operation_started_us;
     portEXIT_CRITICAL(&s_state_lock);
-    refresh_device_dropdown(false, &services);
-    refresh_device_dropdown(true, &services);
+    if (active_tab == 2) {
+        refresh_device_dropdown(false, &services);
+        refresh_device_dropdown(true, &services);
+    }
 
     if (!s_touch_services_ready) {
         lv_label_set_text(s_as11_status, "Status: starting BLE service...");
@@ -1242,11 +1470,11 @@ static void refresh_secondary_pages(const ui_state_t *state)
         return;
     }
 
-    if (!s_settings_synced) {
+    if (!s_settings_synced && active_tab == 3) {
         const device_settings_t *settings = device_settings_get();
         lv_slider_set_value(s_settings_brightness, settings->brightness, LV_ANIM_OFF);
-        lv_label_set_text_fmt(s_settings_brightness_value, "%d.%d%%",
-                              settings->brightness / 10, settings->brightness % 10);
+        lv_label_set_text_fmt(s_settings_brightness_value, "%d / 200",
+                              settings->brightness);
         uint16_t mode_index = settings->lcd_therapy_mode == LCD_THERAPY_INFO ? 1 :
                               settings->lcd_therapy_mode == LCD_THERAPY_OFF ? 2 :
                               settings->lcd_therapy_mode == LCD_THERAPY_ALWAYS_OFF ? 3 : 0;
@@ -1254,25 +1482,53 @@ static void refresh_secondary_pages(const ui_state_t *state)
         struct netprov_config cfg = {0};
         if (netprov_load_config(&cfg)) {
             lv_textarea_set_text(s_wifi_ssid, cfg.wifi[0].ssid);
-            lv_textarea_set_text(s_wifi_password, cfg.wifi[0].pass);
+            strlcpy(s_saved_wifi_ssid, cfg.wifi[0].ssid,
+                    sizeof(s_saved_wifi_ssid));
+            /* Never copy a stored credential into an LVGL object. Blank means
+             * unchanged when the SSID is unchanged. */
+            lv_textarea_set_text(s_wifi_password, "");
         }
         s_settings_synced = true;
     }
 
-    const char *as_status = as11_ble_get_status();
-    const char *ox_status = oximeter_get_status();
+    const char *as_status = s_as11_service_ready ? as11_ble_get_status() : "unavailable";
+    const char *ox_status = s_ox_service_ready ? oximeter_get_status() : "unavailable";
+    if (ble_started && esp_timer_get_time() - ble_started > 1000000) {
+        bool as_done = ble_operation == BLE_UI_PAIR_AS11 &&
+                       (!strcmp(as_status, AS11_STATUS_PAIRED) ||
+                        !strcmp(as_status, AS11_STATUS_ERROR));
+        bool ox_done = ble_operation == BLE_UI_PAIR_OX &&
+                       (!strcmp(ox_status, OX_STATUS_PAIRED) ||
+                        !strcmp(ox_status, OX_STATUS_MONITORING) ||
+                        !strcmp(ox_status, OX_STATUS_ERROR));
+        if (as_done || ox_done) end_ble_operation();
+    }
     lv_label_set_text_fmt(s_as11_status, "Status: %s%s",
                           services.as11_busy ? "scanning" : as_status,
-                          as11_ble_is_paired() ? "  -  paired" : "");
+                          s_as11_service_ready && as11_ble_is_paired()
+                          ? "  -  paired" : "");
     lv_label_set_text_fmt(s_ox_status, "Status: %s%s",
                           services.ox_busy ? "scanning" : ox_status,
-                          oximeter_is_paired() ? "  -  paired" : "");
-    if (!strcmp(as_status, AS11_STATUS_WAIT_PASSKEY)) {
+                          s_ox_service_ready && oximeter_is_paired()
+                          ? "  -  paired" : "");
+    bool waiting_passkey = !strcmp(as_status, AS11_STATUS_WAIT_PASSKEY);
+    if (waiting_passkey) {
         lv_obj_set_style_border_color(s_passkey, lv_color_hex(0x43d7e8), 0);
         lv_obj_set_style_border_width(s_passkey, 2, 0);
     } else {
         lv_obj_set_style_border_width(s_passkey, 1, 0);
     }
+    if (waiting_passkey) {
+        lv_obj_clear_state(s_passkey, LV_STATE_DISABLED);
+        lv_obj_clear_state(s_passkey_confirm_button, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_passkey, LV_STATE_DISABLED);
+        lv_obj_add_state(s_passkey_confirm_button, LV_STATE_DISABLED);
+    }
+    if (ble_operation == BLE_UI_IDLE)
+        lv_obj_clear_state(s_as11_pair_button, LV_STATE_DISABLED);
+    else
+        lv_obj_add_state(s_as11_pair_button, LV_STATE_DISABLED);
 
     netprov_link_t link;
     netprov_get_link(&link);
@@ -1318,10 +1574,37 @@ static void refresh_secondary_pages(const ui_state_t *state)
 
 static void update_ui(void)
 {
+    static TickType_t last_text_update;
+    static unsigned seen_flow_version;
     ui_state_t state;
+    bool therapy_command_busy;
+    bool therapy_command_target;
     portENTER_CRITICAL(&s_state_lock);
+    if (s_state.notice_expires_us > 0 &&
+        esp_timer_get_time() >= s_state.notice_expires_us) {
+        s_state.notice[0] = '\0';
+        s_state.notice_expires_us = 0;
+        s_state.notice_critical = false;
+    }
     state = s_state;
+    therapy_command_busy = s_therapy_command_busy;
+    therapy_command_target = s_therapy_command_target;
     portEXIT_CRITICAL(&s_state_lock);
+
+    int active_tab = s_tabview ? lv_tabview_get_tab_act(s_tabview) : 0;
+    if (active_tab == 0 && state.flow_version != seen_flow_version) {
+        seen_flow_version = state.flow_version;
+        for (unsigned i = 0; i < FLOW_POINTS; ++i) {
+            unsigned source = (state.flow_head + i) % FLOW_POINTS;
+            s_flow_series->y_points[i] = state.flow[source];
+        }
+        lv_chart_refresh(s_chart);
+    }
+    if (active_tab == 1) refresh_history_widgets();
+
+    TickType_t now_ticks = xTaskGetTickCount();
+    if (now_ticks - last_text_update < pdMS_TO_TICKS(500)) return;
+    last_text_update = now_ticks;
 
     /* Keep the product title stable and use the centered attention card for
      * setup/warning/error headings. The title remains a predictable target
@@ -1343,7 +1626,11 @@ static void update_ui(void)
     lv_obj_set_style_text_color(s_therapy_label,
                                 lv_color_hex(state.therapy ? 0x43d7e8 : 0xe7edf7), 0);
     lv_label_set_text(s_therapy_button_label,
-                      state.therapy ? "Stop therapy" : "Start therapy");
+                      therapy_command_busy
+                      ? (therapy_command_target ? "Starting..." : "Stopping...")
+                      : (state.therapy ? "Stop therapy" : "Start therapy"));
+    if (therapy_command_busy) lv_obj_add_state(s_therapy_button, LV_STATE_DISABLED);
+    else lv_obj_clear_state(s_therapy_button, LV_STATE_DISABLED);
     if (isfinite(state.leak)) lv_label_set_text_fmt(s_leak_label, "%.1f L/min", state.leak);
     else lv_label_set_text(s_leak_label, "-- L/min");
     if (isfinite(state.pressure)) lv_label_set_text_fmt(s_pressure_label, "%.1f cmH2O", state.pressure);
@@ -1363,13 +1650,7 @@ static void update_ui(void)
                           (long long)((elapsed / 60) % 60),
                           (long long)(elapsed % 60));
 
-    for (unsigned i = 0; i < FLOW_POINTS; ++i) {
-        unsigned source = (state.flow_head + i) % FLOW_POINTS;
-        s_flow_series->y_points[i] = state.flow[source];
-    }
-    lv_chart_refresh(s_chart);
-    refresh_history_widgets();
-    refresh_secondary_pages(&state);
+    if (active_tab >= 2) refresh_secondary_pages(&state, active_tab);
 
     if (state.notice[0]) {
         lv_label_set_text(s_notice_label, state.notice);
@@ -1498,10 +1779,12 @@ void bsp_display_set_setup_callback(void (*callback)(void))
     s_setup_callback = callback;
 }
 
-void bsp_display_enable_touch_services(void)
+void bsp_display_enable_touch_services(bool as11_ready, bool oximeter_ready)
 {
     portENTER_CRITICAL(&s_state_lock);
     s_touch_services_ready = true;
+    s_as11_service_ready = as11_ready;
+    s_ox_service_ready = oximeter_ready;
     portEXIT_CRITICAL(&s_state_lock);
 }
 
@@ -1540,7 +1823,23 @@ void bsp_display_show_lines(const char *title, const char *const *lines, int n_l
 void bsp_display_set_notice(const char *text)
 {
     portENTER_CRITICAL(&s_state_lock);
+    if (!text || !text[0]) {
+        s_state.notice[0] = '\0';
+        s_state.notice_expires_us = 0;
+        s_state.notice_critical = false;
+    } else if (!s_state.notice_critical) {
+        snprintf(s_state.notice, sizeof(s_state.notice), "%s", text);
+        s_state.notice_expires_us = esp_timer_get_time() + 8000000;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+void bsp_display_set_critical_notice(const char *text)
+{
+    portENTER_CRITICAL(&s_state_lock);
     snprintf(s_state.notice, sizeof(s_state.notice), "%s", text ? text : "");
+    s_state.notice_expires_us = 0;
+    s_state.notice_critical = text && text[0];
     portEXIT_CRITICAL(&s_state_lock);
 }
 
@@ -1590,6 +1889,7 @@ void bsp_display_push_flow(float flow_lpm)
     portENTER_CRITICAL(&s_state_lock);
     s_state.flow[s_state.flow_head] = (int16_t)value;
     s_state.flow_head = (s_state.flow_head + 1) % FLOW_POINTS;
+    s_state.flow_version++;
     portEXIT_CRITICAL(&s_state_lock);
 }
 
@@ -1651,6 +1951,17 @@ void bsp_display_set_brightness(uint8_t tenth_percent)
 
 void bsp_display_set_backlight(bool on)
 {
+    if (lock_lvgl(pdMS_TO_TICKS(100))) {
+        if (s_wake_overlay) {
+            if (on) {
+                lv_obj_add_flag(s_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_clear_flag(s_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_move_foreground(s_wake_overlay);
+            }
+        }
+        unlock_lvgl();
+    }
     portENTER_CRITICAL(&s_state_lock);
     s_backlight = on;
     uint8_t brightness = s_brightness;

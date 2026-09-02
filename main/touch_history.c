@@ -2,6 +2,7 @@
 #include "touch_history.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,10 +46,12 @@ static int session_count(const char *day)
     return count;
 }
 
-static float json_number(cJSON *object, const char *key, float fallback)
+static bool json_number(cJSON *object, const char *key, float *out)
 {
     cJSON *value = cJSON_GetObjectItemCaseSensitive(object, key);
-    return cJSON_IsNumber(value) ? (float)value->valuedouble : fallback;
+    if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble)) return false;
+    *out = (float)value->valuedouble;
+    return true;
 }
 
 esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
@@ -56,8 +59,15 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
 {
     if (!days || !count || capacity == 0) return ESP_ERR_INVALID_ARG;
     *count = 0;
+    if (!sd_storage_is_ready()) return ESP_ERR_NOT_FOUND;
+    if (sd_storage_recording_active()) return ESP_ERR_INVALID_STATE;
+    if (!sd_storage_lease_acquire(SD_LEASE_UPLOAD, 250)) return ESP_ERR_TIMEOUT;
+
     DIR *dir = opendir(SD_STREAMS_DIR);
-    if (!dir) return ESP_ERR_NOT_FOUND;
+    if (!dir) {
+        sd_storage_lease_release(SD_LEASE_UPLOAD);
+        return ESP_ERR_NOT_FOUND;
+    }
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -90,17 +100,20 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
         cJSON *root = cJSON_Parse(json);
         free(json);
         if (!root) continue;
-        days[i].sessions = (int)json_number(root, "sessions", days[i].sessions);
-        days[i].usage_min = (int)json_number(root, "usage_min", 0);
-        days[i].ahi = json_number(root, "ahi", 0.0f);
+        float number = 0.0f;
+        if (json_number(root, "sessions", &number)) days[i].sessions = (int)number;
+        days[i].has_usage = json_number(root, "usage_min", &number);
+        if (days[i].has_usage) days[i].usage_min = (int)number;
+        days[i].has_ahi = json_number(root, "ahi", &days[i].ahi);
         cJSON *pressure = cJSON_GetObjectItemCaseSensitive(root, "pressure");
         cJSON *leak = cJSON_GetObjectItemCaseSensitive(root, "leak");
-        days[i].pressure_p95 = cJSON_IsObject(pressure)
-                                ? json_number(pressure, "p95", 0.0f) : 0.0f;
-        days[i].leak_p95 = cJSON_IsObject(leak)
-                            ? json_number(leak, "p95", 0.0f) : 0.0f;
+        days[i].has_pressure_p95 = cJSON_IsObject(pressure) &&
+                                   json_number(pressure, "p95", &days[i].pressure_p95);
+        days[i].has_leak_p95 = cJSON_IsObject(leak) &&
+                               json_number(leak, "p95", &days[i].leak_p95);
         days[i].has_summary = true;
         cJSON_Delete(root);
     }
+    sd_storage_lease_release(SD_LEASE_UPLOAD);
     return ESP_OK;
 }

@@ -13,6 +13,10 @@ typedef struct {
     float pressure_p95;
     float leak_p95;
     bool has_summary;
+    bool has_usage;
+    bool has_ahi;
+    bool has_pressure_p95;
+    bool has_leak_p95;
 } touch_history_day_t;
 
 /* Returns newest days first. Safe to call from a worker task. */

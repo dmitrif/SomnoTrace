@@ -832,9 +832,11 @@ void bsp_display_set_setup_callback(void (*callback)(void))
     (void)s_setup_callback;
 }
 
-void bsp_display_enable_touch_services(void)
+void bsp_display_enable_touch_services(bool as11_ready, bool oximeter_ready)
 {
     /* The compact non-touch target has no local service controls. */
+    (void)as11_ready;
+    (void)oximeter_ready;
 }
 
 void bsp_display_set_wifi_connected(bool connected)
@@ -1498,6 +1500,11 @@ void bsp_display_set_notice(const char *text)
     s_status_dirty = true;
     xSemaphoreGive(s_state_mutex);
     if (s_display_task) xTaskNotifyGive(s_display_task);
+}
+
+void bsp_display_set_critical_notice(const char *text)
+{
+    bsp_display_set_notice(text);
 }
 
 /* The single owner of the framebuffer and LCD panel. Renders the current

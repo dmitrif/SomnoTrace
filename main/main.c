@@ -69,18 +69,26 @@ static void show_status(const char *title, const char *lines[], int n)
     }
 }
 
-static void enter_softap(const struct netprov_config *cfg)
+static bool enter_softap(const struct netprov_config *cfg)
 {
-    as11_ble_disconnect();
-    bsp_display_set_wifi_connected(false);
-    bsp_display_apply_backlight_policy(true);  /* always show display in AP mode */
+    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
+        ESP_LOGW(TAG, "refusing SoftAP transition while therapy is recording");
+        bsp_display_set_notice("Stop therapy before starting Wi-Fi setup");
+        return false;
+    }
+
     char ap_ip[16] = "0.0.0.0";
     esp_err_t err = netprov_start_portal(cfg, ap_ip);
     if (err != ESP_OK) {
         const char *lines[] = { "SoftAP failed" };
         show_status("Error", lines, 1);
-        return;
+        return false;
     }
+
+    /* Only drop the CPAP link after the setup network is known to be live. */
+    as11_ble_disconnect();
+    bsp_display_set_wifi_connected(false);
+    bsp_display_apply_backlight_policy(true);  /* always show display in AP mode */
 
     char ssid_line[48];
     snprintf(ssid_line, sizeof(ssid_line), "SSID: %s-setup", cfg->hostname);
@@ -91,6 +99,7 @@ static void enter_softap(const struct netprov_config *cfg)
         "Connect and configure",
     };
     show_status("Setup", lines, 4);
+    return true;
 }
 
 void app_main(void)
@@ -198,7 +207,8 @@ void app_main(void)
 
     /* 4c. Initialise BLE (AirSense 11 pairing). Non-fatal on failure.
      * Runs after storage init + crash recovery (see 4b). */
-    if (as11_ble_init() != ESP_OK) {
+    bool as11_ready = as11_ble_init() == ESP_OK;
+    if (!as11_ready) {
         ESP_LOGE(TAG, "BLE init failed; CPAP pairing unavailable");
     }
     ESP_LOGI(TAG, "[heap] after BLE init: internal free=%u min=%u",
@@ -206,11 +216,12 @@ void app_main(void)
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
 
     /* 4c-ter. Initialise O2 Ring oximeter (shares NimBLE host with AS11). */
-    if (oximeter_init() != ESP_OK) {
+    bool oximeter_ready = oximeter_init() == ESP_OK;
+    if (!oximeter_ready) {
         ESP_LOGE(TAG, "Oximeter init failed; O2 Ring sync unavailable");
     }
     /* Native touch controls can now safely query BLE driver state. */
-    bsp_display_enable_touch_services();
+    bsp_display_enable_touch_services(as11_ready, oximeter_ready);
 
     /* 4c-bis. BLE startup has begun, so reconnect can now establish whether
      * therapy is already running.  Only now is it safe to let the idle post
@@ -237,7 +248,10 @@ void app_main(void)
     /* 6. If BOOT was held at boot, force SoftAP regardless. */
     if (s_softap_requested) {
         ESP_LOGW(TAG, "BOOT long-press detected: forcing SoftAP");
-        enter_softap(&cfg);
+        while (!enter_softap(&cfg)) {
+            ESP_LOGW(TAG, "SoftAP start failed; retrying in 5 seconds");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
@@ -352,9 +366,10 @@ void app_main(void)
                     nvs_close(nvs_h);
                 }
                 nvs_writer_unlock();
-                enter_softap(&cfg);
-                in_softap = true;
-                softap_start_ticks = xTaskGetTickCount();
+                if (enter_softap(&cfg)) {
+                    in_softap = true;
+                    softap_start_ticks = xTaskGetTickCount();
+                }
             } else {
                 ESP_LOGE(TAG, "No time source (attempt %d/3) — alarm + reboot",
                          boot_fail_count);
@@ -375,9 +390,8 @@ void app_main(void)
 
                 if (s_softap_requested) {
                     ESP_LOGW(TAG, "BOOT pressed during alarm: entering SoftAP");
-                    enter_softap(&cfg);
-                    while (true) {
-                        vTaskDelay(pdMS_TO_TICKS(1000));
+                    if (enter_softap(&cfg)) {
+                        while (true) vTaskDelay(pdMS_TO_TICKS(1000));
                     }
                 }
 
@@ -472,9 +486,10 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1000));
         if (s_softap_requested && !in_softap) {
             ESP_LOGW(TAG, "BOOT long-press detected at runtime: entering SoftAP");
-            in_softap = true;
-            enter_softap(&cfg);
-            softap_start_ticks = xTaskGetTickCount();
+            if (enter_softap(&cfg)) {
+                in_softap = true;
+                softap_start_ticks = xTaskGetTickCount();
+            }
         }
         if (in_softap) {
             /* SoftAP idle timeout */
