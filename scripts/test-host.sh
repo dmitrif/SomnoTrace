@@ -28,4 +28,5 @@ cc -std=c11 -Wall -Wextra -D_DARWIN_C_SOURCE \
 "${TEST_DIR}/as11_time_test"
 
 python3 scripts/waveshare_7b_contract_test.py
+python3 scripts/qemu_ui_contract_test.py
 echo "All synthetic host tests passed"

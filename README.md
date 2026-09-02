@@ -174,6 +174,20 @@ Access the built-in web portal from any device on your Wi-Fi network without ins
 
 ## Quick Start & Installation
 
+### Preview the 7-inch UI on macOS
+
+The Waveshare ESP32-S3-Touch-LCD-7B port includes a native 1024x600 QEMU
+preview with deterministic therapy, history and device data. It automatically
+cycles through the five touchscreen pages; Bluetooth, touch and SD hardware
+remain board-only tests.
+
+```sh
+./scripts/run-qemu-ui.sh --build
+```
+
+See [the QEMU UI preview guide](docs/qemu-ui.md) for setup details and the
+headless smoke-test command.
+
 ### Option 1: Web Browser Flashing (Recommended — 2 Minutes)
 
 You do **not** need to install any programming tools or compilers. You can flash SomnoTrace directly from **Google Chrome** or **Microsoft Edge**:
