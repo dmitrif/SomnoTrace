@@ -29,4 +29,3 @@ esp_err_t bsp_audio_test_beep(void)
              (unsigned)s_volume);
     return ESP_ERR_NOT_SUPPORTED;
 }
-
