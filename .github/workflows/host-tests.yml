@@ -1,0 +1,17 @@
+name: Host tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run protocol and Waveshare 7B contracts
+        run: ./scripts/test-host.sh

@@ -1,5 +1,12 @@
 # Third-Party Notices
 
+## Waveshare ESP32-S3-Touch-LCD-7B examples
+
+The 7B board profile's RGB timing, pin mapping, and CH422G assignments are
+derived from Waveshare's ESP32-S3-Touch-LCD-7B ESP-IDF examples, licensed under
+the Apache License 2.0. Source:
+<https://github.com/waveshareteam/ESP32-S3-Touch-LCD-7B>
+
 SomnoTrace is an independent, clean-room implementation. It does **not** copy
 source code from the projects listed below. Those projects were used only as
 **reference material** to understand reverse-engineered device and

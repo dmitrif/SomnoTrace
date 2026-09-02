@@ -29,6 +29,10 @@
 #include "esp_err.h"
 
 esp_err_t bsp_display_init(void);
+/* Optional board UI hook used by touch-capable targets to request Wi-Fi setup. */
+void bsp_display_set_setup_callback(void (*callback)(void));
+/* Called once networking/NVS and both BLE services have completed init. */
+void bsp_display_enable_touch_services(void);
 void bsp_display_show_number(uint32_t value);
 void bsp_display_show_lines(const char *title, const char *const *lines, int n_lines);
 
@@ -38,12 +42,16 @@ void bsp_display_show_lines(const char *title, const char *const *lines, int n_l
 void bsp_display_set_notice(const char *text);
 void bsp_display_set_wifi_connected(bool connected);
 void bsp_display_set_as11_paired(bool paired);
+void bsp_display_set_sd_ready(bool ready);
 void bsp_display_set_battery(int percent, bool charging);
 
 /* Therapy graph mode */
 void bsp_display_set_therapy_active(bool active);
 void bsp_display_push_flow(float flow_lpm);
 void bsp_display_push_leak(float leak_lpm);
+/* Live two-second metrics. Pass NAN for an unavailable value. */
+void bsp_display_push_metrics(float pressure_cmh2o, float respiratory_rate,
+                              float flow_limitation);
 void bsp_display_set_therapy_start_time(int64_t start_us);
 bool bsp_display_is_therapy_active(void);
 

@@ -75,6 +75,7 @@ static bool s_backlight_on = true;  /* backlight hardware state */
 static bool s_backlight_force_on = false;  /* SoftAP/portal: keep backlight on */
 
 static const char *TAG = "bsp_display";
+static void (*s_setup_callback)(void) = NULL;
 
 /* Forward declarations */
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b);
@@ -275,6 +276,14 @@ void bsp_display_push_leak(float leak_lpm)
     xSemaphoreGive(s_state_mutex);
     if (s_mode == DISP_MODE_INFO && s_display_task)
         xTaskNotifyGive(s_display_task);
+}
+
+void bsp_display_push_metrics(float pressure_cmh2o, float respiratory_rate,
+                              float flow_limitation)
+{
+    (void)pressure_cmh2o;
+    (void)respiratory_rate;
+    (void)flow_limitation;
 }
 
 void bsp_display_set_therapy_start_time(int64_t start_us)
@@ -815,6 +824,19 @@ esp_err_t bsp_display_init(void)
     return ESP_OK;
 }
 
+void bsp_display_set_setup_callback(void (*callback)(void))
+{
+    /* The 1.54-inch target enters setup with its physical BOOT button. Keep
+     * the hook for a uniform BSP contract and future touch revisions. */
+    s_setup_callback = callback;
+    (void)s_setup_callback;
+}
+
+void bsp_display_enable_touch_services(void)
+{
+    /* The compact non-touch target has no local service controls. */
+}
+
 void bsp_display_set_wifi_connected(bool connected)
 {
     if (!s_state_mutex) {
@@ -839,6 +861,11 @@ void bsp_display_set_as11_paired(bool paired)
     s_status_dirty = true;
     xSemaphoreGive(s_state_mutex);
     if (s_display_task) xTaskNotifyGive(s_display_task);
+}
+
+void bsp_display_set_sd_ready(bool ready)
+{
+    (void)ready;
 }
 
 void bsp_display_set_battery(int percent, bool charging)

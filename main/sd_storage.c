@@ -37,6 +37,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "bsp_display.h"
+#include "sdkconfig.h"
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+#include "board_waveshare_7b.h"
+#endif
 
 static const char *TAG = "sd_storage";
 
@@ -85,6 +89,17 @@ static void sdmmc_config_default(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
     *host = h;
 
     sdmmc_slot_config_t s = SDMMC_SLOT_CONFIG_DEFAULT();
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+    /* The 7B routes its TF socket as one-bit SD: CLK=12, CMD=11, D0=13.
+     * DAT3/CS is held high by EXIO4 on the CH422G expander. */
+    s.clk   = GPIO_NUM_12;
+    s.cmd   = GPIO_NUM_11;
+    s.d0    = GPIO_NUM_13;
+    s.d1    = GPIO_NUM_NC;
+    s.d2    = GPIO_NUM_NC;
+    s.d3    = GPIO_NUM_NC;
+    s.width = 1;
+#else
     s.clk   = GPIO_NUM_16;
     s.cmd   = GPIO_NUM_15;
     s.d0    = GPIO_NUM_17;
@@ -92,6 +107,7 @@ static void sdmmc_config_default(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
     s.d2    = GPIO_NUM_13;
     s.d3    = GPIO_NUM_14;
     s.width = 4;
+#endif
     /* Internal pull-ups are often too weak for SD cards.
      * The Waveshare board should have external pull-ups on the SD lines. */
     s.flags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
@@ -100,7 +116,17 @@ static void sdmmc_config_default(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
 
 esp_err_t sd_storage_init(void)
 {
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+    esp_err_t prep = waveshare_7b_prepare_sd();
+    if (prep != ESP_OK) {
+        ESP_LOGE(TAG, "failed to enable 7B TF interface: %s", esp_err_to_name(prep));
+        bsp_display_set_sd_ready(false);
+        return prep;
+    }
+    ESP_LOGI(TAG, "initialising onboard TF card in SDMMC 1-bit mode...");
+#else
     ESP_LOGI(TAG, "initialising SDMMC 4-bit mode...");
+#endif
 
     sdmmc_host_t host;
     sdmmc_slot_config_t slot_config;
@@ -115,7 +141,7 @@ esp_err_t sd_storage_init(void)
     sdmmc_card_t *card;
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot_config,
                                              &mount_config, &card);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK && slot_config.width != 1) {
         ESP_LOGW(TAG, "4-bit mount failed (%s), trying 1-bit mode", esp_err_to_name(ret));
         slot_config.width = 1;
         ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot_config,
@@ -123,12 +149,18 @@ esp_err_t sd_storage_init(void)
     }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "failed to mount SD card: %s (0x%x)", esp_err_to_name(ret), ret);
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+        ESP_LOGE(TAG, "check: TF card inserted and FAT32; CLK=12 CMD=11 D0=13");
+#else
         ESP_LOGE(TAG, "check: SD card inserted? pull-ups? GPIO pins 13-18?");
+#endif
+        bsp_display_set_sd_ready(false);
         return ret;
     }
 
     s_mounted = true;
     s_card = card;
+    bsp_display_set_sd_ready(true);
     lease_init_once();
 
     sdmmc_card_print_info(stdout, card);
@@ -395,6 +427,7 @@ esp_err_t sd_storage_format(void)
         ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot, &cfg, &card);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "format: mount+format failed: %s", esp_err_to_name(ret));
+            bsp_display_set_sd_ready(false);
             return ret;
         }
         s_card    = card;
@@ -415,6 +448,7 @@ esp_err_t sd_storage_format(void)
     mkdir(SD_SDCARD_SETTINGS, 0775);
 
     ESP_LOGI(TAG, "format: SD card formatted and directory tree recreated");
+    bsp_display_set_sd_ready(true);
     return ESP_OK;
 }
 
@@ -433,4 +467,5 @@ void sd_storage_deinit(void)
 
     s_mounted = false;
     s_card = NULL;
+    bsp_display_set_sd_ready(false);
 }

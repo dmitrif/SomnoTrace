@@ -1,0 +1,106 @@
+/* SD history adapter for the Waveshare native UI. */
+#include "touch_history.h"
+
+#include <dirent.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "cJSON.h"
+#include "edf_gen.h"
+#include "sd_storage.h"
+
+static bool valid_day(const char *name)
+{
+    if (!name || strlen(name) != 8) return false;
+    for (int i = 0; i < 8; ++i) {
+        if (name[i] < '0' || name[i] > '9') return false;
+    }
+    return true;
+}
+
+static int newest_first(const void *a, const void *b)
+{
+    const touch_history_day_t *da = a;
+    const touch_history_day_t *db = b;
+    return strcmp(db->day, da->day);
+}
+
+static int session_count(const char *day)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s", SD_STREAMS_DIR, day);
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+    const char *suffix = "_session.json";
+    const size_t suffix_len = strlen(suffix);
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        size_t len = strlen(entry->d_name);
+        if (len > suffix_len &&
+            strcmp(entry->d_name + len - suffix_len, suffix) == 0) count++;
+    }
+    closedir(dir);
+    return count;
+}
+
+static float json_number(cJSON *object, const char *key, float fallback)
+{
+    cJSON *value = cJSON_GetObjectItemCaseSensitive(object, key);
+    return cJSON_IsNumber(value) ? (float)value->valuedouble : fallback;
+}
+
+esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
+                             size_t *count)
+{
+    if (!days || !count || capacity == 0) return ESP_ERR_INVALID_ARG;
+    *count = 0;
+    DIR *dir = opendir(SD_STREAMS_DIR);
+    if (!dir) return ESP_ERR_NOT_FOUND;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (!valid_day(entry->d_name)) continue;
+        int sessions = session_count(entry->d_name);
+        if (sessions == 0) continue;
+        size_t slot;
+        if (*count < capacity) {
+            slot = (*count)++;
+        } else {
+            /* Directory iteration is not chronological. Keep the newest N
+             * entries even when the card contains years of history. */
+            slot = 0;
+            for (size_t i = 1; i < capacity; ++i) {
+                if (strcmp(days[i].day, days[slot].day) < 0) slot = i;
+            }
+            if (strcmp(entry->d_name, days[slot].day) <= 0) continue;
+        }
+        touch_history_day_t *day = &days[slot];
+        memset(day, 0, sizeof(*day));
+        strlcpy(day->day, entry->d_name, sizeof(day->day));
+        day->sessions = sessions;
+    }
+    closedir(dir);
+    qsort(days, *count, sizeof(*days), newest_first);
+
+    for (size_t i = 0; i < *count; ++i) {
+        char *json = NULL;
+        if (edf_gen_summary_json(days[i].day, &json) != ESP_OK || !json) continue;
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (!root) continue;
+        days[i].sessions = (int)json_number(root, "sessions", days[i].sessions);
+        days[i].usage_min = (int)json_number(root, "usage_min", 0);
+        days[i].ahi = json_number(root, "ahi", 0.0f);
+        cJSON *pressure = cJSON_GetObjectItemCaseSensitive(root, "pressure");
+        cJSON *leak = cJSON_GetObjectItemCaseSensitive(root, "leak");
+        days[i].pressure_p95 = cJSON_IsObject(pressure)
+                                ? json_number(pressure, "p95", 0.0f) : 0.0f;
+        days[i].leak_p95 = cJSON_IsObject(leak)
+                            ? json_number(leak, "p95", 0.0f) : 0.0f;
+        days[i].has_summary = true;
+        cJSON_Delete(root);
+    }
+    return ESP_OK;
+}

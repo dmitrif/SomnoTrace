@@ -66,9 +66,16 @@ else
     set -- idf.py "$@"
 fi
 
-exec docker run --rm \
-    "${TTY_ARGS[@]}" \
-    "${DEVICE_ARGS[@]}" \
+DOCKER_ARGS=(--rm)
+if [ "${#TTY_ARGS[@]}" -gt 0 ]; then
+    DOCKER_ARGS+=("${TTY_ARGS[@]}")
+fi
+if [ "${#DEVICE_ARGS[@]}" -gt 0 ]; then
+    DOCKER_ARGS+=("${DEVICE_ARGS[@]}")
+fi
+
+exec docker run \
+    "${DOCKER_ARGS[@]}" \
     -v "${PROJECT_DIR}:/project" \
     -w /project \
     "$IMAGE" \

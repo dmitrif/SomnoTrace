@@ -2079,6 +2079,18 @@ void session_writer_on_stream_data_raw(const char *json, int len)
     if (pld_found[3] && pld_vals[3] >= 0)
         bsp_display_push_leak(pld_vals[3] * 0.6f);
 
+    float live_pressure = NAN;
+    if (pld_found[1] && pld_vals[1] >= 0) {
+        live_pressure = pld_vals[1] * 0.01f;
+    } else if (press_n > 0 && press_vals[press_n - 1] >= 0) {
+        live_pressure = press_vals[press_n - 1] * 0.01f;
+    }
+    float live_rr = (pld_found[4] && pld_vals[4] >= 0)
+                        ? pld_vals[4] * 0.01f : NAN;
+    float live_flow_lim = (pld_found[10] && pld_vals[10] >= 0)
+                              ? pld_vals[10] * 0.01f : NAN;
+    bsp_display_push_metrics(live_pressure, live_rr, live_flow_lim);
+
     bool has_therapy_pressure = false;
     for (int j = 0; j < press_n; j++) {
         if (press_vals[j] > 200) has_therapy_pressure = true;

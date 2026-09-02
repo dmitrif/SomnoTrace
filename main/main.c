@@ -50,10 +50,16 @@
 #include "crash_diag.h"
 #include "therapy_alert.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 
 static const char *TAG = "somnotrace";
 static volatile bool s_softap_requested = false;
+
+static void request_softap_from_display(void)
+{
+    s_softap_requested = true;
+}
 
 static void show_status(const char *title, const char *lines[], int n)
 {
@@ -113,6 +119,7 @@ void app_main(void)
     if (bsp_display_init() != ESP_OK) {
         ESP_LOGE(TAG, "display init failed");
     }
+    bsp_display_set_setup_callback(request_softap_from_display);
 
     const char *boot_lines[] = { "Booting..." };
     show_status("SomnoTrace", boot_lines, 1);
@@ -202,6 +209,8 @@ void app_main(void)
     if (oximeter_init() != ESP_OK) {
         ESP_LOGE(TAG, "Oximeter init failed; O2 Ring sync unavailable");
     }
+    /* Native touch controls can now safely query BLE driver state. */
+    bsp_display_enable_touch_services();
 
     /* 4c-bis. BLE startup has begun, so reconnect can now establish whether
      * therapy is already running.  Only now is it safe to let the idle post
@@ -217,6 +226,13 @@ void app_main(void)
     /* 5. Load config from NVS. */
     struct netprov_config cfg;
     bool has_creds = netprov_load_config(&cfg);
+
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+    /* The 7B's BOOT pin becomes an RGB data line after startup. On a fresh
+     * device, open the setup portal immediately instead of requiring a button
+     * hold or three failed reboot cycles. */
+    if (!has_creds) s_softap_requested = true;
+#endif
 
     /* 6. If BOOT was held at boot, force SoftAP regardless. */
     if (s_softap_requested) {

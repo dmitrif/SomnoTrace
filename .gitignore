@@ -1,7 +1,10 @@
 # --- ESP-IDF build output ---
 /build/
+/build-*/
 sdkconfig
 sdkconfig.old
+/sdkconfig.*
+!/sdkconfig.*.defaults
 
 # --- Build artifacts / flashable images ---
 /dist/

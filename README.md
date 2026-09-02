@@ -200,6 +200,14 @@ If you prefer building from source code, Docker is the only dependency:
 ./scripts/idf.sh -p /dev/ttyACM0 flash monitor
 ```
 
+For the experimental **Waveshare ESP32-S3-Touch-LCD-7B (1024x600)** profile,
+use `./scripts/build-7b.sh` and follow the
+[7B bring-up and test guide](docs/hardware/waveshare-7b.md). This profile uses
+the whole landscape display for a five-page touch application: Live, History,
+Devices, Settings, and System. AirSense/O2 pairing and everyday display
+settings—including initial Wi-Fi credentials—work locally; the web UI remains
+available for detailed graphs and advanced administration.
+
 ---
 
 ## Advanced Features & Documentation
@@ -209,6 +217,7 @@ If you prefer building from source code, Docker is the only dependency:
 - ⚡ **[ResMed BLE RPC Bridge Guide](docs/rpc-bridge.md)** — Send direct queries and commands (`curl` examples) to the AirSense 11 over Wi-Fi.
 - 🏠 **[Smart Home & Home Assistant Guide](docs/automations.md)** — Set up bedtime automations, compliance tracking, and mask-off alerts.
 - 🛠️ **[Hardware Reference](docs/hardware/README.md)** — Pinouts, schematics, and hardware architecture.
+- 🖥️ **[Waveshare 7B Port](docs/hardware/waveshare-7b.md)** — Build, flash, and first-hardware acceptance test for the 1024x600 touch board.
 
 <details>
 <summary><b>📁 Accessing Files via FTP</b></summary>
