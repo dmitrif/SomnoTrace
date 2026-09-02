@@ -546,11 +546,18 @@ static void device_action_cb(lv_event_t *event)
         bsp_display_set_notice("Stop therapy before changing paired devices");
         return;
     }
+    if (action == DEVICE_CONFIRM_AS11 &&
+        strcmp(as11_ble_get_status(), AS11_STATUS_WAIT_PASSKEY) != 0) {
+        bsp_display_set_notice("AirSense is not waiting for a passkey");
+        return;
+    }
     ble_ui_operation_t operation =
         action == DEVICE_PAIR_AS11 || action == DEVICE_CONFIRM_AS11 ? BLE_UI_PAIR_AS11 :
         action == DEVICE_PAIR_OX ? BLE_UI_PAIR_OX : BLE_UI_FORGET;
+    portENTER_CRITICAL(&s_state_lock);
     bool continuing_passkey = action == DEVICE_CONFIRM_AS11 &&
                               s_ble_operation == BLE_UI_PAIR_AS11;
+    portEXIT_CRITICAL(&s_state_lock);
     if (!continuing_passkey && !begin_ble_operation(operation)) {
         bsp_display_set_notice("Another Bluetooth action is already running");
         return;
@@ -629,12 +636,18 @@ static void forget_dialog_cb(lv_event_t *event)
 
 static void forget_prompt_cb(lv_event_t *event)
 {
+    device_action_t action = (device_action_t)(intptr_t)lv_event_get_user_data(event);
+    bool oxygen = action == DEVICE_FORGET_OX;
+    if (!s_touch_services_ready || (oxygen ? !s_ox_service_ready
+                                          : !s_as11_service_ready)) {
+        bsp_display_set_notice("Pairing service is unavailable");
+        return;
+    }
     if (bsp_display_is_therapy_active()) {
         bsp_display_set_notice("Stop therapy before forgetting a device");
         return;
     }
     static const char *buttons[] = { "Cancel", "Forget", "" };
-    device_action_t action = (device_action_t)(intptr_t)lv_event_get_user_data(event);
     const char *device = action == DEVICE_FORGET_AS11 ? "AirSense 11" : "O2 ring";
     char question[128];
     snprintf(question, sizeof(question),
@@ -1159,6 +1172,8 @@ static void build_ui(void)
                                                   "Confirm code", 0x6652a3,
                                                   device_action_cb,
                                                   DEVICE_CONFIRM_AS11);
+    lv_obj_add_state(s_passkey, LV_STATE_DISABLED);
+    lv_obj_add_state(s_passkey_confirm_button, LV_STATE_DISABLED);
 
     lv_obj_t *ox_card = make_card(s_pages[2], 516, 12, 492, 440);
     make_section_title(ox_card, "O2 ring", 0, 0);
@@ -1579,6 +1594,7 @@ static void update_ui(void)
     ui_state_t state;
     bool therapy_command_busy;
     bool therapy_command_target;
+    bool backlight;
     portENTER_CRITICAL(&s_state_lock);
     if (s_state.notice_expires_us > 0 &&
         esp_timer_get_time() >= s_state.notice_expires_us) {
@@ -1589,7 +1605,12 @@ static void update_ui(void)
     state = s_state;
     therapy_command_busy = s_therapy_command_busy;
     therapy_command_target = s_therapy_command_target;
+    backlight = s_backlight;
     portEXIT_CRITICAL(&s_state_lock);
+
+    /* Keep LVGL responsive for the wake overlay but avoid chart/label churn
+     * while the panel is intentionally dark. */
+    if (!backlight) return;
 
     int active_tab = s_tabview ? lv_tabview_get_tab_act(s_tabview) : 0;
     if (active_tab == 0 && state.flow_version != seen_flow_version) {
@@ -1629,8 +1650,10 @@ static void update_ui(void)
                       therapy_command_busy
                       ? (therapy_command_target ? "Starting..." : "Stopping...")
                       : (state.therapy ? "Stop therapy" : "Start therapy"));
-    if (therapy_command_busy) lv_obj_add_state(s_therapy_button, LV_STATE_DISABLED);
-    else lv_obj_clear_state(s_therapy_button, LV_STATE_DISABLED);
+    if (therapy_command_busy || !state.paired)
+        lv_obj_add_state(s_therapy_button, LV_STATE_DISABLED);
+    else
+        lv_obj_clear_state(s_therapy_button, LV_STATE_DISABLED);
     if (isfinite(state.leak)) lv_label_set_text_fmt(s_leak_label, "%.1f L/min", state.leak);
     else lv_label_set_text(s_leak_label, "-- L/min");
     if (isfinite(state.pressure)) lv_label_set_text_fmt(s_pressure_label, "%.1f cmH2O", state.pressure);

@@ -2851,8 +2851,8 @@ esp_err_t as11_ble_spool_pull(const char *spool_type, const char *from_dt,
 cJSON *as11_ble_get_values(const char *const *keys, int n_keys)
 {
     if (!keys || n_keys <= 0) return NULL;
-    if (!s_session_encrypted) {
-        ESP_LOGW(TAG, "get_values: no encrypted session");
+    if (!s_session_encrypted || strcmp(as11_ble_get_status(), AS11_STATUS_PAIRED) != 0) {
+        ESP_LOGW(TAG, "get_values: encrypted session is not ready");
         return NULL;
     }
 
@@ -2920,8 +2920,8 @@ cJSON *as11_ble_get_values(const char *const *keys, int n_keys)
 
 static esp_err_t therapy_command(const char *operation, const char *rpc)
 {
-    if (!s_session_encrypted) {
-        ESP_LOGW(TAG, "%s: no encrypted session", operation);
+    if (!s_session_encrypted || strcmp(as11_ble_get_status(), AS11_STATUS_PAIRED) != 0) {
+        ESP_LOGW(TAG, "%s: encrypted session is not ready", operation);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -2980,8 +2980,8 @@ esp_err_t as11_ble_passthrough_rpc(const char *json_in, char **json_out, uint32_
     if (!json_in || !*json_in || !json_out) return ESP_ERR_INVALID_ARG;
     *json_out = NULL;
 
-    if (!s_session_encrypted) {
-        ESP_LOGW(TAG, "passthrough_rpc: no active encrypted BLE session");
+    if (!s_session_encrypted || strcmp(as11_ble_get_status(), AS11_STATUS_PAIRED) != 0) {
+        ESP_LOGW(TAG, "passthrough_rpc: encrypted BLE session is not ready");
         return ESP_ERR_INVALID_STATE;
     }
 
