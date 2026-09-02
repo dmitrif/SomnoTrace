@@ -16,6 +16,14 @@ EFUSE="${PROJECT_DIR}/build-qemu/qemu_efuse.bin"
 if [ ! -f "${FLASH}" ] || [ ! -f "${EFUSE}" ]; then
     "${SCRIPT_DIR}/build-qemu.sh"
 fi
+if command -v pgrep >/dev/null 2>&1; then
+    RUNNING_QEMU="$(pgrep -f "qemu-system-xtensa.*${FLASH}" || true)"
+    if [ -n "${RUNNING_QEMU}" ]; then
+        echo "SomnoTrace QEMU is already running (PID ${RUNNING_QEMU//$'\n'/, })." >&2
+        echo "Close that window or stop its terminal before starting another." >&2
+        exit 1
+    fi
+fi
 QEMU_BIN="$("${SCRIPT_DIR}/setup-qemu-macos.sh")"
 
 exec "${QEMU_BIN}" \

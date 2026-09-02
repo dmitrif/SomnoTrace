@@ -67,6 +67,7 @@ assert "A_RGB_TOUCH_STATUS" in touch_patch
 assert "s->width * s->height * s->bpp" in touch_patch
 assert "qemu-touch.patch" in setup
 assert "--disable-dbus-display" in setup
+assert "SomnoTrace QEMU is already running" in run
 assert "input-send-event" in touch_smoke
 assert "emulated touch at" in touch_smoke
 for launcher in (run, smoke):
