@@ -79,9 +79,9 @@ def main():
             json.loads(stream.readline())
             qmp_command(stream, "qmp_capabilities")
 
-            # Centre of the History tab in the 1024x600 LVGL tab bar.
+            # Centre of the History tab in the bottom 1024x600 LVGL tab bar.
             x = round(307 * 32767 / 1023)
-            y = round(32 * 32767 / 599)
+            y = round(570 * 32767 / 599)
             qmp_command(stream, "input-send-event", {"events": [
                 {"type": "abs", "data": {"axis": "x", "value": x}},
                 {"type": "abs", "data": {"axis": "y", "value": y}},
@@ -100,7 +100,13 @@ def main():
             })
             print(f"Touch registers after synthetic click: {registers.strip()}")
             observed = wait_for_log(process, serial_log, "emulated touch at", 3)
-            print(f"QEMU touch smoke test passed: {observed}; {registers.strip()}")
+            selected = wait_for_log(
+                process, serial_log, "emulated touch selected tab 1", 3
+            )
+            print(
+                f"QEMU touch smoke test passed: {observed}; {selected}; "
+                f"{registers.strip()}"
+            )
         finally:
             process.terminate()
             try:

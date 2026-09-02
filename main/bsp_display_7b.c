@@ -848,7 +848,11 @@ static void wifi_save_cb(lv_event_t *event)
 static void tabview_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) return;
-    if (lv_tabview_get_tab_act(s_tabview) == 1) start_history_load();
+    uint16_t active_tab = lv_tabview_get_tab_act(s_tabview);
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    ESP_LOGI(TAG, "emulated touch selected tab %u", (unsigned)active_tab);
+#endif
+    if (active_tab == 1) start_history_load();
     if (s_keyboard) {
         lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
         lv_keyboard_set_textarea(s_keyboard, NULL);
