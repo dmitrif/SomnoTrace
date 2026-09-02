@@ -17,7 +17,10 @@ CACHE_BASE="${XDG_CACHE_HOME:-${HOME}/Library/Caches}/SomnoTrace"
 SOURCE_DIR="${CACHE_BASE}/qemu-${RELEASE}-rgb1024-source"
 BUILD_DIR="${SOURCE_DIR}/build-rgb1024-${ARCH}"
 QEMU_BIN="${BUILD_DIR}/qemu-system-xtensa"
-if [ -x "${QEMU_BIN}" ]; then
+PATCH_REVISION="3"
+PATCH_STAMP="${BUILD_DIR}/.somnotrace-patch-revision"
+if [ -x "${QEMU_BIN}" ] && [ -f "${PATCH_STAMP}" ] && \
+        [ "$(<"${PATCH_STAMP}")" = "${PATCH_REVISION}" ]; then
     echo "${QEMU_BIN}"
     exit 0
 fi
@@ -52,6 +55,7 @@ if [ ! -d "${SOURCE_DIR}/.git" ]; then
         exit 1
     fi
     git -C "${TEMP_DIR}/source" apply "${SCRIPT_DIR}/qemu-rgb-1024.patch"
+    git -C "${TEMP_DIR}/source" apply "${SCRIPT_DIR}/qemu-touch.patch"
     mv "${TEMP_DIR}/source" "${SOURCE_DIR}"
 fi
 
@@ -75,6 +79,22 @@ if ! grep -q '^#define ESP_RGB_MAX_WIDTH   (1024)$' \
     exit 1
 fi
 
+if grep -q '"esp-rgb-touch"' "${SOURCE_DIR}/hw/display/esp_rgb.c"; then
+    :
+elif ! git -C "${SOURCE_DIR}" apply --check \
+        "${SCRIPT_DIR}/qemu-touch.patch"; then
+    echo "Cached QEMU source has an unexpected touch patch state" >&2
+    exit 1
+else
+    git -C "${SOURCE_DIR}" apply "${SCRIPT_DIR}/qemu-touch.patch"
+fi
+if ! grep -q '"esp-rgb-touch"' "${SOURCE_DIR}/hw/display/esp_rgb.c" || \
+        ! grep -q 'A_RGB_TOUCH_STATUS' \
+            "${SOURCE_DIR}/include/hw/display/esp_rgb.h"; then
+    echo "Cached QEMU source does not contain the touch patch" >&2
+    exit 1
+fi
+
 mkdir -p "${BUILD_DIR}"
 (
     cd "${BUILD_DIR}"
@@ -88,4 +108,5 @@ mkdir -p "${BUILD_DIR}"
 )
 ninja -C "${BUILD_DIR}" qemu-system-xtensa >&2
 test -x "${QEMU_BIN}"
+printf '%s\n' "${PATCH_REVISION}" > "${PATCH_STAMP}"
 echo "${QEMU_BIN}"

@@ -27,7 +27,9 @@ defaults = source("sdkconfig.qemu.defaults")
 setup = source("scripts/setup-qemu-macos.sh")
 run = source("scripts/run-qemu-ui.sh")
 smoke = source("scripts/test-qemu-ui.sh")
+touch_smoke = source("scripts/test-qemu-touch.py")
 qemu_patch = source("scripts/qemu-rgb-1024.patch")
+touch_patch = source("scripts/qemu-touch.patch")
 
 require(kconfig, r"config SOMNOTRACE_BOARD_QEMU.*?bool \"ESP32-S3 QEMU UI emulator \(1024x600\)\"",
         "selectable QEMU board profile")
@@ -36,13 +38,16 @@ for unit in ("main_qemu.c", "board_qemu.c", "bsp_display_7b.c"):
 assert "espressif/esp_lcd_qemu_rgb" in component
 require(board, r"\.width\s*=\s*WAVESHARE_7B_H_RES", "native panel width")
 require(board, r"\.height\s*=\s*WAVESHARE_7B_V_RES", "native panel height")
+require(board, r"QEMU_RGB_TOUCH_POSITION", "QEMU touch MMIO bridge")
 require(display, r"display_driver\.hor_res\s*=\s*WAVESHARE_7B_H_RES", "LVGL width")
 require(display, r"display_driver\.ver_res\s*=\s*WAVESHARE_7B_V_RES", "LVGL height")
+require(display, r"board_qemu_touch_read", "LVGL QEMU touch reader")
 require(display, r"s_qemu_requested_tab", "display-task-owned tab switching")
 require(demo, r"QEMU preview.*simulated data", "honest simulated-data labeling")
 require(display, r"simulated preview", "honest simulated device status")
 require(demo, r"bsp_display_qemu_seed_demo\(\)", "deterministic histories and devices")
-require(demo, r"\(iteration / 80\) % 5", "all five tabs rotate")
+require(demo, r"click to emulate touch", "interactive touch preview")
+assert "bsp_display_qemu_set_tab(tab)" not in demo
 
 for setting in (
     "CONFIG_SOMNOTRACE_BOARD_QEMU=y",
@@ -57,12 +62,18 @@ for setting in (
 
 assert "40edccac415693c5130f91c01d84176ae6008566" in setup
 assert "ESP_RGB_MAX_WIDTH   (1024)" in qemu_patch
+assert "esp-rgb-touch" in touch_patch
+assert "A_RGB_TOUCH_STATUS" in touch_patch
+assert "s->width * s->height * s->bpp" in touch_patch
+assert "qemu-touch.patch" in setup
 assert "--disable-dbus-display" in setup
+assert "input-send-event" in touch_smoke
+assert "emulated touch at" in touch_smoke
 for launcher in (run, smoke):
     assert "-m 8M" in launcher
     assert "nvram.esp32s3.efuse" in launcher
     assert "timer.esp32s3.timg" in launcher
-assert "-display cocoa,show-cursor=on" in run
+assert "-display sdl,show-cursor=on" in run
 for failure in ("Invalid drawing area", "assert failed", "Guru Meditation Error"):
     assert failure in smoke, f"smoke test does not reject {failure}"
 

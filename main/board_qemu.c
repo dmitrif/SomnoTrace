@@ -1,5 +1,6 @@
 /* ESP32-S3 QEMU virtual panel adapter for the 1024x600 SomnoTrace UI. */
 #include "board_waveshare_7b.h"
+#include "board_qemu.h"
 
 #include "esp_check.h"
 #include "esp_lcd_panel_ops.h"
@@ -7,6 +8,17 @@
 #include "esp_log.h"
 
 static const char *TAG = "board_qemu";
+
+#define QEMU_RGB_TOUCH_POSITION (*(volatile uint32_t *)0x2100001c)
+#define QEMU_RGB_TOUCH_STATUS (*(volatile uint32_t *)0x21000020)
+
+void board_qemu_touch_read(uint16_t *x, uint16_t *y, bool *pressed)
+{
+    uint32_t position = QEMU_RGB_TOUCH_POSITION;
+    *x = (uint16_t)(position >> 16);
+    *y = (uint16_t)position;
+    *pressed = (QEMU_RGB_TOUCH_STATUS & 1U) != 0;
+}
 
 esp_err_t waveshare_7b_init(esp_lcd_panel_handle_t *panel,
                             esp_lcd_touch_handle_t *touch)

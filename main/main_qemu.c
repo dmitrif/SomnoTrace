@@ -34,7 +34,7 @@ void app_main(void)
     bsp_display_set_therapy_active(true);
     bsp_display_set_notice("QEMU preview - simulated data");
 
-    ESP_LOGI(TAG, "1024x600 UI preview ready; cycling tabs every 8 seconds");
+    ESP_LOGI(TAG, "1024x600 interactive UI preview ready; click to emulate touch");
     unsigned iteration = 0;
     float phase = 0.0f;
     while (true) {
@@ -44,11 +44,6 @@ void app_main(void)
             bsp_display_push_leak(3.2f + 0.8f * sinf(phase * 0.3f));
             bsp_display_push_metrics(8.6f + 0.4f * sinf(phase * 0.2f),
                                      14.4f, 0.08f);
-        }
-        if ((iteration % 80) == 0) {
-            uint8_t tab = (iteration / 80) % 5;
-            bsp_display_qemu_set_tab(tab);
-            ESP_LOGI(TAG, "preview tab %u/4", (unsigned)tab);
         }
         phase += 0.12f;
         iteration++;

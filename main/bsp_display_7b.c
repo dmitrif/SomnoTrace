@@ -19,6 +19,7 @@
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
+#include "board_qemu.h"
 #include "esp_lcd_qemu_rgb.h"
 #else
 #include "esp_lcd_panel_rgb.h"
@@ -254,6 +255,23 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
 
 static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    uint16_t x = 0;
+    uint16_t y = 0;
+    bool pressed = false;
+    static bool was_pressed;
+    board_qemu_touch_read(&x, &y, &pressed);
+    s_last_touch_x = x < WAVESHARE_7B_H_RES ? x : WAVESHARE_7B_H_RES - 1;
+    s_last_touch_y = y < WAVESHARE_7B_V_RES ? y : WAVESHARE_7B_V_RES - 1;
+    data->point.x = s_last_touch_x;
+    data->point.y = s_last_touch_y;
+    data->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    if (pressed && !was_pressed) {
+        ESP_LOGI(TAG, "emulated touch at %u,%u", (unsigned)x, (unsigned)y);
+    }
+    was_pressed = pressed;
+    (void)drv;
+#else
     esp_lcd_touch_handle_t touch = (esp_lcd_touch_handle_t)drv->user_data;
     esp_lcd_touch_point_data_t point = {0};
     uint8_t count = 0;
@@ -277,6 +295,7 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
             s_touch_read_errors++;
         data->state = LV_INDEV_STATE_RELEASED;
     }
+#endif
 }
 
 static void tick_cb(void *arg)
@@ -1824,13 +1843,21 @@ esp_err_t bsp_display_init(void)
     display_driver.full_refresh = 1;
     lv_disp_drv_register(&display_driver);
 
-    if (s_touch) {
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    const bool input_available = true;
+#else
+    const bool input_available = s_touch != NULL;
+#endif
+    if (input_available) {
         static lv_indev_drv_t touch_driver;
         lv_indev_drv_init(&touch_driver);
         touch_driver.type = LV_INDEV_TYPE_POINTER;
         touch_driver.read_cb = touch_read_cb;
         touch_driver.user_data = s_touch;
         lv_indev_drv_register(&touch_driver);
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+        ESP_LOGI(TAG, "QEMU pointer registered as LVGL touch input");
+#endif
     }
 
     s_lvgl_lock = xSemaphoreCreateRecursiveMutex();

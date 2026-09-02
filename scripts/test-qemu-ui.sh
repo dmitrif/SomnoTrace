@@ -46,7 +46,7 @@ for _ in $(seq 1 30); do
         cat "${LOG}" >&2 || true
         exit 1
     fi
-    if grep -q "1024x600 UI preview ready" "${LOG}" 2>/dev/null; then
+    if grep -q "1024x600 interactive UI preview ready" "${LOG}" 2>/dev/null; then
         sleep 2
         if grep -Eq "Invalid drawing area|assert failed|Guru Meditation Error|abort\(\) was called" "${LOG}"; then
             echo "QEMU reported a display or firmware failure after startup" >&2
