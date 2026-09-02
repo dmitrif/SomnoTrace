@@ -30,6 +30,7 @@ defaults = source("sdkconfig.7b.defaults")
 cmake = source("main/CMakeLists.txt")
 history = source("main/touch_history.c")
 main = source("main/main.c")
+as11 = source("main/as11_ble.c")
 
 expected_scalars = {
     r"#define\s+I2C_SDA\s+GPIO_NUM_8\b": "I2C SDA GPIO8",
@@ -102,7 +103,8 @@ for tab in ("Live", "History", "Devices", "Settings", "System"):
 require(display, r"xTaskCreate\(device_scan_task", "non-blocking BLE scan worker")
 require(display, r"as11_ble_start_pair\(job->addr\)", "native AirSense pairing action")
 require(display, r"as11_ble_confirm_pair\(job->passkey\)", "native AirSense passkey action")
-require(display, r"oximeter_pair\(job->addr,\s*job->driver\)", "native O2 pairing action")
+require(display, r"oximeter_pair\(job->addr,\s*OX_DRIVER_AUTO\)",
+        "auto-detected native O2 pairing action")
 require(display, r"device_settings_set_brightness", "native brightness control")
 require(display, r"device_settings_set_lcd_therapy_mode", "native therapy display policy")
 require(display, r"netprov_save_config\(&cfg\)", "native Wi-Fi credential save")
@@ -110,7 +112,23 @@ require(display, r"LV_KEYBOARD_MODE_TEXT_LOWER", "on-screen Wi-Fi keyboard")
 require(display, r"touch_history_load", "background SD history load")
 require(history, r"edf_gen_summary_json", "history summary metrics adapter")
 assert '"touch_history.c"' in cmake, "7B build omits touch history adapter"
-require(main, r"oximeter_init\(\).*?bsp_display_enable_touch_services\(\)",
+require(main, r"oximeter_init\(\).*?bsp_display_enable_touch_services\(as11_ready,\s*oximeter_ready\)",
         "touch BLE controls enabled only after service initialization")
+
+# Review-derived safety contracts that can be checked without physical hardware.
+require(as11, r"as11_ble_get_values.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response\(\)",
+        "serialized AS11 Get RPC")
+require(as11, r"therapy_command.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response\(\)",
+        "serialized therapy RPC")
+require(display, r"s_therapy_command_busy", "single-flight therapy control")
+require(display, r"s_wake_overlay.*?LV_EVENT_PRESSED", "wake-only touch interception")
+require(display, r"sd_storage_deinit\(\);\s*esp_restart\(\)",
+        "clean SD unmount before UI restart")
+require(history, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD", "leased history reads")
+require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
+require(display, r"Device-reported AHI", "clinical provenance label")
+require(display, r"lv_textarea_set_text\(s_wifi_password,\s*\"\"\)",
+        "stored Wi-Fi password excluded from LVGL")
+assert "CONFIG_COMPILER_STACK_CHECK_MODE_STRONG=y" in defaults
 
 print("Waveshare 7B hardware contract passed")
