@@ -62,6 +62,7 @@ for launcher in (run, smoke):
     assert "-m 8M" in launcher
     assert "nvram.esp32s3.efuse" in launcher
     assert "timer.esp32s3.timg" in launcher
+assert "-display sdl,show-cursor=on" in run
 for failure in ("Invalid drawing area", "assert failed", "Guru Meditation Error"):
     assert failure in smoke, f"smoke test does not reject {failure}"
 

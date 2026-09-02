@@ -19,8 +19,10 @@ later runs can omit `--build` and normally open in a few seconds.
 
 The QEMU window is deliberately hands-off for now. It cycles through Live,
 History, Devices, Settings and System every eight seconds so every 7-inch
-layout is inspectable without emulated touch. Leave the terminal open and use
-Control-C to stop it.
+layout is inspectable without emulated touch. The macOS cursor remains visible
+when the window is clicked. If QEMU captures keyboard or mouse input, press
+Control-Option-G to release it. Leave the terminal open and use Control-C to
+stop it.
 
 Run the non-graphical firmware boot check with:
 

@@ -26,5 +26,5 @@ exec "${QEMU_BIN}" \
     -global driver=nvram.esp32s3.efuse,property=drive,value=efuse \
     -global driver=timer.esp32s3.timg,property=wdt_disable,value=true \
     -nic user,model=open_eth \
-    -display sdl \
+    -display sdl,show-cursor=on \
     -serial mon:stdio
