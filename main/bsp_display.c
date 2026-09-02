@@ -406,6 +406,15 @@ void bsp_display_set_rotation(uint16_t degrees)
     if (s_display_task) xTaskNotifyGive(s_display_task);
 }
 
+void bsp_display_qemu_seed_demo(void)
+{
+}
+
+void bsp_display_qemu_set_tab(uint8_t tab)
+{
+    (void)tab;
+}
+
 static void lcd_flush(void)
 {
     if (!s_panel || !s_fb) return;

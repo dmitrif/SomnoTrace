@@ -17,7 +17,12 @@
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "sdkconfig.h"
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+#include "esp_lcd_qemu_rgb.h"
+#else
 #include "esp_lcd_panel_rgb.h"
+#endif
 #include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -93,6 +98,14 @@ typedef enum {
 } ble_ui_operation_t;
 
 static const char *TAG = "display_7b";
+
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+#define UI_BOARD_NAME "ESP32-S3 QEMU UI preview"
+#define UI_TOUCH_STATUS "not emulated"
+#else
+#define UI_BOARD_NAME "Waveshare ESP32-S3 Touch LCD 7B"
+#define UI_TOUCH_STATUS (s_touch ? "GT911 ready" : "not detected")
+#endif
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static ui_state_t s_state;
 static ui_service_state_t s_services;
@@ -166,6 +179,9 @@ static bool s_settings_synced;
 static bool s_settings_save_busy;
 static unsigned s_settings_save_generation;
 static char s_saved_wifi_ssid[NETPROV_SSID_MAXLEN + 1];
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+static uint8_t s_qemu_requested_tab = UINT8_MAX;
+#endif
 
 static bool begin_ble_operation(ble_ui_operation_t operation)
 {
@@ -198,6 +214,7 @@ static void unlock_lvgl(void)
     xSemaphoreGiveRecursive(s_lvgl_lock);
 }
 
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
 static bool IRAM_ATTR on_vsync(esp_lcd_panel_handle_t panel,
                               const esp_lcd_rgb_panel_event_data_t *event,
                               void *ctx)
@@ -209,17 +226,21 @@ static bool IRAM_ATTR on_vsync(esp_lcd_panel_handle_t panel,
     if (s_lvgl_task) vTaskNotifyGiveFromISR(s_lvgl_task, &wake);
     return wake == pdTRUE;
 }
+#endif
 
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
                      lv_color_t *pixels)
 {
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
     ulTaskNotifyTake(pdTRUE, 0);
+#endif
     esp_lcd_panel_draw_bitmap((esp_lcd_panel_handle_t)drv->user_data,
                               area->x1, area->y1, area->x2 + 1, area->y2 + 1,
                               pixels);
     /* Frame swapping occurs on VSYNC. A timeout keeps UI recovery possible if
      * the panel cable is disconnected during a test. */
     s_flush_count++;
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) == 0) {
         s_flush_timeouts++;
         if (s_flush_timeouts == 1 || (s_flush_timeouts % 100) == 0) {
@@ -227,6 +248,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
                      (unsigned long)s_flush_timeouts);
         }
     }
+#endif
     lv_disp_flush_ready(drv);
 }
 
@@ -274,6 +296,7 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_style_border_width(card, 1, 0);
     lv_obj_set_style_radius(card, 16, 0);
     lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_set_style_text_color(card, lv_color_hex(0xe7edf7), 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     return card;
 }
@@ -367,7 +390,7 @@ static void brightness_cb(lv_event_t *event)
     int value = lv_slider_get_value(lv_event_get_target(event));
     if (code == LV_EVENT_VALUE_CHANGED) {
         device_settings_set_brightness((uint8_t)value);
-        lv_label_set_text_fmt(s_settings_brightness_value, "%d / 200", value);
+        lv_label_set_text_fmt(s_settings_brightness_value, "%d%%", (value + 1) / 2);
     } else if (code == LV_EVENT_RELEASED) {
         queue_settings_save();
     }
@@ -387,6 +410,7 @@ static void therapy_mode_cb(lv_event_t *event)
     }
 }
 
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
 static void history_task(void *arg)
 {
     (void)arg;
@@ -406,9 +430,14 @@ static void history_task(void *arg)
     portEXIT_CRITICAL(&s_state_lock);
     vTaskDelete(NULL);
 }
+#endif
 
 static void start_history_load(void)
 {
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    /* Keep the seeded preview history intact. QEMU does not emulate SDMMC. */
+    return;
+#else
     portENTER_CRITICAL(&s_state_lock);
     bool busy = s_services.history_busy;
     if (!busy) s_services.history_busy = true;
@@ -418,6 +447,7 @@ static void start_history_load(void)
         s_services.history_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
     }
+#endif
 }
 
 static void device_scan_task(void *arg)
@@ -899,7 +929,7 @@ static void diagnostics_cb(lv_event_t *event)
     UBaseType_t stack_free = s_lvgl_task ? uxTaskGetStackHighWaterMark(s_lvgl_task) : 0;
     char details[640];
     snprintf(details, sizeof(details),
-             "Board        Waveshare ESP32-S3-Touch-LCD-7B\n"
+             "Board        " UI_BOARD_NAME "\n"
              "Display      1024 x 600 RGB565\n"
              "Touch        %s (this tap was received)\n"
              "SD storage   %s\n"
@@ -911,7 +941,7 @@ static void diagnostics_cb(lv_event_t *event)
              "RGB frames   %lu (%lu sync timeouts)\n"
              "Touch errors %lu\n"
              "Firmware     %s",
-             s_touch ? "GT911 detected" : "not detected",
+             UI_TOUCH_STATUS,
              state.sd_ready ? "ready" : "not ready",
              state.wifi ? "connected" : "offline",
              state.paired ? "paired" : "not paired",
@@ -1218,8 +1248,8 @@ static void build_ui(void)
     lv_slider_set_range(s_settings_brightness, 1, 200);
     lv_slider_set_value(s_settings_brightness, device_settings_get()->brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(s_settings_brightness, brightness_cb, LV_EVENT_ALL, NULL);
-    lv_label_set_text_fmt(s_settings_brightness_value, "%d / 200",
-                          device_settings_get()->brightness);
+    lv_label_set_text_fmt(s_settings_brightness_value, "%d%%",
+                          (device_settings_get()->brightness + 1) / 2);
     lv_obj_t *therapy_caption = lv_label_create(display_card);
     lv_label_set_text(therapy_caption, "During therapy");
     lv_obj_set_pos(therapy_caption, 0, 174);
@@ -1473,13 +1503,13 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         lv_label_set_text(s_network_status, "Starting network service...");
         const esp_app_desc_t *boot_app = esp_app_get_description();
         lv_label_set_text_fmt(s_system_details,
-                              "Board                 Waveshare ESP32-S3 Touch LCD 7B\n"
+                              "Board                 " UI_BOARD_NAME "\n"
                               "Display               1024 x 600 RGB565\n"
                               "Touch                 %s\n"
                               "microSD               %s\n"
                               "Services              starting\n"
                               "Firmware              %s",
-                              s_touch ? "GT911 ready" : "not detected",
+                              UI_TOUCH_STATUS,
                               state->sd_ready ? "ready" : "not ready",
                               boot_app ? boot_app->version : "unknown");
         return;
@@ -1488,8 +1518,8 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     if (!s_settings_synced && active_tab == 3) {
         const device_settings_t *settings = device_settings_get();
         lv_slider_set_value(s_settings_brightness, settings->brightness, LV_ANIM_OFF);
-        lv_label_set_text_fmt(s_settings_brightness_value, "%d / 200",
-                              settings->brightness);
+        lv_label_set_text_fmt(s_settings_brightness_value, "%d%%",
+                              (settings->brightness + 1) / 2);
         uint16_t mode_index = settings->lcd_therapy_mode == LCD_THERAPY_INFO ? 1 :
                               settings->lcd_therapy_mode == LCD_THERAPY_OFF ? 2 :
                               settings->lcd_therapy_mode == LCD_THERAPY_ALWAYS_OFF ? 3 : 0;
@@ -1506,8 +1536,13 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         s_settings_synced = true;
     }
 
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    const char *as_status = "simulated preview";
+    const char *ox_status = "simulated preview";
+#else
     const char *as_status = s_as11_service_ready ? as11_ble_get_status() : "unavailable";
     const char *ox_status = s_ox_service_ready ? oximeter_get_status() : "unavailable";
+#endif
     if (ble_started && esp_timer_get_time() - ble_started > 1000000) {
         bool as_done = ble_operation == BLE_UI_PAIR_AS11 &&
                        (!strcmp(as_status, AS11_STATUS_PAIRED) ||
@@ -1545,6 +1580,14 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     else
         lv_obj_add_state(s_as11_pair_button, LV_STATE_DISABLED);
 
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    if (active_tab == 3) {
+        lv_label_set_text(s_network_status,
+                          "Simulated network connected\n"
+                          "IP address: 192.0.2.10\n"
+                          "Dashboard: http://somnotrace-qemu.local");
+    }
+#else
     netprov_link_t link;
     netprov_get_link(&link);
     const char *hostname = netprov_mdns_name_cached();
@@ -1558,11 +1601,12 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
                               "Not connected\nSetup name: %s-setup\nDashboard: http://%s.local",
                               hostname, hostname);
     }
+#endif
 
     const esp_app_desc_t *app = esp_app_get_description();
     UBaseType_t stack_free = s_lvgl_task ? uxTaskGetStackHighWaterMark(s_lvgl_task) : 0;
     lv_label_set_text_fmt(s_system_details,
-                          "Board                 Waveshare ESP32-S3 Touch LCD 7B\n"
+                          "Board                 " UI_BOARD_NAME "\n"
                           "Display               1024 x 600 RGB565\n"
                           "Touch                 %s\n"
                           "microSD               %s\n"
@@ -1574,7 +1618,7 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
                           "Frames / timeouts     %lu / %lu\n"
                           "Touch read errors     %lu\n"
                           "Firmware              %s",
-                          s_touch ? "GT911 ready" : "not detected",
+                          UI_TOUCH_STATUS,
                           state->sd_ready ? "ready" : "not ready",
                           state->wifi ? "connected" : "offline",
                           state->paired ? "paired" : "not paired",
@@ -1607,6 +1651,16 @@ static void update_ui(void)
     therapy_command_target = s_therapy_command_target;
     backlight = s_backlight;
     portEXIT_CRITICAL(&s_state_lock);
+
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    uint8_t requested_tab;
+    portENTER_CRITICAL(&s_state_lock);
+    requested_tab = s_qemu_requested_tab;
+    s_qemu_requested_tab = UINT8_MAX;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (requested_tab < 5 && s_tabview)
+        lv_tabview_set_act(s_tabview, requested_tab, LV_ANIM_OFF);
+#endif
 
     /* Keep LVGL responsive for the wake overlay but avoid chart/label churn
      * while the panel is intentionally dark. */
@@ -1664,7 +1718,7 @@ static void update_ui(void)
     else lv_label_set_text(s_flow_lim_label, "--");
 
     int64_t elapsed = 0;
-    if (state.therapy && state.therapy_start_us > 0) {
+    if (state.therapy && state.therapy_start_us != 0) {
         elapsed = (esp_timer_get_time() - state.therapy_start_us) / 1000000;
         if (elapsed < 0) elapsed = 0;
     }
@@ -1739,17 +1793,24 @@ esp_err_t bsp_display_init(void)
     /* With an RGB bounce buffer, frame-buffer handoff completion is reported
      * by on_bounce_frame_finish. This matches Waveshare's 7B reference port
      * and prevents LVGL from drawing into a buffer still being scanned out. */
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
     esp_lcd_rgb_panel_event_callbacks_t callbacks = {
         .on_bounce_frame_finish = on_vsync,
     };
     ESP_RETURN_ON_ERROR(esp_lcd_rgb_panel_register_event_callbacks(s_panel,
                                                                   &callbacks, NULL),
                         TAG, "register display VSYNC");
+#endif
 
     lv_init();
     void *fb1 = NULL, *fb2 = NULL;
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    ESP_RETURN_ON_ERROR(esp_lcd_rgb_qemu_get_frame_buffer(s_panel, &fb1), TAG,
+                        "get QEMU framebuffer");
+#else
     ESP_RETURN_ON_ERROR(esp_lcd_rgb_panel_get_frame_buffer(s_panel, 2, &fb1, &fb2),
                         TAG, "get RGB framebuffers");
+#endif
     static lv_disp_draw_buf_t draw_buffer;
     lv_disp_draw_buf_init(&draw_buffer, fb1, fb2,
                           WAVESHARE_7B_H_RES * WAVESHARE_7B_V_RES);
@@ -1793,7 +1854,11 @@ esp_err_t bsp_display_init(void)
                         ESP_ERR_NO_MEM, TAG, "create display task");
 
     waveshare_7b_set_brightness(10);
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    ESP_LOGI(TAG, "native 1024x600 QEMU dashboard initialized");
+#else
     ESP_LOGI(TAG, "native 1024x600 touch dashboard initialized");
+#endif
     return ESP_OK;
 }
 
@@ -2012,6 +2077,67 @@ void bsp_display_apply_backlight_policy(bool force_on)
     bool off = settings->lcd_therapy_mode == LCD_THERAPY_ALWAYS_OFF ||
                (therapy && settings->lcd_therapy_mode == LCD_THERAPY_OFF);
     bsp_display_set_backlight(!off);
+}
+
+void bsp_display_qemu_seed_demo(void)
+{
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    static const touch_history_day_t demo_history[] = {
+        {
+            .day = "20260901", .sessions = 1, .usage_min = 438,
+            .ahi = 1.7f, .pressure_p95 = 10.4f, .leak_p95 = 7.8f,
+            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_pressure_p95 = true, .has_leak_p95 = true,
+        },
+        {
+            .day = "20260831", .sessions = 2, .usage_min = 401,
+            .ahi = 2.2f, .pressure_p95 = 10.8f,
+            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_pressure_p95 = true, .has_leak_p95 = false,
+        },
+        {
+            .day = "20260830", .sessions = 1, .usage_min = 462,
+            .ahi = 1.3f, .pressure_p95 = 9.9f, .leak_p95 = 5.1f,
+            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_pressure_p95 = true, .has_leak_p95 = true,
+        },
+    };
+    portENTER_CRITICAL(&s_state_lock);
+    memcpy(s_services.history, demo_history, sizeof(demo_history));
+    s_services.history_count = sizeof(demo_history) / sizeof(demo_history[0]);
+    s_services.history_result = ESP_OK;
+    s_services.history_version++;
+    s_services.as11_count = 1;
+    strlcpy(s_services.as11[0].addr, "AA:11:00:00:00:01",
+            sizeof(s_services.as11[0].addr));
+    strlcpy(s_services.as11[0].name, "AirSense 11 (simulated)",
+            sizeof(s_services.as11[0].name));
+    s_services.as11[0].rssi = -47;
+    s_services.as11_version++;
+    s_services.ox_count = 1;
+    strlcpy(s_services.ox[0].addr, "02:00:00:00:00:02",
+            sizeof(s_services.ox[0].addr));
+    strlcpy(s_services.ox[0].name, "O2 Ring (simulated)",
+            sizeof(s_services.ox[0].name));
+    s_services.ox[0].rssi = -55;
+    s_services.ox[0].driver = OX_DRIVER_AUTO;
+    s_services.ox_version++;
+    portEXIT_CRITICAL(&s_state_lock);
+#endif
+}
+
+void bsp_display_qemu_set_tab(uint8_t tab)
+{
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    if (tab >= 5) return;
+    /* The display task owns LVGL. Queue navigation into that task so slow
+     * emulated full-frame flushes cannot starve or drop preview changes. */
+    portENTER_CRITICAL(&s_state_lock);
+    s_qemu_requested_tab = tab;
+    portEXIT_CRITICAL(&s_state_lock);
+#else
+    (void)tab;
+#endif
 }
 
 void bsp_display_set_rotation(uint16_t degrees)

@@ -1,13 +1,23 @@
+set(SOMNOTRACE_MAIN_SRC "main.c")
 set(SOMNOTRACE_BSP_SRCS "bsp_power.c" "bsp_display.c" "bsp_audio.c")
+set(SOMNOTRACE_DISPLAY_REQUIRES lvgl esp_lcd_touch_gt911)
 if(CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B)
     set(SOMNOTRACE_BSP_SRCS
         "board_waveshare_7b.c"
         "bsp_power_7b.c"
         "bsp_display_7b.c"
         "bsp_audio_7b.c")
+elseif(CONFIG_SOMNOTRACE_BOARD_QEMU)
+    set(SOMNOTRACE_MAIN_SRC "main_qemu.c")
+    set(SOMNOTRACE_BSP_SRCS
+        "board_qemu.c"
+        "bsp_power_7b.c"
+        "bsp_display_7b.c"
+        "bsp_audio_7b.c")
+    list(APPEND SOMNOTRACE_DISPLAY_REQUIRES esp_lcd_qemu_rgb)
 endif()
 
-idf_component_register(SRCS "main.c" ${SOMNOTRACE_BSP_SRCS} "net_provision.c" "as11_ble.c"
+idf_component_register(SRCS ${SOMNOTRACE_MAIN_SRC} ${SOMNOTRACE_BSP_SRCS} "net_provision.c" "as11_ble.c"
                            "sd_storage.c" "session_writer.c" "time_sync.c"
                            "post_therapy.c" "edf_gen.c" "log_stream.c" "device_settings.c"
                            "psram_task.c" "session_graph.c" "nvs_writer.c"
@@ -19,7 +29,7 @@ idf_component_register(SRCS "main.c" ${SOMNOTRACE_BSP_SRCS} "net_provision.c" "a
                        REQUIRES esp_lcd driver esp_wifi esp_netif esp_event nvs_flash esp_http_server json esp_app_format
                                 bt mbedtls esp_rom fatfs sdmmc esp-idf-ftpServer uploader esp_http_client
                                 esp_driver_i2c esp_driver_i2s esp_adc app_update espcoredump esp_https_ota therapy_alert esp_coex
-                                lvgl esp_lcd_touch_gt911)
+                                ${SOMNOTRACE_DISPLAY_REQUIRES})
 
 # Download zones.json (IANA-to-POSIX timezone database) if not present.
 # Source: https://github.com/nayarsystems/posix_tz_db (MIT License)

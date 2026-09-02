@@ -74,3 +74,7 @@ void bsp_display_apply_backlight_policy(bool force_on);
  * using the ST7789's reliable 0°/90° paths plus a software half-turn for
  * 180°/270°, and re-applied after panel reset. */
 void bsp_display_set_rotation(uint16_t degrees);
+
+/* QEMU preview hooks. Physical board implementations leave these as no-ops. */
+void bsp_display_qemu_seed_demo(void);
+void bsp_display_qemu_set_tab(uint8_t tab);
