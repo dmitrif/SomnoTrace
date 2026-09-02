@@ -42,6 +42,8 @@ require(board, r"QEMU_RGB_TOUCH_POSITION", "QEMU touch MMIO bridge")
 require(display, r"display_driver\.hor_res\s*=\s*WAVESHARE_7B_H_RES", "LVGL width")
 require(display, r"display_driver\.ver_res\s*=\s*WAVESHARE_7B_V_RES", "LVGL height")
 require(display, r"board_qemu_touch_read", "LVGL QEMU touch reader")
+require(display, r"CONFIG_SOMNOTRACE_BOARD_QEMU.*?display_driver\.full_refresh\s*=\s*0",
+        "partial QEMU refreshes")
 require(display, r"s_qemu_requested_tab", "display-task-owned tab switching")
 require(demo, r"QEMU preview.*simulated data", "honest simulated-data labeling")
 require(display, r"simulated preview", "honest simulated device status")

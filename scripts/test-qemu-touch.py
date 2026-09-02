@@ -91,7 +91,7 @@ def main():
                 "command-line": "xp /2wx 0x2100001c",
             })
             print(f"Touch registers while pressed: {pressed_registers.strip()}")
-            time.sleep(0.3)
+            time.sleep(0.08)
             qmp_command(stream, "input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": False}},
             ]})

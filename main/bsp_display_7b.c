@@ -1844,7 +1844,12 @@ esp_err_t bsp_display_init(void)
     display_driver.flush_cb = flush_cb;
     display_driver.draw_buf = &draw_buffer;
     display_driver.user_data = s_panel;
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    /* Partial flushes avoid copying 1.2 MB for every chart or label update. */
+    display_driver.full_refresh = 0;
+#else
     display_driver.full_refresh = 1;
+#endif
     lv_disp_drv_register(&display_driver);
 
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
