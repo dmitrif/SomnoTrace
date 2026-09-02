@@ -69,6 +69,18 @@ static void show_status(const char *title, const char *lines[], int n)
     }
 }
 
+static void controlled_restart(void)
+{
+    if (sd_storage_recording_active() ||
+        !sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 5000)) {
+        ESP_LOGE(TAG, "restart deferred because storage is recording or busy");
+        bsp_display_set_notice("Restart deferred: therapy or microSD is busy");
+        return;
+    }
+    sd_storage_deinit();
+    esp_restart();
+}
+
 static bool enter_softap(const struct netprov_config *cfg)
 {
     if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
@@ -396,7 +408,7 @@ void app_main(void)
                 }
 
                 vTaskDelay(pdMS_TO_TICKS(500));
-                esp_restart();
+                controlled_restart();
             }
         }
     } else {
@@ -496,7 +508,7 @@ void app_main(void)
             if ((xTaskGetTickCount() - softap_start_ticks) * portTICK_PERIOD_MS
                  > 10 * 60 * 1000) {
                 ESP_LOGW(TAG, "SoftAP 10-minute idle timeout: rebooting to retry connection");
-                esp_restart();
+                controlled_restart();
             }
             /* Update battery indicator in SoftAP mode too */
             if (++refresh_counter >= 3) {

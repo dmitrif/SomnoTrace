@@ -1414,7 +1414,15 @@ static void reboot_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(1500));
+    if (sd_storage_recording_active() ||
+        !sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 5000)) {
+        ESP_LOGW(TAG, "credential reboot deferred: recording or SD operation active");
+        bsp_display_set_notice("Wi-Fi saved; restart deferred while recording");
+        vTaskDelete(NULL);
+        return;
+    }
     ESP_LOGI(TAG, "rebooting to apply credentials");
+    sd_storage_deinit();
     esp_restart();
 }
 
