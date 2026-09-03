@@ -187,13 +187,13 @@ void app_main(void)
         int sd_nlines;
         if (sd_ret == ESP_ERR_NOT_FOUND) {
             sd_title = "Warning";
-            sd_lines[0] = "Insert SD Card";
-            sd_lines[1] = "Power off, insert card,";
+            sd_lines[0] = "Insert microSD";
+            sd_lines[1] = "Power off, insert microSD";
             sd_nlines = 2;
         } else {
-            sd_title = "SD Card Error";
-            sd_lines[0] = "Card mount failed";
-            sd_lines[1] = "Check or reformat card";
+            sd_title = "microSD error";
+            sd_lines[0] = "microSD mount failed";
+            sd_lines[1] = "Check or reformat microSD";
             sd_nlines = 2;
         }
         show_status(sd_title, sd_lines, sd_nlines);
@@ -589,7 +589,7 @@ void app_main(void)
                             ssid_str,
                             url_line,
                             ip_line,
-                            "SD Card Error",
+                            "microSD error",
                         };
                         bsp_display_show_lines("SomnoTrace", lines, 4);
                     }
