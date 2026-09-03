@@ -99,7 +99,7 @@ typedef struct {
 
 static QueueHandle_t s_queue;
 static TaskHandle_t  s_task;
-static SemaphoreHandle_t s_lock;      /* guards s_rt + s_status for the API */
+static SemaphoreHandle_t s_lock;      /* guards API-visible runtime snapshots + status */
 
 static upload_sched_busy_fn_t s_busy_fn;
 
@@ -128,22 +128,55 @@ static void set_status(const char *fmt, ...)
  * common in the scan loop and must not generate traffic. */
 static void set_be_state(backend_rt_t *r, sb_state_t st)
 {
-    if (r->state == st) return;
-    r->state = st;
-    uploader_notify_progress_changed();
+    bool changed = false;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (r->state != st) {
+        r->state = st;
+        changed = true;
+    }
+    if (s_lock) xSemaphoreGive(s_lock);
+    if (changed) uploader_notify_progress_changed();
 }
 
 static backend_rt_t *rt_for(const upload_backend_t *be)
 {
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int i = 0; i < s_n_rt; i++) {
-        if (s_rt[i].be == be) return &s_rt[i];
+        if (s_rt[i].be == be) {
+            backend_rt_t *r = &s_rt[i];
+            if (s_lock) xSemaphoreGive(s_lock);
+            return r;
+        }
     }
-    if (s_n_rt >= UPLOAD_MAX_BACKENDS) return NULL;
+    if (s_n_rt >= UPLOAD_MAX_BACKENDS) {
+        if (s_lock) xSemaphoreGive(s_lock);
+        return NULL;
+    }
+
+    /* Slot lookup may inspect persistent upload-index state.  Do it without
+     * holding the runtime snapshot lock, then re-check before publishing the
+     * new slot in case this function ever gains a second caller. */
+    if (s_lock) xSemaphoreGive(s_lock);
+    int slot = upload_index_backend_slot(be->id);
+
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < s_n_rt; i++) {
+        if (s_rt[i].be == be) {
+            backend_rt_t *r = &s_rt[i];
+            if (s_lock) xSemaphoreGive(s_lock);
+            return r;
+        }
+    }
+    if (s_n_rt >= UPLOAD_MAX_BACKENDS) {
+        if (s_lock) xSemaphoreGive(s_lock);
+        return NULL;
+    }
     backend_rt_t *r = &s_rt[s_n_rt++];
     memset(r, 0, sizeof(*r));
     r->be = be;
-    r->slot = upload_index_backend_slot(be->id);
+    r->slot = slot;
     r->state = SB_IDLE;
+    if (s_lock) xSemaphoreGive(s_lock);
     return r;
 }
 
@@ -815,6 +848,28 @@ esp_err_t upload_sched_progress_json(char **out_json)
 
 void upload_sched_summary(int *out_pending, const char **out_worst)
 {
+    typedef struct {
+        const upload_backend_t *be;
+        int slot;
+        sb_state_t state;
+    } summary_rt_t;
+    summary_rt_t runtime[UPLOAD_MAX_BACKENDS];
+    int n_runtime = 0;
+
+    /* Snapshot only the small, API-visible runtime fields.  Configuration
+     * callbacks and index/SD reconciliation below can be slow and must never
+     * run while the scheduler state mutex is held. */
+    if (s_lock) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        n_runtime = s_n_rt < UPLOAD_MAX_BACKENDS ? s_n_rt : UPLOAD_MAX_BACKENDS;
+        for (int i = 0; i < n_runtime; i++) {
+            runtime[i].be = s_rt[i].be;
+            runtime[i].slot = s_rt[i].slot;
+            runtime[i].state = s_rt[i].state;
+        }
+        xSemaphoreGive(s_lock);
+    }
+
     int max_days = uploader_max_days();
     upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
     if (!ox_refs) {
@@ -826,8 +881,8 @@ void upload_sched_summary(int *out_pending, const char **out_worst)
     int pending = 0;
     const char *worst = "idle";
 
-    for (int i = 0; i < s_n_rt; i++) {
-        backend_rt_t *r = &s_rt[i];
+    for (int i = 0; i < n_runtime; i++) {
+        summary_rt_t *r = &runtime[i];
         if (!r->be || !r->be->is_configured || !r->be->is_configured()) continue;
         pending += upload_index_backend_pending(r->slot, max_days);
         pending += upload_ox_pending(ox_refs, n_ox, r->slot);
