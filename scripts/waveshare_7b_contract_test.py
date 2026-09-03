@@ -29,6 +29,7 @@ storage = source("main/sd_storage.c")
 defaults = source("sdkconfig.7b.defaults")
 cmake = source("main/CMakeLists.txt")
 history = source("main/touch_history.c")
+history_header = source("main/touch_history.h")
 main = source("main/main.c")
 as11 = source("main/as11_ble.c")
 
@@ -127,6 +128,15 @@ require(display, r"sd_storage_deinit\(\);\s*esp_restart\(\)",
         "clean SD unmount before UI restart")
 require(history, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD", "leased history reads")
 require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
+require(history_header, r"#define\s+TOUCH_HISTORY_MAX_DAYS\s+30\b",
+        "bounded 30-night native history model")
+for metric in ("oai", "cai", "hi", "rera"):
+    require(history_header, rf"float\s+{metric}\s*;", f"{metric} history value")
+    require(history_header, rf"bool\s+has_{metric}\s*;", f"{metric} availability flag")
+    require(history, rf"has_{metric}\s*=\s*json_number\(root,\s*\"{metric}\"",
+            f"truthful optional {metric} parsing")
+require(history, r"capacity\s*<\s*TOUCH_HISTORY_MAX_DAYS.*?capacity\s*:\s*TOUCH_HISTORY_MAX_DAYS",
+        "history loader enforces its 30-night bound")
 require(display, r"Device-reported AHI", "clinical provenance label")
 require(display, r"lv_textarea_set_text\(s_wifi_password,\s*\"\"\)",
         "stored Wi-Fi password excluded from LVGL")

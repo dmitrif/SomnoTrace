@@ -59,6 +59,8 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
 {
     if (!days || !count || capacity == 0) return ESP_ERR_INVALID_ARG;
     *count = 0;
+    const size_t limit = capacity < TOUCH_HISTORY_MAX_DAYS
+                         ? capacity : TOUCH_HISTORY_MAX_DAYS;
     if (!sd_storage_is_ready()) return ESP_ERR_NOT_FOUND;
     if (sd_storage_recording_active()) return ESP_ERR_INVALID_STATE;
     if (!sd_storage_lease_acquire(SD_LEASE_UPLOAD, 250)) return ESP_ERR_TIMEOUT;
@@ -75,13 +77,13 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
         int sessions = session_count(entry->d_name);
         if (sessions == 0) continue;
         size_t slot;
-        if (*count < capacity) {
+        if (*count < limit) {
             slot = (*count)++;
         } else {
             /* Directory iteration is not chronological. Keep the newest N
              * entries even when the card contains years of history. */
             slot = 0;
-            for (size_t i = 1; i < capacity; ++i) {
+            for (size_t i = 1; i < limit; ++i) {
                 if (strcmp(days[i].day, days[slot].day) < 0) slot = i;
             }
             if (strcmp(entry->d_name, days[slot].day) <= 0) continue;
@@ -105,6 +107,10 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
         days[i].has_usage = json_number(root, "usage_min", &number);
         if (days[i].has_usage) days[i].usage_min = (int)number;
         days[i].has_ahi = json_number(root, "ahi", &days[i].ahi);
+        days[i].has_oai = json_number(root, "oai", &days[i].oai);
+        days[i].has_cai = json_number(root, "cai", &days[i].cai);
+        days[i].has_hi = json_number(root, "hi", &days[i].hi);
+        days[i].has_rera = json_number(root, "rera", &days[i].rera);
         cJSON *pressure = cJSON_GetObjectItemCaseSensitive(root, "pressure");
         cJSON *leak = cJSON_GetObjectItemCaseSensitive(root, "leak");
         days[i].has_pressure_p95 = cJSON_IsObject(pressure) &&
