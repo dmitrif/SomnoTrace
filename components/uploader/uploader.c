@@ -402,6 +402,14 @@ esp_err_t uploader_get_progress_json(char **out_json)
     return upload_sched_progress_json(out_json);
 }
 
+esp_err_t uploader_get_progress_snapshot(uploader_progress_snapshot_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    if (!s_initialised) return ESP_ERR_INVALID_STATE;
+    return upload_sched_progress_snapshot(out);
+}
+
 void uploader_get_summary(int *out_pending, const char **out_worst)
 {
     if (!s_initialised) {

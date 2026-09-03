@@ -61,6 +61,9 @@ static const int COOLDOWN_MIN[] = { 1, 5, 15, 30, 60 };
 #define SCHED_TASK_STACK     12288
 #define SCHED_QUEUE_LEN          8
 
+_Static_assert(UPLOADER_PROGRESS_MAX_BACKENDS >= UPLOAD_MAX_BACKENDS,
+               "public progress snapshot is too small for scheduler slots");
+
 /* ── Backend runtime ──────────────────────────────────────────────── */
 
 typedef enum {
@@ -183,14 +186,13 @@ static backend_rt_t *rt_for(const upload_backend_t *be)
 static void cooldown_enter(backend_rt_t *r, const char *why, bool permanent)
 {
     int mins = COOLDOWN_MIN[r->cooldown_idx];
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     if (r->cooldown_idx < N_COOLDOWN - 1) r->cooldown_idx++;
     r->retry_at_us = now_us() + (int64_t)mins * 60 * 1000000LL;
     r->last_err_permanent = permanent;
-    if (why) {
-        xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (why && why != r->err)
         strlcpy(r->err, why, sizeof(r->err));
-        xSemaphoreGive(s_lock);
-    }
+    xSemaphoreGive(s_lock);
     set_be_state(r, SB_COOLDOWN);
     ESP_LOGW(TAG, "%s: cooldown %d min (%s)", r->be->id, mins,
              why ? why : "error");
@@ -198,10 +200,33 @@ static void cooldown_enter(backend_rt_t *r, const char *why, bool permanent)
 
 static void cooldown_reset(backend_rt_t *r)
 {
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     r->cooldown_idx = 0;
     r->retry_at_us = 0;
     r->err[0] = '\0';
     r->last_err_permanent = false;
+    xSemaphoreGive(s_lock);
+}
+
+static void set_be_error(backend_rt_t *r, const char *error)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    strlcpy(r->err, error ? error : "", sizeof(r->err));
+    xSemaphoreGive(s_lock);
+}
+
+static void set_next_scan(int64_t at_us)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_next_scan_us = at_us;
+    xSemaphoreGive(s_lock);
+}
+
+static void set_scanning(bool scanning)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_scanning = scanning;
+    xSemaphoreGive(s_lock);
 }
 
 static void ox_mark_day_failed(upload_ox_ref_t *refs, int n_refs, int slot,
@@ -256,7 +281,9 @@ static bool run_backend(backend_rt_t *r, int max_days)
     if (n_days == 0 && !bundle_changed && ox_pending == 0) {
         free(ox_refs);
         set_be_state(r, SB_IDLE);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
         r->cur_day[0] = '\0';
+        xSemaphoreGive(s_lock);
         return false;
     }
     if (!have_bundle && (n_days > 0 || bundle_changed)) {
@@ -311,8 +338,10 @@ static bool run_backend(backend_rt_t *r, int max_days)
     }
 
     set_be_state(r, SB_UPLOADING);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     r->n_units = n_units + ox_pending;
     r->cur_unit = 0;
+    xSemaphoreGive(s_lock);
 
     /* Say plainly which of the two kinds of run this is.  The old message
      * reported "1 day(s), 0 unit(s) pending" for a root-files-only run, which
@@ -398,8 +427,10 @@ static bool run_backend(backend_rt_t *r, int max_days)
                 g->be[r->slot].status = UG_OK;
                 day_any = true;
                 any_ok = true;
+                xSemaphoreTake(s_lock, portMAX_DELAY);
                 r->cur_unit++;
                 r->last_ok_s = now_s();
+                xSemaphoreGive(s_lock);
             } else {
                 g->be[r->slot].status = UG_FAILED;
                 fails++;
@@ -425,7 +456,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
                 bundle_ok = false;
                 fails++;
                 ESP_LOGW(TAG, "%s: bundle failed for %s", be->id, daystr);
-                strlcpy(r->err, "root files failed", sizeof(r->err));
+                set_be_error(r, "root files failed");
             }
         }
 
@@ -442,7 +473,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
             }
             bundle_ok = false;
             fails++;
-            strlcpy(r->err, "remote finalise failed", sizeof(r->err));
+            set_be_error(r, "remote finalise failed");
         }
 
         upload_index_save_day(d);
@@ -467,7 +498,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
                     if (res != UPLOAD_OK) {
                         ox_mark_day_failed(ox_refs, n_ox, r->slot, ox_day);
                         fails++;
-                        strlcpy(r->err, "oximetry finalise failed", sizeof(r->err));
+                        set_be_error(r, "oximetry finalise failed");
                     }
                 }
                 strlcpy(ox_day, ox_refs[oi].day, sizeof(ox_day));
@@ -476,7 +507,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
                       (be->day_begin ? be->day_begin(ox_day) : UPLOAD_OK);
                 if (res != UPLOAD_OK) {
                     fails++;
-                    strlcpy(r->err, "cannot open oximetry day", sizeof(r->err));
+                    set_be_error(r, "cannot open oximetry day");
                     break;
                 }
             }
@@ -489,8 +520,10 @@ static bool run_backend(backend_rt_t *r, int max_days)
             if (res == UPLOAD_OK) {
                 ox_day_any = true;
                 any_ok = true;
+                xSemaphoreTake(s_lock, portMAX_DELAY);
                 r->cur_unit++;
                 r->last_ok_s = now_s();
+                xSemaphoreGive(s_lock);
             } else {
                 fails++;
                 ESP_LOGW(TAG, "%s: oximetry %s failed", be->id,
@@ -503,7 +536,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
             if (res != UPLOAD_OK) {
                 ox_mark_day_failed(ox_refs, n_ox, r->slot, ox_day);
                 fails++;
-                strlcpy(r->err, "oximetry finalise failed", sizeof(r->err));
+                set_be_error(r, "oximetry finalise failed");
             }
         }
     }
@@ -615,18 +648,18 @@ static void do_scan(void)
         if (r && r->slot >= 0) slots[n_slots++] = r->slot;
     }
     if (n_slots == 0) {
-        s_next_scan_us = now_us() + (int64_t)SCAN_INTERVAL_MS * 1000;
+        set_next_scan(now_us() + (int64_t)SCAN_INTERVAL_MS * 1000);
         return;
     }
 
     /* Same lease the upload pass takes — see reconcile_day_leased(). */
     if (!uploader_lease_take(LEASE_WAIT_MS)) {
         ESP_LOGD(TAG, "scan deferred: storage busy");
-        s_next_scan_us = now_us() + (int64_t)SCAN_INTERVAL_MS * 1000;
+        set_next_scan(now_us() + (int64_t)SCAN_INTERVAL_MS * 1000);
         return;
     }
 
-    s_scanning = true;
+    set_scanning(true);
     set_status("Scanning for new data");
     upload_scan_reconcile_all(max_days, slots, n_slots);
     upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
@@ -634,9 +667,9 @@ static void do_scan(void)
         upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
         free(ox_refs);
     }
-    s_scanning = false;
+    set_scanning(false);
     uploader_lease_give();
-    s_next_scan_us = now_us() + (int64_t)SCAN_INTERVAL_MS * 1000;
+    set_next_scan(now_us() + (int64_t)SCAN_INTERVAL_MS * 1000);
 }
 
 static void sched_task(void *arg)
@@ -644,7 +677,7 @@ static void sched_task(void *arg)
     (void)arg;
     ESP_LOGI(TAG, "upload scheduler started on core %d", xPortGetCoreID());
 
-    s_next_scan_us = now_us() + (int64_t)FIRST_SCAN_DELAY_MS * 1000;
+    set_next_scan(now_us() + (int64_t)FIRST_SCAN_DELAY_MS * 1000);
     set_status("Waiting for first scan");
 
     while (1) {
@@ -686,7 +719,9 @@ static void sched_task(void *arg)
                 for (int i = 0; i < s_n_rt; i++) {
                     cooldown_reset(&s_rt[i]);
                     set_be_state(&s_rt[i], SB_IDLE);
+                    xSemaphoreTake(s_lock, portMAX_DELAY);
                     s_rt[i].last_ok_s = 0;
+                    xSemaphoreGive(s_lock);
                 }
                 do_scan();
                 run_pass();
@@ -708,7 +743,7 @@ static void sched_task(void *arg)
                  * try again on the next tick rather than competing for the
                  * card. Event-driven uploads are unaffected. */
                 ESP_LOGD(TAG, "scan deferred: storage busy");
-                s_next_scan_us = now_us() + (int64_t)SCAN_INTERVAL_MS * 1000;
+                set_next_scan(now_us() + (int64_t)SCAN_INTERVAL_MS * 1000);
             } else {
                 do_scan();
             }
@@ -766,77 +801,161 @@ void upload_sched_set_busy_fn(upload_sched_busy_fn_t fn) { s_busy_fn = fn; }
 
 /* ── Progress reporting ───────────────────────────────────────────── */
 
-static const char *state_name(sb_state_t s)
+static uploader_backend_state_t public_state(sb_state_t state)
 {
-    switch (s) {
-    case SB_UPLOADING: return "uploading";
-    case SB_COOLDOWN:  return "cooldown";
-    case SB_DISABLED:  return "disabled";
-    default:           return "idle";
+    switch (state) {
+    case SB_UPLOADING: return UPLOADER_BACKEND_UPLOADING;
+    case SB_COOLDOWN:  return UPLOADER_BACKEND_COOLDOWN;
+    case SB_DISABLED:  return UPLOADER_BACKEND_DISABLED;
+    default:           return UPLOADER_BACKEND_IDLE;
     }
+}
+
+static const char *public_state_name(uploader_backend_state_t state)
+{
+    switch (state) {
+    case UPLOADER_BACKEND_UPLOADING: return "uploading";
+    case UPLOADER_BACKEND_COOLDOWN:  return "cooldown";
+    case UPLOADER_BACKEND_DISABLED:  return "disabled";
+    default:                         return "idle";
+    }
+}
+
+typedef struct {
+    const upload_backend_t *be;
+    int slot;
+    sb_state_t state;
+    int64_t retry_at_us;
+    uint32_t last_ok_s;
+    bool last_err_permanent;
+    char err[sizeof(((backend_rt_t *)0)->err)];
+    char cur_day[sizeof(((backend_rt_t *)0)->cur_day)];
+    int cur_unit;
+    int n_units;
+} backend_rt_snapshot_t;
+
+esp_err_t upload_sched_progress_snapshot(uploader_progress_snapshot_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+
+    /* s_task is assigned last, after the lock and runtime slots exist. */
+    if (!s_task) return ESP_ERR_INVALID_STATE;
+
+    backend_rt_snapshot_t runtime[UPLOAD_MAX_BACKENDS] = {0};
+    int n_runtime;
+    int64_t next_scan_us;
+    int64_t snapshot_us = now_us();
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    strlcpy(out->status, s_status, sizeof(out->status));
+    out->scanning = s_scanning;
+    next_scan_us = s_next_scan_us;
+    n_runtime = s_n_rt < UPLOAD_MAX_BACKENDS ? s_n_rt : UPLOAD_MAX_BACKENDS;
+    for (int i = 0; i < n_runtime; ++i) {
+        const backend_rt_t *src = &s_rt[i];
+        backend_rt_snapshot_t *dst = &runtime[i];
+        dst->be = src->be;
+        dst->slot = src->slot;
+        dst->state = src->state;
+        dst->retry_at_us = src->retry_at_us;
+        dst->last_ok_s = src->last_ok_s;
+        dst->last_err_permanent = src->last_err_permanent;
+        strlcpy(dst->err, src->err, sizeof(dst->err));
+        strlcpy(dst->cur_day, src->cur_day, sizeof(dst->cur_day));
+        dst->cur_unit = src->cur_unit;
+        dst->n_units = src->n_units;
+    }
+    xSemaphoreGive(s_lock);
+
+    int64_t until = next_scan_us - snapshot_us;
+    out->next_scan_s = until > 0 ? (uint32_t)(until / 1000000) : 0;
+    out->max_days = uploader_max_days();
+
+    for (int i = 0; i < n_runtime; ++i) {
+        const backend_rt_snapshot_t *src = &runtime[i];
+        if (!src->be) continue;
+
+        uploader_backend_progress_t *dst =
+            &out->backends[out->backend_count++];
+        strlcpy(dst->id, src->be->id ? src->be->id : "", sizeof(dst->id));
+        strlcpy(dst->label,
+                src->be->label ? src->be->label : src->be->id,
+                sizeof(dst->label));
+        dst->configured = src->be->is_configured &&
+                          src->be->is_configured();
+        dst->state = dst->configured ? public_state(src->state)
+                                     : UPLOADER_BACKEND_DISABLED;
+
+        upload_index_backend_progress(src->slot, out->max_days,
+                                      &dst->days_done, &dst->days_total);
+
+        dst->last_success_valid = src->last_ok_s != 0;
+        dst->last_success_epoch_s = src->last_ok_s;
+
+        dst->current_valid = dst->state == UPLOADER_BACKEND_UPLOADING &&
+                             src->cur_day[0] != '\0';
+        if (dst->current_valid) {
+            strlcpy(dst->current_day, src->cur_day,
+                    sizeof(dst->current_day));
+            dst->current_unit = src->cur_unit;
+            dst->current_units = src->n_units;
+        }
+
+        dst->retry_valid = dst->state == UPLOADER_BACKEND_COOLDOWN;
+        if (dst->retry_valid) {
+            int64_t retry_in_us = src->retry_at_us - snapshot_us;
+            dst->retry_in_s = retry_in_us > 0
+                                  ? (uint32_t)(retry_in_us / 1000000) : 0;
+            dst->error_permanent = src->last_err_permanent;
+            dst->error_valid = src->err[0] != '\0';
+            if (dst->error_valid)
+                strlcpy(dst->error, src->err, sizeof(dst->error));
+        }
+    }
+    return ESP_OK;
 }
 
 esp_err_t upload_sched_progress_json(char **out_json)
 {
     if (!out_json) return ESP_ERR_INVALID_ARG;
+    uploader_progress_snapshot_t progress;
+    esp_err_t ret = upload_sched_progress_snapshot(&progress);
+    if (ret != ESP_OK) return ret;
 
-    /* s_task is this module's "fully constructed" sentinel: it is assigned
-     * last, after the mutex, the queue and the runtime slots.  Guarding on
-     * s_lock instead would still expose s_rt/s_n_rt while rt_for() is
-     * populating them. */
-    if (!s_task) return ESP_ERR_INVALID_STATE;
-
-    int max_days = uploader_max_days();
     cJSON *root = cJSON_CreateObject();
     if (!root) return ESP_ERR_NO_MEM;
 
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    cJSON_AddStringToObject(root, "status", s_status);
-    xSemaphoreGive(s_lock);
-
-    cJSON_AddBoolToObject(root, "scanning", s_scanning);
-    int64_t until = s_next_scan_us - now_us();
-    cJSON_AddNumberToObject(root, "next_scan_s", until > 0 ? until / 1000000 : 0);
-    cJSON_AddNumberToObject(root, "max_days", max_days);
+    cJSON_AddStringToObject(root, "status", progress.status);
+    cJSON_AddBoolToObject(root, "scanning", progress.scanning);
+    cJSON_AddNumberToObject(root, "next_scan_s", progress.next_scan_s);
+    cJSON_AddNumberToObject(root, "max_days", progress.max_days);
 
     cJSON *arr = cJSON_AddArrayToObject(root, "backends");
-    for (int i = 0; i < s_n_rt; i++) {
-        backend_rt_t *r = &s_rt[i];
-        if (!r->be) continue;
+    for (size_t i = 0; i < progress.backend_count; i++) {
+        const uploader_backend_progress_t *p = &progress.backends[i];
 
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddStringToObject(o, "id", r->be->id);
-        cJSON_AddStringToObject(o, "label", r->be->label ? r->be->label : r->be->id);
+        cJSON_AddStringToObject(o, "id", p->id);
+        cJSON_AddStringToObject(o, "label", p->label);
+        cJSON_AddBoolToObject(o, "configured", p->configured);
+        cJSON_AddStringToObject(o, "state", public_state_name(p->state));
+        cJSON_AddNumberToObject(o, "days_done", p->days_done);
+        cJSON_AddNumberToObject(o, "days_total", p->days_total);
 
-        bool conf = r->be->is_configured && r->be->is_configured();
-        cJSON_AddBoolToObject(o, "configured", conf);
-        cJSON_AddStringToObject(o, "state",
-                                conf ? state_name(r->state) : "disabled");
+        if (p->last_success_valid)
+            cJSON_AddNumberToObject(o, "last_ok_s", p->last_success_epoch_s);
 
-        int done = 0, total = 0;
-        upload_index_backend_progress(r->slot, max_days, &done, &total);
-        cJSON_AddNumberToObject(o, "days_done", done);
-        cJSON_AddNumberToObject(o, "days_total", total);
-
-        if (r->last_ok_s) cJSON_AddNumberToObject(o, "last_ok_s", r->last_ok_s);
-
-        char cur_day[12], err[72];
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        strlcpy(cur_day, r->cur_day, sizeof(cur_day));
-        strlcpy(err, r->err, sizeof(err));
-        xSemaphoreGive(s_lock);
-
-        if (r->state == SB_UPLOADING && cur_day[0]) {
+        if (p->current_valid) {
             cJSON *cur = cJSON_AddObjectToObject(o, "cur");
-            cJSON_AddStringToObject(cur, "day", cur_day);
-            cJSON_AddNumberToObject(cur, "unit", r->cur_unit);
-            cJSON_AddNumberToObject(cur, "units", r->n_units);
+            cJSON_AddStringToObject(cur, "day", p->current_day);
+            cJSON_AddNumberToObject(cur, "unit", p->current_unit);
+            cJSON_AddNumberToObject(cur, "units", p->current_units);
         }
-        if (r->state == SB_COOLDOWN) {
-            int64_t left = r->retry_at_us - now_us();
-            cJSON_AddNumberToObject(o, "retry_in_s", left > 0 ? left / 1000000 : 0);
-            if (err[0]) cJSON_AddStringToObject(o, "err", err);
-            cJSON_AddBoolToObject(o, "err_permanent", r->last_err_permanent);
+        if (p->retry_valid) {
+            cJSON_AddNumberToObject(o, "retry_in_s", p->retry_in_s);
+            if (p->error_valid) cJSON_AddStringToObject(o, "err", p->error);
+            cJSON_AddBoolToObject(o, "err_permanent", p->error_permanent);
         }
         cJSON_AddItemToArray(arr, o);
     }

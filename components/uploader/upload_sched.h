@@ -86,6 +86,10 @@ void upload_sched_set_busy_fn(upload_sched_busy_fn_t fn);
 /* Compact progress for the Web UI.  Caller frees. */
 esp_err_t upload_sched_progress_json(char **out_json);
 
+/* Allocation-free structured form used by the public uploader snapshot API
+ * and as the single source for progress JSON serialization. */
+esp_err_t upload_sched_progress_snapshot(uploader_progress_snapshot_t *out);
+
 /* One-line summary for /api/status: number of units not yet uploaded across
  * configured backends, and the worst backend state as a short string. */
 void upload_sched_summary(int *out_pending, const char **out_worst);
