@@ -99,9 +99,37 @@ for setting in (
 for unit in ("board_waveshare_7b.c", "bsp_display_7b.c", "bsp_power_7b.c", "bsp_audio_7b.c"):
     assert f'"{unit}"' in cmake, f"7B build omits {unit}"
 
-# The 7-inch build is a native touch application, not a scaled-up status view.
-for tab in ("Live", "History", "Devices", "Settings", "System"):
-    require(display, rf'lv_tabview_add_tab\(s_tabview,\s*"{tab}"\)', f"{tab} touch tab")
+# The 7-inch build follows the fixed three-screen bedside handoff.  Navigation
+# is custom rather than an LVGL tabview so the centred 172x58 pills and the
+# separate six-section Manage rail can be represented without tab chrome.
+for pattern, description in (
+    (r"#define\s+UI_HEADER_H\s+70\b", "70px shared header"),
+    (r"#define\s+UI_CONTENT_Y\s+70\b", "content begins below the 70px header"),
+    (r"#define\s+UI_CONTENT_H\s+448\b", "448px shared content region"),
+    (r"#define\s+UI_NAV_H\s+82\b", "82px shared navigation region"),
+    (r"s_pages\s*\[\s*3\s*\]", "three primary screen containers"),
+    (r"s_nav_buttons\s*\[\s*3\s*\]", "three custom navigation buttons"),
+    (r"set_active_page\s*\(", "custom page selection"),
+):
+    require(display, pattern, description)
+assert "lv_tabview_create" not in display, "bedside shell must use custom navigation"
+assert "lv_tabview_add_tab" not in display, "legacy five-tab navigation remains"
+for page in ("Home", "History", "Manage"):
+    require(display, rf'"{page}"', f"{page} primary navigation label")
+for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
+    require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
+
+# Home has one contextual therapy action.  Administration and acknowledgement
+# live in Manage or transient banners, never in a permanent Home utility row.
+home_match = re.search(
+    r"static\s+void\s+build_home_page\s*\([^)]*\)\s*\{(.*?)\n\}",
+    display,
+    re.MULTILINE | re.DOTALL,
+)
+assert home_match, "missing build_home_page() for static Home acceptance checks"
+home_source = home_match.group(1)
+for forbidden in ('"Wi-Fi setup"', '"Acknowledge"', '"Screen off"'):
+    assert forbidden not in home_source, f"permanent Home action remains: {forbidden}"
 require(display, r"xTaskCreate\(device_scan_task", "non-blocking BLE scan worker")
 require(display, r"as11_ble_start_pair\(job->addr\)", "native AirSense pairing action")
 require(display, r"as11_ble_confirm_pair\(job->passkey\)", "native AirSense passkey action")
@@ -137,6 +165,9 @@ for metric in ("oai", "cai", "hi", "rera"):
             f"truthful optional {metric} parsing")
 require(history, r"capacity\s*<\s*TOUCH_HISTORY_MAX_DAYS.*?capacity\s*:\s*TOUCH_HISTORY_MAX_DAYS",
         "history loader enforces its 30-night bound")
+require(display, r"TOUCH_HISTORY_MAX_DAYS", "touch UI consumes the 30-night history bound")
+for event_label in ("Obstructive", "Central", "Hypopnea", "RERA"):
+    require(display, rf'"{event_label}"', f"{event_label} History event label")
 require(display, r"Device-reported AHI", "clinical provenance label")
 require(display, r"lv_textarea_set_text\(s_wifi_password,\s*\"\"\)",
         "stored Wi-Fi password excluded from LVGL")

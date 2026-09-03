@@ -42,7 +42,23 @@ require(board, r"QEMU_RGB_TOUCH_POSITION", "QEMU touch MMIO bridge")
 require(display, r"display_driver\.hor_res\s*=\s*WAVESHARE_7B_H_RES", "LVGL width")
 require(display, r"display_driver\.ver_res\s*=\s*WAVESHARE_7B_V_RES", "LVGL height")
 require(display, r"board_qemu_touch_read", "LVGL QEMU touch reader")
-require(display, r"s_qemu_requested_tab", "display-task-owned tab switching")
+require(display, r"s_qemu_requested_tab", "display-task-owned page switching")
+for pattern, description in (
+    (r"#define\s+UI_HEADER_H\s+70\b", "70px shared header"),
+    (r"#define\s+UI_CONTENT_Y\s+70\b", "content y origin"),
+    (r"#define\s+UI_CONTENT_H\s+448\b", "448px shared content region"),
+    (r"#define\s+UI_NAV_H\s+82\b", "82px shared navigation region"),
+    (r"s_pages\s*\[\s*3\s*\]", "three primary QEMU pages"),
+    (r"s_nav_buttons\s*\[\s*3\s*\]", "three custom QEMU navigation buttons"),
+    (r"set_active_page\s*\(", "custom page selection"),
+):
+    require(display, pattern, description)
+assert "lv_tabview_create" not in display
+assert "lv_tabview_add_tab" not in display
+for page in ("Home", "History", "Manage"):
+    require(display, rf'"{page}"', f"{page} QEMU navigation label")
+for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
+    require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
 require(demo, r"QEMU preview.*simulated data", "honest simulated-data labeling")
 require(display, r"simulated preview", "honest simulated device status")
 require(demo, r"bsp_display_qemu_seed_demo\(\)", "deterministic histories and devices")
@@ -70,6 +86,11 @@ assert "--disable-dbus-display" in setup
 assert "SomnoTrace QEMU is already running" in run
 assert "input-send-event" in touch_smoke
 assert "emulated touch at" in touch_smoke
+assert "emulated touch selected page 1" in touch_smoke
+require(touch_smoke, r"x\s*=\s*round\(512\s*\*\s*32767\s*/\s*1023\)",
+        "synthetic click uses History pill horizontal centre")
+require(touch_smoke, r"y\s*=\s*round\(559\s*\*\s*32767\s*/\s*599\)",
+        "synthetic click uses History pill vertical centre")
 for launcher in (run, smoke):
     assert "-m 8M" in launcher
     assert "nvram.esp32s3.efuse" in launcher
