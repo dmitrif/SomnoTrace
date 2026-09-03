@@ -18,10 +18,12 @@ patches, and builds it in
 Mac. Firmware and emulator builds are cached; later runs can omit `--build`
 and normally open in a few seconds.
 
-Use the mouse as a finger: click the Live, History, Devices, Settings and System
-tabs, buttons and settings controls, or drag where the physical screen accepts
-a gesture. The cursor remains visible. Leave the terminal open and use
-Control-C to stop the emulator.
+Use the mouse as a finger. The persistent bottom navigation opens Home,
+History and Manage; the UI stays on the selected screen rather than cycling
+automatically. Manage contains Devices, Connectivity, Display, Alerts, Storage
+and System. Click buttons and settings controls, or drag where the physical
+screen accepts a gesture. The cursor remains visible. Leave the terminal open
+and use Control-C to stop the emulator.
 
 Run the non-graphical firmware boot check with:
 
@@ -45,4 +47,5 @@ It translates one host pointer into the same LVGL input path used by the GT911;
 it does not emulate the GT911's I2C protocol or multitouch. It also does not
 emulate the Waveshare RGB timings, CH422G expander, SDMMC or Bluetooth radio.
 Pairing controls are interactive but BLE operations remain physical-board
-tests.
+tests. Detailed traces and advanced administration remain browser-based rather
+than being duplicated on the bedside display.

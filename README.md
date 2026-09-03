@@ -177,8 +177,9 @@ Access the built-in web portal from any device on your Wi-Fi network without ins
 ### Preview the 7-inch UI on macOS
 
 The Waveshare ESP32-S3-Touch-LCD-7B port includes a native 1024x600 QEMU
-preview with deterministic therapy, history and device data. It automatically
-cycles through the five touchscreen pages; Bluetooth, touch and SD hardware
+preview with deterministic therapy, history and service data. Use the host
+mouse as touch input to move between the persistent Home, History and Manage
+screens; the preview does not auto-cycle. Bluetooth, GT911 and SD hardware
 remain board-only tests.
 
 ```sh
@@ -217,10 +218,10 @@ If you prefer building from source code, Docker is the only dependency:
 For the experimental **Waveshare ESP32-S3-Touch-LCD-7B (1024x600)** profile,
 use `./scripts/build-7b.sh` and follow the
 [7B bring-up and test guide](docs/hardware/waveshare-7b.md). This profile uses
-the whole landscape display for a five-page touch application: Live, History,
-Devices, Settings, and System. AirSense/O2 pairing and everyday display
-settings—including initial Wi-Fi credentials—work locally; the web UI remains
-available for detailed graphs and advanced administration.
+the whole landscape display for three persistent screens: Home, History and
+Manage. Manage provides six local sections—Devices, Connectivity, Display,
+Alerts, Storage and System—for pairing and routine bedside controls. Detailed
+traces and advanced administration remain available in the browser dashboard.
 
 ---
 
