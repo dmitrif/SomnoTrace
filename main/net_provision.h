@@ -26,12 +26,15 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #define NETPROV_SSID_MAXLEN     32
 #define NETPROV_PASS_MAXLEN     64
 #define NETPROV_HOSTNAME_MAXLEN 32
 #define NETPROV_MAX_SSID_SLOTS  4
+#define NETPROV_SCAN_MAX_APS     20
 
 /* One stored Wi-Fi credential pair. */
 struct netprov_wifi_cred {
@@ -70,6 +73,51 @@ void netprov_get_link(netprov_link_t *out);
 
 /* True while the station is associated and holds an IP. */
 bool netprov_is_link_up(void);
+
+/* Asynchronous, non-consuming nearby-network scan.  The returned snapshot is
+ * a bounded value copy and remains valid until a later request changes it;
+ * callers never own driver or heap memory.  `generation` changes once per
+ * request which starts a scan or publishes a blocked/error outcome.
+ *
+ * Scans are rejected while therapy/storage is active or while another Wi-Fi
+ * radio operation owns the driver.  Before netprov_init() (including the QEMU
+ * UI build) request returns ESP_ERR_INVALID_STATE and the snapshot reports
+ * NETPROV_SCAN_BLOCK_NOT_INITIALIZED. */
+typedef enum {
+    NETPROV_SCAN_IDLE = 0,
+    NETPROV_SCAN_RUNNING,
+    NETPROV_SCAN_READY,
+    NETPROV_SCAN_ERROR,
+    NETPROV_SCAN_BLOCKED,
+} netprov_scan_state_t;
+
+typedef enum {
+    NETPROV_SCAN_BLOCK_NONE = 0,
+    NETPROV_SCAN_BLOCK_NOT_INITIALIZED,
+    NETPROV_SCAN_BLOCK_RECORDING,
+    NETPROV_SCAN_BLOCK_RADIO_BUSY,
+} netprov_scan_block_t;
+
+typedef struct {
+    char ssid[NETPROV_SSID_MAXLEN + 1];
+    int8_t rssi;
+    bool secure;
+} netprov_scan_ap_t;
+
+typedef struct {
+    netprov_scan_state_t state;
+    netprov_scan_block_t blocked_by;
+    esp_err_t result;
+    uint32_t generation;
+    size_t count;
+    netprov_scan_ap_t aps[NETPROV_SCAN_MAX_APS];
+} netprov_scan_snapshot_t;
+
+/* Reserve the Wi-Fi radio and start a background scan. */
+esp_err_t netprov_scan_request(void);
+
+/* Copy the latest scan state/result. Safe from any task and before init. */
+void netprov_scan_get_snapshot(netprov_scan_snapshot_t *out);
 
 /* Load the full config from NVS. Returns true if at least one SSID is stored. */
 bool netprov_load_config(struct netprov_config *cfg);
