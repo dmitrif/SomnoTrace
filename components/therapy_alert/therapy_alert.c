@@ -61,9 +61,11 @@ void therapy_alert_set_therapy_active_fn(alert_therapy_active_fn_t fn) { s_thera
  * and writes the state machine.  Every external event — TherapyStart/Stop,
  * BLE disconnect, button acknowledge, config change, and the escalation
  * routine's own progress — is delivered as a message on s_evt_q and applied
- * by that task.  Callers never mutate state and never block on the alert
- * subsystem, which matters because two of them are a NimBLE host callback
- * and a button monitor.
+ * by that task. Acknowledge additionally has a dedicated binary semaphore:
+ * it is a sticky, non-blocking latch, so an acknowledgement cannot disappear
+ * when the ordinary event queue is full. Callers never mutate state and never
+ * block on the alert subsystem, which matters because two of them are a
+ * NimBLE host callback and a button monitor.
  *
  * Why this shape rather than a lock: the previous design guarded a single
  * enum with a heap-allocated mutex, which
@@ -128,6 +130,14 @@ typedef struct {
 static StaticQueue_t s_evt_q_buf;
 static uint8_t       s_evt_q_storage[ALERT_EVT_Q_LEN * sizeof(alert_evt_t)];
 static QueueHandle_t s_evt_q = NULL;
+
+/* Acknowledgement is safety-significant: unlike a periodic tick or duplicate
+ * transition, it cannot be reconstructed if the event queue is saturated.
+ * Keep it in a separate one-bit latch. EVT_ACK remains the wake-up message;
+ * the owner consumes this latch before ordinary queued work, and a duplicate
+ * EVT_ACK is harmless because handle_ack() is idempotent in ALERT_ACKED. */
+static StaticSemaphore_t s_ack_pending_buf;
+static SemaphoreHandle_t s_ack_pending = NULL;
 
 static StaticTask_t  s_monitor_tcb;
 static StackType_t  *s_monitor_stack;
@@ -743,6 +753,14 @@ static void alert_owner_task(void *arg)
     int ticks = 0;
 
     for (;;) {
+        /* Consume the sticky acknowledgement before ordinary work. If the
+         * queue was full when the user acknowledged, its queued wake-up may
+         * have been dropped, but a full queue guarantees this loop is already
+         * making progress and will observe the latch on its next iteration. */
+        if (s_ack_pending && xSemaphoreTake(s_ack_pending, 0) == pdTRUE) {
+            handle_ack();
+        }
+
         alert_evt_t ev;
         if (xQueueReceive(s_evt_q, &ev, pdMS_TO_TICKS(ALERT_TICK_MS)) != pdTRUE) {
             reevaluate_state();
@@ -767,7 +785,11 @@ static void alert_owner_task(void *arg)
             handle_ble_disconnect();
             break;
         case EVT_ACK:
-            handle_ack();
+            /* EVT_ACK is only a wake-up. The semaphore owns the request, so a
+             * delayed duplicate cannot acknowledge a later therapy cycle. */
+            if (s_ack_pending && xSemaphoreTake(s_ack_pending, 0) == pdTRUE) {
+                handle_ack();
+            }
             break;
         case EVT_CONFIG:
             promote_staged_config();
@@ -811,6 +833,8 @@ void therapy_alert_on_ble_disconnect(void)
 
 void therapy_alert_acknowledge(void)
 {
+    if (!s_ack_pending) return;
+    xSemaphoreGive(s_ack_pending);
     post_evt(EVT_ACK, 0, 0);
 }
 
@@ -838,6 +862,9 @@ esp_err_t therapy_alert_init(void)
      * stack is in a completely separate memory region. */
     s_cfg_mtx = xSemaphoreCreateMutexStatic(&s_cfg_mtx_buf);
     if (!s_cfg_mtx) return ESP_ERR_NO_MEM;
+
+    s_ack_pending = xSemaphoreCreateBinaryStatic(&s_ack_pending_buf);
+    if (!s_ack_pending) return ESP_ERR_NO_MEM;
 
     s_evt_q = xQueueCreateStatic(ALERT_EVT_Q_LEN, sizeof(alert_evt_t),
                                  s_evt_q_storage, &s_evt_q_buf);
