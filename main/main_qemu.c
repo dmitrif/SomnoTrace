@@ -5,6 +5,7 @@
 #include "bsp_display.h"
 #include "device_settings.h"
 #include "first_run_setup.h"
+#include "log_stream.h"
 #include "nvs_writer.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -53,6 +54,10 @@ void app_main(void)
         nvs = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs);
+
+    /* Exercise the same bounded retained feed as hardware so the native Logs
+     * screen is a live acceptance surface rather than a disconnected mock. */
+    log_stream_init();
 
     /* Resolve setup before constructing the shell: the normal QEMU target is
      * a deterministic post-setup product preview, not a retained wizard from

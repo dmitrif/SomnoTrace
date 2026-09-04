@@ -37,6 +37,7 @@ matching = function_body(SOURCE, "retained_filter_matches")
 snapshot = function_body(SOURCE, "log_stream_retained_snapshot")
 snapshot_core = function_body(SOURCE, "retained_snapshot_from_bounds")
 clear = function_body(SOURCE, "log_stream_retained_clear")
+retry = function_body(SOURCE, "log_stream_retained_retry")
 save = function_body(SOURCE, "log_stream_retained_save_to_sd")
 
 # The public API is caller-owned and reports both monotonic change tokens and
@@ -44,10 +45,12 @@ save = function_body(SOURCE, "log_stream_retained_save_to_sd")
 for symbol in (
     "log_stream_retained_get_info",
     "log_stream_retained_snapshot",
+    "log_stream_retained_retry",
     "log_stream_retained_clear",
     "log_stream_retained_save_to_sd",
     "generation",
     "total_count",
+    "retained_span_ms",
     "dropped_count",
     "last_error",
     "available",
@@ -83,6 +86,7 @@ assert "__atomic_fetch_add(&s_retained_dropped_count" in append
 assert "copy_length = LOG_STREAM_RETAINED_TEXT_MAX - 1" in append
 assert "slot->text[copy_length] = '\\0'" in append
 assert "slot->sequence = ++s_retained_total_count" in append
+assert "slot->captured_ms = (uint32_t)(esp_timer_get_time() / 1000)" in append
 assert "s_retained_generation++" in append
 assert "text[end] != '\\n'" in capture
 assert "text[line_end - 1] == '\\r'" in capture
@@ -150,5 +154,20 @@ for preserved in ("s_retained_head =", "s_retained_count =", "s_ringbuf"):
     assert preserved not in save, f"Save mutates retained/browser state: {preserved}"
 
 assert "log_stream_retained_contract_test.py" in HOST_TEST
+
+# The disconnected screen has an explicit, non-destructive recovery path.
+# Retry is a no-op for an already-live feed and publishes a fully zeroed ring
+# only after allocation has completed.
+assert "if (s_retained_slots && s_retained_capacity > 0)" in retry
+assert "s_retained_retrying" in retry
+assert retry.find("heap_caps_calloc") < retry.find("s_retained_slots = slots")
+assert "s_retained_head = 0" in retry and "s_retained_count = 0" in retry
+assert "free(slots)" in retry
+assert "MALLOC_CAP_INTERNAL" not in retry, (
+    "late Logs reconnect must not consume the display's internal-RAM reserve"
+)
+assert "s_retained_slots[newest].captured_ms" in initialise or (
+    "s_retained_slots[newest].captured_ms" in SOURCE
+)
 
 print("retained log stream contract passed")

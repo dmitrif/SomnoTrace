@@ -37,9 +37,10 @@ require(DISPLAY, r"#define\s+LOG_VISIBLE_ROWS\s+10\b",
         "ten fixed visible log rows")
 for label in (
     "Pause", "Clear", "Save to card", "Filter by tag or message",
-    "Error", "Warn", "Info", "Debug", "Jump to newest",
+    "Error", "Warn", "Info", "Debug", "Jump to newest", "Clear filter",
 ):
     assert f'"{label}"' in logs, f"Logs screen omits {label}"
+assert '"Reconnect"' in DISPLAY, "Logs screen omits Reconnect"
 require(logs, r"make_touch_button\([^;]*?76,\s*44,\s*\"Pause\"",
         "Pause has at least a 44px target")
 require(logs, r"make_touch_button\([^;]*?72,\s*44,\s*\"Clear\"",
@@ -66,6 +67,9 @@ require(DISPLAY,
 require(DISPLAY,
         r"Stream disconnected - therapy and recording continue",
         "disconnected state says bedside functions continue")
+require(DISPLAY,
+        r"logs_empty_action_cb.*?log_stream_retained_retry",
+        "disconnected view exposes recovery")
 
 # Card export runs away from LVGL, reports determinate progress, and Clear is
 # disabled while that snapshot owns its source view.
@@ -77,6 +81,8 @@ require(DISPLAY,
         "card export runs on a PSRAM-stack worker")
 require(DISPLAY, r"Saving log snapshot to card - %u%%",
         "determinate save progress copy")
+require(DISPLAY, r"%u min retained",
+        "buffer is described in elapsed time as well as lines")
 require(DISPLAY,
         r"set_control_disabled\(s_logs_clear_button,\s*"
         r"save_busy\s*\|\|",

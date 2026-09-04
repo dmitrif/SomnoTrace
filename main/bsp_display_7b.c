@@ -75,10 +75,10 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
     0, 60, 300, 900, 1800
 };
 
-#define UI_HEADER_H 70
-#define UI_CONTENT_Y 70
-#define UI_CONTENT_H 448
-#define UI_NAV_H 82
+#define UI_HEADER_H 64
+#define UI_CONTENT_Y 64
+#define UI_CONTENT_H 462
+#define UI_NAV_H 74
 
 #define STATUS_CAPSULE_RIGHT 1006
 #define STATUS_CAPSULE_H 56
@@ -520,6 +520,8 @@ static lv_obj_t *s_logs_messages[LOG_VISIBLE_ROWS];
 static lv_obj_t *s_logs_empty;
 static lv_obj_t *s_logs_empty_title;
 static lv_obj_t *s_logs_empty_body;
+static lv_obj_t *s_logs_empty_action;
+static lv_obj_t *s_logs_empty_action_label;
 static lv_obj_t *s_logs_footer_left;
 static lv_obj_t *s_logs_footer_right;
 static lv_obj_t *s_logs_jump_button;
@@ -3008,7 +3010,7 @@ static void build_home_page(lv_obj_t *home)
                                  FONT_DATA_HERO, COLOR_TEXT);
     lv_obj_set_style_text_align(s_runtime_label, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lv_obj_t *graph_card = make_card(home, 18, 152, 678, 284);
+    lv_obj_t *graph_card = make_card(home, 18, 152, 678, 298);
     lv_obj_set_style_pad_all(graph_card, 0, 0);
     make_label(graph_card, "Breathing flow", 24, 15, 240,
                FONT_ROW_TITLE, COLOR_TEXT);
@@ -3018,7 +3020,7 @@ static void build_home_page(lv_obj_t *home)
                                 FONT_METRIC_LABEL, COLOR_SECONDARY);
     s_chart = lv_obj_create(graph_card);
     lv_obj_set_pos(s_chart, 0, 52);
-    lv_obj_set_size(s_chart, 678, 232);
+    lv_obj_set_size(s_chart, 678, 246);
     lv_obj_set_style_bg_opa(s_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
     lv_obj_set_style_pad_all(s_chart, 0, 0);
@@ -3044,7 +3046,7 @@ static void build_home_page(lv_obj_t *home)
     make_value_card(home, 865, 173, "FLOW LIMIT", "",
                     &s_flow_lim_label, &s_metric_bars[3]);
 
-    s_therapy_button = make_touch_button(home, 710, 340, 296, 96,
+    s_therapy_button = make_touch_button(home, 710, 340, 296, 110,
                                          "Start therapy", COLOR_LIVE,
                                          action_cb, 1);
     lv_obj_set_style_radius(s_therapy_button, 28, 0);
@@ -3055,7 +3057,7 @@ static void build_home_page(lv_obj_t *home)
 
 static void build_history_page(lv_obj_t *history)
 {
-    lv_obj_t *list = make_card(history, 18, 6, 330, 430);
+    lv_obj_t *list = make_card(history, 18, 6, 330, 444);
     lv_obj_set_style_radius(list, 28, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
     make_label(list, "Nights", 22, 10, 180,
@@ -3068,7 +3070,7 @@ static void build_history_page(lv_obj_t *history)
     s_history_refresh_label = lv_obj_get_child(s_history_refresh, 0);
     lv_obj_set_style_text_font(s_history_refresh_label, FONT_BUTTON_COMPACT, 0);
 
-    s_history_list_scroll = make_plain_container(list, 8, 60, 314, 362);
+    s_history_list_scroll = make_plain_container(list, 8, 60, 314, 376);
     lv_obj_add_flag(s_history_list_scroll, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(s_history_list_scroll, LV_OBJ_FLAG_SCROLL_ELASTIC);
     lv_obj_set_scroll_dir(s_history_list_scroll, LV_DIR_VER);
@@ -3108,10 +3110,10 @@ static void build_history_page(lv_obj_t *history)
     lv_obj_set_style_radius(s_history_load_more, 20, 0);
     lv_obj_add_flag(s_history_load_more, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_t *detail = make_card(history, 362, 6, 644, 430);
+    lv_obj_t *detail = make_card(history, 362, 6, 644, 444);
     lv_obj_set_style_radius(detail, 28, 0);
     lv_obj_set_style_pad_all(detail, 0, 0);
-    s_history_detail_content = make_plain_container(detail, 0, 0, 644, 430);
+    s_history_detail_content = make_plain_container(detail, 0, 0, 644, 444);
     s_history_detail_title = make_label(s_history_detail_content, "Choose a night", 24, 17, 390,
                                         FONT_SCREEN_TITLE, COLOR_TEXT);
     s_history_detail_subtitle = make_label(s_history_detail_content,
@@ -3259,9 +3261,9 @@ static void build_history_page(lv_obj_t *history)
 #endif
     make_label(s_history_detail_content,
                "For trend review. Not a diagnosis or a prescription.",
-               24, 389, 596, FONT_BODY_SMALL, COLOR_TERTIARY);
+               24, 403, 596, FONT_BODY_SMALL, COLOR_TERTIARY);
 
-    s_history_empty = make_plain_container(detail, 0, 0, 644, 430);
+    s_history_empty = make_plain_container(detail, 0, 0, 644, 444);
     s_history_empty_glyph = lv_obj_create(s_history_empty);
     lv_obj_set_pos(s_history_empty_glyph, 294, 92);
     lv_obj_set_size(s_history_empty_glyph, 56, 56);
@@ -3300,7 +3302,7 @@ static lv_obj_t *make_manage_section(lv_obj_t *section, int index,
     if (index == MANAGE_DEVICES) s_device_section_subtitle = sub;
     if (index == MANAGE_CONNECTIVITY) s_connectivity_section_subtitle = sub;
     if (index == MANAGE_SYSTEM) s_system_section_subtitle = sub;
-    s_manage_scrolls[index] = make_plain_container(section, 14, 76, 718, 340);
+    s_manage_scrolls[index] = make_plain_container(section, 14, 76, 718, 354);
     /* Only panes that can exceed the viewport should participate in LVGL's
      * drag/throw machinery.  A vertical gesture on a short pane used to move
      * the entire surface elastically and redraw hundreds of thousands of
@@ -3897,6 +3899,24 @@ static void logs_level_cb(lv_event_t *event)
     s_logs_filter_dirty = true;
 }
 
+static void logs_empty_action_cb(lv_event_t *event)
+{
+    (void)event;
+    log_stream_retained_info_t info;
+    if (log_stream_retained_get_info(&info) != ESP_OK || !info.available) {
+        (void)log_stream_retained_retry();
+    } else {
+        lv_textarea_set_text(s_logs_query, "");
+        if (s_logs_level_mask == 0) {
+            s_logs_level_mask = LOG_STREAM_RETAINED_LEVEL_ERROR |
+                                LOG_STREAM_RETAINED_LEVEL_WARN |
+                                LOG_STREAM_RETAINED_LEVEL_INFO;
+        }
+    }
+    s_logs_seen_generation = UINT64_MAX;
+    s_logs_filter_dirty = true;
+}
+
 static void logs_clear_cb(lv_event_t *event)
 {
     (void)event;
@@ -4064,6 +4084,15 @@ static void build_logs_section(lv_obj_t *section)
         s_logs_empty, "The retained feed will appear here as services report.",
         90, 136, 538, FONT_BODY_SMALL, COLOR_SECONDARY);
     lv_obj_set_style_text_align(s_logs_empty_body, LV_TEXT_ALIGN_CENTER, 0);
+    s_logs_empty_action = make_touch_button(
+        s_logs_empty, 274, 182, 170, 48, "Clear filter", COLOR_INVERSE,
+        logs_empty_action_cb, 0);
+    lv_obj_set_style_radius(s_logs_empty_action, 24, 0);
+    s_logs_empty_action_label = lv_obj_get_child(s_logs_empty_action, 0);
+    lv_obj_set_style_text_font(s_logs_empty_action_label, FONT_BUTTON_SMALL, 0);
+    lv_obj_set_style_text_color(s_logs_empty_action_label,
+                                lv_color_hex(COLOR_BASE), 0);
+    lv_obj_add_flag(s_logs_empty_action, LV_OBJ_FLAG_HIDDEN);
 
     s_logs_jump_button = make_touch_button(section, 258, 326, 226, 44,
                                             "Jump to newest", COLOR_INVERSE,
@@ -4074,11 +4103,11 @@ static void build_logs_section(lv_obj_t *section)
     lv_obj_set_style_text_color(s_logs_jump_label, lv_color_hex(COLOR_BASE), 0);
     lv_obj_add_flag(s_logs_jump_button, LV_OBJ_FLAG_HIDDEN);
 
-    s_logs_footer_left = make_label(section, "Waiting for log feed", 14, 390,
+    s_logs_footer_left = make_label(section, "Waiting for log feed", 14, 404,
                                     330, FONT_AXIS, COLOR_TERTIARY);
     s_logs_footer_right = make_label(
         section, "Older lines roll off the buffer. Save to card to keep them.",
-        350, 390, 382, FONT_AXIS, COLOR_TERTIARY);
+        350, 404, 382, FONT_AXIS, COLOR_TERTIARY);
     lv_obj_set_style_text_align(s_logs_footer_right, LV_TEXT_ALIGN_RIGHT, 0);
 
     s_logs_visible_lines = heap_caps_calloc(
@@ -4159,7 +4188,7 @@ static void build_manage_page(lv_obj_t *manage)
         "Devices", "Connectivity", "Alerts", "Uploads",
         "Storage", "System", "Logs", "Advanced"
     };
-    lv_obj_t *rail = make_card(manage, 18, 6, 228, 430);
+    lv_obj_t *rail = make_card(manage, 18, 6, 228, 444);
     lv_obj_set_style_radius(rail, 28, 0);
     lv_obj_set_style_pad_all(rail, 8, 0);
     for (int i = 0; i < MANAGE_SECTION_COUNT; ++i) {
@@ -4180,11 +4209,11 @@ static void build_manage_page(lv_obj_t *manage)
                           LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     }
 
-    lv_obj_t *panel = make_card(manage, 260, 6, 746, 430);
+    lv_obj_t *panel = make_card(manage, 260, 6, 746, 444);
     lv_obj_set_style_radius(panel, 28, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
     for (int i = 0; i < MANAGE_SECTION_COUNT; ++i)
-        s_manage_sections[i] = make_plain_container(panel, 0, 0, 746, 430);
+        s_manage_sections[i] = make_plain_container(panel, 0, 0, 746, 444);
     build_devices_section(s_manage_sections[MANAGE_DEVICES]);
     build_connectivity_section(s_manage_sections[MANAGE_CONNECTIVITY]);
     build_alerts_section(s_manage_sections[MANAGE_ALERTS]);
@@ -4316,7 +4345,7 @@ static void build_ui(void)
     static const char *nav_names[] = { "Home", "History", "Manage" };
     for (int i = 0; i < 3; ++i) {
         s_nav_buttons[i] = make_destination_button(
-            nav, 244 + i * 182, 12, 172, 58, nav_names[i], COLOR_CAPSULE,
+            nav, 244 + i * 182, 8, 172, 58, nav_names[i], COLOR_CAPSULE,
             nav_cb, i);
         s_nav_labels[i] = lv_obj_get_child(s_nav_buttons[i], 0);
         lv_obj_set_style_text_font(s_nav_labels[i], FONT_BODY_LARGE, 0);
@@ -5544,6 +5573,7 @@ static void refresh_logs_widgets(const ui_state_t *state)
         set_label_text_if_changed(
             s_logs_empty_body,
             "The logging feed stopped reporting. Therapy and card recording are unaffected; saved card logs remain available.");
+        set_label_text_if_changed(s_logs_empty_action_label, "Reconnect");
     } else if (s_logs_visible_count == 0) {
         const char *query = lv_textarea_get_text(s_logs_query);
         if (query && query[0]) {
@@ -5554,10 +5584,14 @@ static void refresh_logs_widgets(const ui_state_t *state)
                 (s_logs_level_mask & LOG_STREAM_RETAINED_LEVEL_DEBUG)
                     ? "Clear the filter or enable another level."
                     : "Clear the filter or enable Debug to widen the search.");
+            set_label_text_if_changed(s_logs_empty_action_label,
+                                      "Clear filter");
         } else if (s_logs_level_mask == 0) {
             set_label_text_if_changed(s_logs_empty_title, "No levels selected");
             set_label_text_if_changed(s_logs_empty_body,
                                       "Enable at least one level above.");
+            set_label_text_if_changed(s_logs_empty_action_label,
+                                      "Reset levels");
         } else {
             set_label_text_if_changed(s_logs_empty_title, "No log lines yet");
             set_label_text_if_changed(
@@ -5566,6 +5600,11 @@ static void refresh_logs_widgets(const ui_state_t *state)
         }
     }
     set_hidden(s_logs_empty, available && s_logs_visible_count > 0);
+    const char *active_query = lv_textarea_get_text(s_logs_query);
+    bool empty_action = !available ||
+        (s_logs_visible_count == 0 &&
+         ((active_query && active_query[0]) || s_logs_level_mask == 0));
+    set_hidden(s_logs_empty_action, !empty_action);
 
     for (int row = 0; row < LOG_VISIBLE_ROWS; ++row) {
         bool shown = available && row < (int)s_logs_visible_count;
@@ -5625,11 +5664,21 @@ static void refresh_logs_widgets(const ui_state_t *state)
         set_label_text_if_changed(s_logs_footer_left,
                                   "Could not save snapshot - check the card");
     } else {
-        set_label_text_fmt_if_changed(
-            s_logs_footer_left, "Showing %u recent line%s - %u retained",
-            (unsigned)s_logs_visible_count,
-            s_logs_visible_count == 1 ? "" : "s",
-            (unsigned)s_logs_visible_info.retained_count);
+        uint32_t retained_minutes =
+            s_logs_visible_info.retained_span_ms / 60000U;
+        if (retained_minutes > 0) {
+            set_label_text_fmt_if_changed(
+                s_logs_footer_left,
+                "Showing %u of %u lines - %u min retained",
+                (unsigned)s_logs_visible_count,
+                (unsigned)s_logs_visible_info.retained_count,
+                (unsigned)retained_minutes);
+        } else {
+            set_label_text_fmt_if_changed(
+                s_logs_footer_left, "Showing %u of %u lines - under 1 min",
+                (unsigned)s_logs_visible_count,
+                (unsigned)s_logs_visible_info.retained_count);
+        }
     }
 }
 

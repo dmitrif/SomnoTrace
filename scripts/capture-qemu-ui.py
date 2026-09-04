@@ -12,14 +12,15 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SCREEN_SCENARIOS = {
-    "home": (0, (330, 559)),
-    "history": (1, (512, 559)),
-    "manage": (2, (694, 559)),
+    "home": (0, (330, 563)),
+    "history": (1, (512, 563)),
+    "manage": (2, (694, 563)),
 }
 INTERACTION_SCENARIOS = (
     "devices",
-    "display-controls",
-    "display-timeout-open",
+    "system-display-controls",
+    "system-display-timeout-open",
+    "logs",
     "connectivity-password-keyboard",
     "connectivity-password-revealed",
     "connectivity-password-remasked",
@@ -125,26 +126,70 @@ def click(process, log_path, stream, x, y):
     time.sleep(0.08)
 
 
+def drag(process, log_path, stream, start, end, steps=8):
+    """Send one sampled finger drag through the QEMU touch bridge."""
+    sx, sy = start
+    ex, ey = end
+    log_offset = log_character_offset(log_path)
+    qmp_command(stream, "input-send-event", {"events": [
+        {"type": "abs", "data": {
+            "axis": "x", "value": round(sx * 32767 / 1023),
+        }},
+        {"type": "abs", "data": {
+            "axis": "y", "value": round(sy * 32767 / 599),
+        }},
+        {"type": "btn", "data": {"button": "left", "down": True}},
+    ]})
+    try:
+        wait_for_log(
+            process, log_path, "emulated touch at", 3,
+            start_offset=log_offset,
+        )
+        for step in range(1, steps + 1):
+            x = round(sx + (ex - sx) * step / steps)
+            y = round(sy + (ey - sy) * step / steps)
+            qmp_command(stream, "input-send-event", {"events": [
+                {"type": "abs", "data": {
+                    "axis": "x", "value": round(x * 32767 / 1023),
+                }},
+                {"type": "abs", "data": {
+                    "axis": "y", "value": round(y * 32767 / 599),
+                }},
+            ]})
+            time.sleep(0.04)
+    finally:
+        qmp_command(stream, "input-send-event", {"events": [
+            {"type": "btn", "data": {"button": "left", "down": False}},
+        ]})
+    time.sleep(0.15)
+
+
 def interaction_sequence(name):
     if name == "devices":
         return (
             # Stop therapy first, let its transient notice clear, then open
             # Manage. Devices is the deterministic default Manage section.
             ((858, 458), 3.4, None),
-            ((694, 559), 0.35, "emulated touch selected page 2"),
+            ((694, 563), 0.35, "emulated touch selected page 2"),
         )
-    if name in ("display-controls", "display-timeout-open"):
+    if name in ("system-display-controls", "system-display-timeout-open"):
         sequence = [
-            ((694, 559), 0.35, "emulated touch selected page 2"),
-            ((130, 256), 0.5, None),
+            ((694, 563), 0.35, "emulated touch selected page 2"),
+            ((130, 368), 0.35, None),
+            (((280, 450), (280, 180)), 0.5, "__drag__"),
         ]
-        if name == "display-timeout-open":
-            sequence.append(((738, 450), 0.5, None))
+        if name == "system-display-timeout-open":
+            sequence.append(((720, 410), 0.5, None))
         return tuple(sequence)
+    if name == "logs":
+        return (
+            ((694, 563), 0.35, "emulated touch selected page 2"),
+            ((130, 420), 0.6, None),
+        )
     if name.startswith("connectivity-password-"):
         sequence = [
-            ((694, 559), 0.35, "emulated touch selected page 2"),
-            ((130, 186), 0.5, None),
+            ((694, 563), 0.35, "emulated touch selected page 2"),
+            ((130, 160), 0.5, None),
             ((620, 396), 0.5, None),
             # Type "hunt" on the actual LVGL keyboard so the acceptance
             # captures exercise password masking rather than an empty hint.
@@ -206,9 +251,9 @@ def validate_persistent_shell(name, payload, representative, interaction):
     # navigation. Every other frame must retain all three navigation anchors.
     if not name.startswith("connectivity-password-"):
         anchors.update({
-            "Home navigation": ((244, 529, 416, 590), 35),
-            "History navigation": ((426, 529, 598, 590), 35),
-            "Manage navigation": ((608, 529, 780, 590), 35),
+            "Home navigation": ((244, 531, 416, 594), 35),
+            "History navigation": ((426, 531, 598, 594), 35),
+            "Manage navigation": ((608, 531, 780, 594), 35),
         })
     for label, (bounds, minimum) in anchors.items():
         if bright_samples(payload, bounds) < minimum:
@@ -220,12 +265,16 @@ def validate_persistent_shell(name, payload, representative, interaction):
         if bright_samples(payload, (27, 137, 326, 203), 120) < 800:
             raise AssertionError("representative History night is not selected")
 
-    if name in ("devices", "display-controls", "display-timeout-open"):
+    if name in (
+        "devices", "system-display-controls",
+        "system-display-timeout-open", "logs",
+    ):
         for index, label in enumerate((
-            "Devices", "Connectivity", "Display", "Alerts", "Storage", "System"
+            "Devices", "Connectivity", "Alerts", "Uploads",
+            "Storage", "System", "Logs", "Advanced",
         )):
-            y1 = 83 + index * 70
-            if bright_samples(payload, (35, y1, 225, y1 + 64)) < 25:
+            y1 = 84 + index * 52
+            if bright_samples(payload, (35, y1, 225, y1 + 48)) < 20:
                 raise AssertionError(f"Manage rail entry {label} is absent")
 
     if name.startswith("connectivity-password-"):
@@ -300,8 +349,14 @@ def capture_screen(
         if interaction:
             for tap, delay, expected_log in interaction_sequence(name):
                 log_offset = log_character_offset(serial_log)
-                click(process, serial_log, stream, *tap)
+                if expected_log == "__drag__":
+                    drag(process, serial_log, stream, tap[0], tap[1])
+                else:
+                    click(process, serial_log, stream, *tap)
                 if expected_log:
+                    if expected_log == "__drag__":
+                        wait_healthy(process, serial_log, delay)
+                        continue
                     wait_for_log(
                         process, serial_log, expected_log, 3,
                         start_offset=log_offset,
@@ -332,7 +387,7 @@ def capture_screen(
                 elif name == "history":
                     click(process, serial_log, stream, 150, 163)
                 elif name == "manage":
-                    click(process, serial_log, stream, 120, 468)
+                    click(process, serial_log, stream, 120, 368)
                 # The Home action emits a three-second confirmation notice. The
                 # acceptance frame is the persistent stopped state beneath it.
                 wait_healthy(process, serial_log, 3.4 if name == "home" else 0.5)

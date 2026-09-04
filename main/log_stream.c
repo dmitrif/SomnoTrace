@@ -39,6 +39,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 #include "sd_storage.h"
 #include "psram_task.h"
@@ -91,6 +92,7 @@ static bool s_sd_ready;              /* SD card is mounted and log dir created *
 
 typedef struct {
     uint64_t sequence;
+    uint32_t captured_ms;
     uint16_t length;
     uint8_t level;
     uint8_t flags;
@@ -113,6 +115,7 @@ static uint64_t s_retained_generation;
 static uint64_t s_retained_total_count;
 static volatile uint32_t s_retained_dropped_count;
 static bool s_retained_in_psram;
+static bool s_retained_retrying;
 static esp_err_t s_retained_last_error = ESP_ERR_INVALID_STATE;
 static portMUX_TYPE s_retained_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -164,6 +167,17 @@ static void retained_fill_info_locked(log_stream_retained_info_t *info)
     info->retained_count = s_retained_count;
     info->generation = s_retained_generation;
     info->total_count = s_retained_total_count;
+    info->retained_span_ms = 0;
+    if (s_retained_slots && s_retained_capacity > 0 &&
+        s_retained_count > 1) {
+        size_t oldest = (s_retained_head + s_retained_capacity -
+                         s_retained_count) % s_retained_capacity;
+        size_t newest = (s_retained_head + s_retained_capacity - 1) %
+                        s_retained_capacity;
+        info->retained_span_ms =
+            s_retained_slots[newest].captured_ms -
+            s_retained_slots[oldest].captured_ms;
+    }
     info->dropped_count = __atomic_load_n(&s_retained_dropped_count,
                                           __ATOMIC_RELAXED);
     info->last_error = s_retained_last_error;
@@ -344,6 +358,7 @@ static void retained_append_line(const char *text, size_t length,
     slot->level = retained_level_for_line(slot->text, copy_length);
     slot->flags = truncated ? RETAINED_SLOT_TRUNCATED : 0;
     slot->sequence = ++s_retained_total_count;
+    slot->captured_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
     s_retained_head = (s_retained_head + 1) % s_retained_capacity;
     if (s_retained_count < s_retained_capacity) s_retained_count++;
@@ -411,6 +426,55 @@ esp_err_t log_stream_retained_get_info(log_stream_retained_info_t *info)
 {
     if (!info) return ESP_ERR_INVALID_ARG;
     return retained_read_bounds(NULL, info);
+}
+
+esp_err_t log_stream_retained_retry(void)
+{
+    portENTER_CRITICAL(&s_retained_lock);
+    if (s_retained_slots && s_retained_capacity > 0) {
+        portEXIT_CRITICAL(&s_retained_lock);
+        return ESP_OK;
+    }
+    if (s_retained_retrying) {
+        portEXIT_CRITICAL(&s_retained_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_retained_retrying = true;
+    portEXIT_CRITICAL(&s_retained_lock);
+
+    retained_slot_t *slots = NULL;
+    size_t capacity = RETAINED_CAPACITY_PSRAM;
+    bool in_psram = true;
+    slots = heap_caps_calloc(1, capacity * sizeof(*slots),
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!slots) {
+        capacity = RETAINED_CAPACITY_PSRAM_FALLBACK;
+        slots = heap_caps_calloc(1, capacity * sizeof(*slots),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    /* Do not consume the display's already-tight internal heap from a late UI
+     * retry.  The tiny internal fallback is safe only during early boot,
+     * before LVGL and BLE have established their budgets. */
+
+    esp_err_t result = slots ? ESP_OK : ESP_ERR_NO_MEM;
+    portENTER_CRITICAL(&s_retained_lock);
+    /* Only one retry owns allocation, but preserve a concurrently restored
+     * feed defensively instead of replacing it. */
+    if (!s_retained_slots && slots) {
+        s_retained_slots = slots;
+        s_retained_capacity = capacity;
+        s_retained_head = 0;
+        s_retained_count = 0;
+        s_retained_in_psram = in_psram;
+        s_retained_generation++;
+        slots = NULL;
+    }
+    s_retained_retrying = false;
+    s_retained_last_error = s_retained_slots ? ESP_OK : result;
+    result = s_retained_slots ? ESP_OK : result;
+    portEXIT_CRITICAL(&s_retained_lock);
+    free(slots);
+    return result;
 }
 
 esp_err_t log_stream_retained_snapshot(

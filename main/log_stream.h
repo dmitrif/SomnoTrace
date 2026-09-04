@@ -100,6 +100,9 @@ typedef struct {
     uint64_t generation;
     /* Accepted line count; Clear deliberately does not reset it. */
     uint64_t total_count;
+    /* Wall-clock-independent span between the oldest and newest retained
+     * captures. Wrap-safe for the ESP timer's 32-bit millisecond projection. */
+    uint32_t retained_span_ms;
     /* Lines dropped because capture storage was unavailable or contended. */
     uint32_t dropped_count;
     esp_err_t last_error;
@@ -113,6 +116,14 @@ typedef void (*log_stream_retained_progress_fn)(size_t processed_lines,
 
 /** Read retained-feed status without allocating. */
 esp_err_t log_stream_retained_get_info(log_stream_retained_info_t *info);
+
+/**
+ * Retry allocation only when the native retained feed is unavailable.  This
+ * is intended for the explicit Reconnect action on the Logs screen; existing
+ * contents are never replaced and capture remains best-effort while the
+ * allocation is attempted.
+ */
+esp_err_t log_stream_retained_retry(void);
 
 /**
  * Copy a filtered snapshot into caller-owned storage.  The call allocates

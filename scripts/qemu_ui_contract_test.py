@@ -85,10 +85,10 @@ for family in ("space_grotesk", "ibm_plex_mono"):
     assert family in fonts, f"missing {family} font declarations"
 assert "somnotrace_space_grotesk_semibold_32" in fonts
 for pattern, description in (
-    (r"#define\s+UI_HEADER_H\s+70\b", "70px shared header"),
-    (r"#define\s+UI_CONTENT_Y\s+70\b", "content y origin"),
-    (r"#define\s+UI_CONTENT_H\s+448\b", "448px shared content region"),
-    (r"#define\s+UI_NAV_H\s+82\b", "82px shared navigation region"),
+    (r"#define\s+UI_HEADER_H\s+64\b", "64px shared header"),
+    (r"#define\s+UI_CONTENT_Y\s+64\b", "content y origin"),
+    (r"#define\s+UI_CONTENT_H\s+462\b", "462px shared content region"),
+    (r"#define\s+UI_NAV_H\s+74\b", "74px shared navigation region"),
     (r"s_pages\s*\[\s*3\s*\]", "three primary QEMU pages"),
     (r"s_nav_buttons\s*\[\s*3\s*\]", "three custom QEMU navigation buttons"),
     (r"set_active_page\s*\(", "custom page selection"),
@@ -115,7 +115,10 @@ require(display,
         "RGB565-safe panel surface with top highlight")
 for page in ("Home", "History", "Manage"):
     require(display, rf'"{page}"', f"{page} QEMU navigation label")
-for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
+for section_label in (
+    "Devices", "Connectivity", "Alerts", "Uploads",
+    "Storage", "System", "Logs", "Advanced",
+):
     require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
 
 # The QEMU build exercises the same content-sized header status capsule as the
@@ -188,7 +191,9 @@ for literal, description in (
     ("Safe to save now · restart will be deferred", "Wi-Fi deferred-restart state"),
     ("Wi-Fi saved; restart deferred while recording", "saved Wi-Fi deferred notice"),
     ("Send test push", "alert test control"),
-    ("microSD capacity and upload queue", "storage summary"),
+    ("microSD capacity and recording health", "storage summary"),
+    ("Destination status and retry progress", "uploads summary"),
+    ("Save to card", "native retained-log export"),
     ("Advanced diagnostics", "system disclosure row"),
     ("Diagnostics", "system header action"),
     ("Not checked", "truthful firmware status value"),
@@ -209,6 +214,8 @@ require(demo, r"QEMU preview.*simulated data", "honest simulated-data labeling")
 require(display, r"simulated preview", "honest simulated device status")
 require(demo, r"bsp_display_qemu_seed_demo\(\)", "deterministic histories and devices")
 require(demo, r"click to emulate touch", "interactive touch preview")
+require(demo, r"log_stream_init\(\).*?bsp_display_init\(\)",
+        "live retained Logs feed starts before the QEMU shell")
 assert "bsp_display_qemu_set_tab(tab)" not in demo
 
 for setting in (
@@ -245,7 +252,7 @@ require(touch_smoke, r"click_latency\s*>\s*1\.5",
         "bounded post-render navigation latency")
 require(touch_smoke, r"x\s*=\s*round\(512\s*\*\s*32767\s*/\s*1023\)",
         "synthetic click uses History pill horizontal centre")
-require(touch_smoke, r"y\s*=\s*round\(559\s*\*\s*32767\s*/\s*599\)",
+require(touch_smoke, r"y\s*=\s*round\(563\s*\*\s*32767\s*/\s*599\)",
         "synthetic click uses History pill vertical centre")
 require(build_qemu,
         r"SDKCONFIG_DEFAULTS=.*?reconfigure.*?SDKCONFIG_DEFAULTS=.*?build",
@@ -260,20 +267,23 @@ for contract, description in (
     ('dimensions != (1024, 600)', "native capture dimension validation"),
     ('len(sampled_colours) < 8', "blank-frame rejection"),
     ('"Guru Meditation Error"', "runtime panic rejection"),
-    ('"home": (0, (330, 559))', "deterministic Home selection"),
-    ('"history": (1, (512, 559))', "deterministic History selection"),
-    ('"manage": (2, (694, 559))', "deterministic Manage selection"),
+    ('"home": (0, (330, 563))', "deterministic Home selection"),
+    ('"history": (1, (512, 563))', "deterministic History selection"),
+    ('"manage": (2, (694, 563))', "deterministic Manage selection"),
     ('"--screen"', "selective screen capture option"),
     ('"--representative"', "literal handoff-state capture option"),
     ('"--interaction-states"', "additional interaction-state capture option"),
     ('"--interaction-state"', "selective interaction-state capture option"),
     ('"devices"', "therapy-stopped Devices capture"),
-    ('"display-controls"', "Display form-controls capture"),
-    ('"display-timeout-open"', "open timeout dropdown capture"),
+    ('"system-display-controls"', "System display-controls capture"),
+    ('"system-display-timeout-open"', "open timeout dropdown capture"),
+    ('"logs"', "native retained-log capture"),
     ('"connectivity-password-keyboard"', "open password-keyboard capture"),
     ('"connectivity-password-revealed"', "revealed password capture"),
     ('"connectivity-password-remasked"', "remasked password capture"),
-    ('((130, 186), 0.5, None)', "Connectivity rail interaction coordinate"),
+    ('((130, 160), 0.5, None)', "Connectivity rail interaction coordinate"),
+    ('((130, 420), 0.6, None)', "Logs rail interaction coordinate"),
+    ('"__drag__"', "System display-controls scroll gesture"),
     ('((620, 396), 0.5, None)', "password-field interaction coordinate"),
     ('start_offset=log_offset', "new touch/page log synchronization"),
     ('"QEMU UI first frame published"', "initial-frame capture synchronization"),
@@ -317,8 +327,10 @@ require(display,
 require(display, r"if\s*\(x2\s*>\s*x1\)\s*x2--;",
         "half-open History fill spans")
 require(display,
-        r"has_scroll_gutter.*?s_manage_scrolls\[1\].*?"
-        r"s_manage_scrolls\[4\].*?704\s*:\s*718",
+        r"has_scroll_gutter.*?s_manage_scrolls\[MANAGE_DEVICES\].*?"
+        r"s_manage_scrolls\[MANAGE_CONNECTIVITY\].*?"
+        r"s_manage_scrolls\[MANAGE_UPLOADS\].*?"
+        r"s_manage_scrolls\[MANAGE_SYSTEM\].*?704\s*:\s*718",
         "scrollbar gutter only on overflowing Manage sections")
 require(display, r"bool\s+show_device_change\s*=\s*as_paired\s*\|\|\s*ox_paired;",
         "paired-state therapy-change explanation")

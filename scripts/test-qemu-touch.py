@@ -72,6 +72,45 @@ def tap(process, log_path, stream, pixel_x, pixel_y):
     return observed, start_offset
 
 
+def drag(process, log_path, stream, start, end, steps=8):
+    """Send a sampled touch drag, used for the scrollable System pane."""
+    start_offset = log_character_offset(log_path)
+    sx, sy = start
+    ex, ey = end
+    qmp_command(stream, "input-send-event", {"events": [
+        {"type": "abs", "data": {
+            "axis": "x", "value": round(sx * 32767 / 1023),
+        }},
+        {"type": "abs", "data": {
+            "axis": "y", "value": round(sy * 32767 / 599),
+        }},
+        {"type": "btn", "data": {"button": "left", "down": True}},
+    ]})
+    try:
+        observed = wait_for_log(
+            process, log_path, "emulated touch at", 3,
+            start_offset=start_offset,
+        )
+        for step in range(1, steps + 1):
+            x = round(sx + (ex - sx) * step / steps)
+            y = round(sy + (ey - sy) * step / steps)
+            qmp_command(stream, "input-send-event", {"events": [
+                {"type": "abs", "data": {
+                    "axis": "x", "value": round(x * 32767 / 1023),
+                }},
+                {"type": "abs", "data": {
+                    "axis": "y", "value": round(y * 32767 / 599),
+                }},
+            ]})
+            time.sleep(0.04)
+    finally:
+        qmp_command(stream, "input-send-event", {"events": [
+            {"type": "btn", "data": {"button": "left", "down": False}},
+        ]})
+    time.sleep(0.15)
+    return observed, start_offset
+
+
 def main():
     qemu = subprocess.check_output(
         [ROOT / "scripts/setup-qemu-macos.sh"], text=True
@@ -115,7 +154,7 @@ def main():
 
             # Centre of the History pill in the custom three-screen navigation.
             x = round(512 * 32767 / 1023)
-            y = round(559 * 32767 / 599)
+            y = round(563 * 32767 / 599)
             click_started = time.monotonic()
             qmp_command(stream, "input-send-event", {"events": [
                 {"type": "abs", "data": {"axis": "x", "value": x}},
@@ -152,7 +191,7 @@ def main():
             # Exercise the complete manual-sleep interaction from the current
             # History page. Destination controls react on touch-down; command
             # controls still require a press/release gesture.
-            _, home_offset = tap(process, serial_log, stream, 330, 559)
+            _, home_offset = tap(process, serial_log, stream, 330, 563)
             home_selected = wait_for_log(
                 process, serial_log, "emulated touch selected page 0", 3,
                 start_offset=home_offset,
@@ -164,15 +203,15 @@ def main():
             tap(process, serial_log, stream, 858, 458)
             time.sleep(0.5)
 
-            _, manage_offset = tap(process, serial_log, stream, 694, 559)
+            _, manage_offset = tap(process, serial_log, stream, 694, 563)
             manage_selected = wait_for_log(
                 process, serial_log, "emulated touch selected page 2", 3,
                 start_offset=manage_offset,
             )
-            tap(process, serial_log, stream, 130, 256)  # Display rail row
-            time.sleep(0.2)
+            tap(process, serial_log, stream, 130, 368)  # System rail row
+            drag(process, serial_log, stream, (280, 450), (280, 180))
 
-            _, off_offset = tap(process, serial_log, stream, 898, 449)
+            _, off_offset = tap(process, serial_log, stream, 900, 410)
             backlight_off = wait_for_log(
                 process, serial_log, "backlight off", 3,
                 start_offset=off_offset,
@@ -181,7 +220,7 @@ def main():
             # The wake layer must consume this first press over History. If it
             # leaks through, the page-selection log will appear in this exact
             # post-sleep interval and fail the smoke test.
-            _, wake_offset = tap(process, serial_log, stream, 512, 559)
+            _, wake_offset = tap(process, serial_log, stream, 512, 563)
             backlight_on = wait_for_log(
                 process, serial_log, "backlight on", 3,
                 start_offset=wake_offset,
@@ -196,7 +235,7 @@ def main():
                 )
 
             _, second_history_offset = tap(
-                process, serial_log, stream, 512, 559
+                process, serial_log, stream, 512, 563
             )
             history_after_wake = wait_for_log(
                 process, serial_log, "emulated touch selected page 1", 3,
