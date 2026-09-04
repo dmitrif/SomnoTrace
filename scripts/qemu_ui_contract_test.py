@@ -89,9 +89,48 @@ for pattern, description in (
     (r"#define\s+UI_CONTENT_Y\s+64\b", "content y origin"),
     (r"#define\s+UI_CONTENT_H\s+462\b", "462px shared content region"),
     (r"#define\s+UI_NAV_H\s+74\b", "74px shared navigation region"),
+    (r"#define\s+UI_PANEL_X\s+16\b", "16px shared panel inset"),
+    (r"#define\s+UI_PANEL_Y\s+4\b", "shared panels begin at absolute y=68"),
+    (r"#define\s+UI_PANEL_H\s+450\b", "shared panels end at absolute y=518"),
+    (r"#define\s+UI_NAV_PILL_X\s+254\b", "first bottom-nav pill x"),
+    (r"#define\s+UI_NAV_PILL_STEP\s+175\b", "bottom-nav pill stride"),
+    (r"#define\s+UI_NAV_PILL_Y\s+8\b", "bottom-nav pill y"),
+    (r"#define\s+UI_NAV_PILL_W\s+166\b", "bottom-nav pill width"),
+    (r"#define\s+UI_NAV_PILL_H\s+54\b", "bottom-nav pill height"),
+    (r"#define\s+UI_MANAGE_RAIL_W\s+212\b", "212px Manage rail"),
+    (r"#define\s+UI_MANAGE_DETAIL_X\s+240\b", "12px Manage panel gap"),
+    (r"#define\s+UI_MANAGE_DETAIL_W\s+768\b", "768px Manage detail"),
+    (r"#define\s+UI_MANAGE_SCROLL_W\s+740\b", "14px-inset Manage viewport"),
+    (r"#define\s+UI_MANAGE_SCROLL_H\s+360\b", "Manage viewport bottom inset"),
+    (r"#define\s+UI_MANAGE_ROW_W\s+726\b", "Manage scrollbar gutter"),
+    (r"#define\s+UI_MANAGE_ROW_FULL_W\s+740\b", "full-width Manage row"),
     (r"s_pages\s*\[\s*3\s*\]", "three primary QEMU pages"),
     (r"s_nav_buttons\s*\[\s*3\s*\]", "three custom QEMU navigation buttons"),
     (r"set_active_page\s*\(", "custom page selection"),
+):
+    require(display, pattern, description)
+for pattern, description in (
+    (r"make_card\(home,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*680,\s*132\)",
+     "Home grid uses the shared top-left frame"),
+    (r"make_card\(home,\s*UI_PANEL_X,\s*150,\s*680,\s*304\)",
+     "Home graph reaches the shared panel bottom"),
+    (r"make_touch_button\(home,\s*710,\s*338,\s*298,\s*116",
+     "Home action reaches x=1008 and y=518"),
+    (r"make_card\(history,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*330,\s*UI_PANEL_H\)",
+     "History list uses the shared frame"),
+    (r"make_card\(history,\s*358,\s*UI_PANEL_Y,\s*650,\s*UI_PANEL_H\)",
+     "History detail uses the shared frame"),
+    (r"make_card\(manage,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*"
+     r"UI_MANAGE_RAIL_W,\s*UI_PANEL_H\)",
+     "Manage rail is (16,68) 212x450"),
+    (r"make_card\(manage,\s*UI_MANAGE_DETAIL_X,\s*UI_PANEL_Y,\s*"
+     r"UI_MANAGE_DETAIL_W,\s*UI_PANEL_H\)",
+     "Manage detail is (240,68) 768x450"),
+    (r"rail,\s*0,\s*i\s*\*\s*52,\s*196,\s*46",
+     "all eight Manage destinations use 46px visual rows"),
+    (r"nav,\s*UI_NAV_PILL_X\s*\+\s*i\s*\*\s*UI_NAV_PILL_STEP,\s*"
+     r"UI_NAV_PILL_Y,\s*UI_NAV_PILL_W,\s*UI_NAV_PILL_H",
+     "exact 166x54 bottom-nav pill geometry"),
 ):
     require(display, pattern, description)
 assert "lv_tabview_create" not in display
@@ -305,7 +344,7 @@ require(display, r"lv_obj_set_align\(s_keyboard,\s*LV_ALIGN_TOP_LEFT\)",
         "visible top-aligned keyboard geometry")
 require(display, r"lv_obj_set_y\(s_keyboard,\s*top\s*==\s*356\s*\?\s*58\s*:\s*67\).*?top\s*==\s*356\s*\?\s*168\s*:\s*203",
         "handoff keyboard and keypad bounds")
-require(display, r"set_connectivity_editing.*?lv_obj_set_size\(active_row,\s*718,\s*124\).*?lv_obj_set_pos\(target,\s*0,\s*42\).*?lv_obj_set_size\(target,\s*686,\s*60\)",
+require(display, r"set_connectivity_editing.*?lv_obj_set_size\(active_row,\s*UI_MANAGE_ROW_FULL_W,\s*124\).*?lv_obj_set_pos\(target,\s*0,\s*42\).*?lv_obj_set_size\(target,\s*708,\s*60\)",
         "dedicated network-field editing composition")
 require(display,
         r"style_manage_surface.*?COLOR_LIVE.*?LV_STATE_FOCUSED.*?"
@@ -330,7 +369,8 @@ require(display,
         r"has_scroll_gutter.*?s_manage_scrolls\[MANAGE_DEVICES\].*?"
         r"s_manage_scrolls\[MANAGE_CONNECTIVITY\].*?"
         r"s_manage_scrolls\[MANAGE_UPLOADS\].*?"
-        r"s_manage_scrolls\[MANAGE_SYSTEM\].*?704\s*:\s*718",
+        r"s_manage_scrolls\[MANAGE_SYSTEM\].*?UI_MANAGE_ROW_W.*?"
+        r"UI_MANAGE_ROW_FULL_W",
         "scrollbar gutter only on overflowing Manage sections")
 require(display, r"bool\s+show_device_change\s*=\s*as_paired\s*\|\|\s*ox_paired;",
         "paired-state therapy-change explanation")

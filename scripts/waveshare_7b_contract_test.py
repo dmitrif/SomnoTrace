@@ -159,16 +159,55 @@ for unit in ("board_waveshare_7b.c", "bsp_display_7b.c", "bsp_power_7b.c", "bsp_
     assert f'"{unit}"' in cmake, f"7B build omits {unit}"
 
 # The 7-inch build follows the fixed three-screen bedside handoff.  Navigation
-# is custom rather than an LVGL tabview so the centred 172x58 pills and the
-# separate six-section Manage rail can be represented without tab chrome.
+# is custom rather than an LVGL tabview so the centred 166x54 pills and the
+# separate eight-section Manage rail can be represented without tab chrome.
 for pattern, description in (
     (r"#define\s+UI_HEADER_H\s+64\b", "64px shared header"),
     (r"#define\s+UI_CONTENT_Y\s+64\b", "content begins below the 64px header"),
     (r"#define\s+UI_CONTENT_H\s+462\b", "462px shared content region"),
     (r"#define\s+UI_NAV_H\s+74\b", "74px shared navigation region"),
+    (r"#define\s+UI_PANEL_X\s+16\b", "16px shared panel inset"),
+    (r"#define\s+UI_PANEL_Y\s+4\b", "shared panels begin at absolute y=68"),
+    (r"#define\s+UI_PANEL_H\s+450\b", "shared panels end at absolute y=518"),
+    (r"#define\s+UI_NAV_PILL_X\s+254\b", "first bottom-nav pill x"),
+    (r"#define\s+UI_NAV_PILL_STEP\s+175\b", "bottom-nav pill stride"),
+    (r"#define\s+UI_NAV_PILL_Y\s+8\b", "bottom-nav pill y"),
+    (r"#define\s+UI_NAV_PILL_W\s+166\b", "bottom-nav pill width"),
+    (r"#define\s+UI_NAV_PILL_H\s+54\b", "bottom-nav pill height"),
+    (r"#define\s+UI_MANAGE_RAIL_W\s+212\b", "212px Manage rail"),
+    (r"#define\s+UI_MANAGE_DETAIL_X\s+240\b", "12px Manage panel gap"),
+    (r"#define\s+UI_MANAGE_DETAIL_W\s+768\b", "768px Manage detail"),
+    (r"#define\s+UI_MANAGE_SCROLL_W\s+740\b", "14px-inset Manage viewport"),
+    (r"#define\s+UI_MANAGE_SCROLL_H\s+360\b", "Manage viewport bottom inset"),
+    (r"#define\s+UI_MANAGE_ROW_W\s+726\b", "Manage scrollbar gutter"),
+    (r"#define\s+UI_MANAGE_ROW_FULL_W\s+740\b", "full-width Manage row"),
     (r"s_pages\s*\[\s*3\s*\]", "three primary screen containers"),
     (r"s_nav_buttons\s*\[\s*3\s*\]", "three custom navigation buttons"),
     (r"set_active_page\s*\(", "custom page selection"),
+):
+    require(display, pattern, description)
+for pattern, description in (
+    (r"make_card\(home,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*680,\s*132\)",
+     "Home grid uses the shared top-left frame"),
+    (r"make_card\(home,\s*UI_PANEL_X,\s*150,\s*680,\s*304\)",
+     "Home graph reaches the shared panel bottom"),
+    (r"make_touch_button\(home,\s*710,\s*338,\s*298,\s*116",
+     "Home action reaches x=1008 and y=518"),
+    (r"make_card\(history,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*330,\s*UI_PANEL_H\)",
+     "History list uses the shared frame"),
+    (r"make_card\(history,\s*358,\s*UI_PANEL_Y,\s*650,\s*UI_PANEL_H\)",
+     "History detail uses the shared frame"),
+    (r"make_card\(manage,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*"
+     r"UI_MANAGE_RAIL_W,\s*UI_PANEL_H\)",
+     "Manage rail is (16,68) 212x450"),
+    (r"make_card\(manage,\s*UI_MANAGE_DETAIL_X,\s*UI_PANEL_Y,\s*"
+     r"UI_MANAGE_DETAIL_W,\s*UI_PANEL_H\)",
+     "Manage detail is (240,68) 768x450"),
+    (r"rail,\s*0,\s*i\s*\*\s*52,\s*196,\s*46",
+     "all eight Manage destinations use 46px visual rows"),
+    (r"nav,\s*UI_NAV_PILL_X\s*\+\s*i\s*\*\s*UI_NAV_PILL_STEP,\s*"
+     r"UI_NAV_PILL_Y,\s*UI_NAV_PILL_W,\s*UI_NAV_PILL_H",
+     "exact 166x54 bottom-nav pill geometry"),
 ):
     require(display, pattern, description)
 assert "lv_tabview_create" not in display, "bedside shell must use custom navigation"
@@ -238,7 +277,7 @@ display_section = display.split(
     "static int build_display_controls", 1)[1].split(
         "static void build_alerts_section", 1)[0]
 require(display_section,
-        r"lv_obj_set_size\(s_settings_brightness,\s*580,\s*12\).*?"
+        r"lv_obj_set_size\(s_settings_brightness,\s*602,\s*12\).*?"
         r"lv_obj_set_ext_click_area\(s_settings_brightness,\s*18\).*?"
         r"lv_obj_set_style_pad_all\(s_settings_brightness,\s*12,\s*LV_PART_KNOB\)",
         "12px brightness rail with a 48px touch target and 36px knob")

@@ -82,6 +82,21 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define UI_CONTENT_Y 64
 #define UI_CONTENT_H 462
 #define UI_NAV_H 74
+#define UI_PANEL_X 16
+#define UI_PANEL_Y 4
+#define UI_PANEL_H 450
+#define UI_NAV_PILL_X 254
+#define UI_NAV_PILL_STEP 175
+#define UI_NAV_PILL_Y 8
+#define UI_NAV_PILL_W 166
+#define UI_NAV_PILL_H 54
+#define UI_MANAGE_RAIL_W 212
+#define UI_MANAGE_DETAIL_X 240
+#define UI_MANAGE_DETAIL_W 768
+#define UI_MANAGE_SCROLL_W 740
+#define UI_MANAGE_SCROLL_H 360
+#define UI_MANAGE_ROW_W 726
+#define UI_MANAGE_ROW_FULL_W 740
 
 #define STATUS_CAPSULE_RIGHT 1006
 #define STATUS_CAPSULE_H 56
@@ -1137,7 +1152,7 @@ static lv_obj_t *make_value_card(lv_obj_t *parent, int x, int y,
                                  const char *caption, const char *unit,
                                  lv_obj_t **value, lv_obj_t **bar)
 {
-    lv_obj_t *card = make_card(parent, x, y, 141, 153);
+    lv_obj_t *card = make_card(parent, x, y, 143, 153);
     lv_obj_set_style_radius(card, 24, 0);
     lv_obj_set_style_pad_all(card, 0, 0);
     int value_width = unit && unit[0] ? 70 : 105;
@@ -1966,12 +1981,12 @@ static void set_connectivity_editing(lv_obj_t *target, bool editing)
 
     if (editing) {
         lv_obj_set_pos(active_row, 0, 0);
-        lv_obj_set_size(active_row, 718, 124);
+        lv_obj_set_size(active_row, UI_MANAGE_ROW_FULL_W, 124);
         lv_obj_set_pos(target, 0, 42);
-        lv_obj_set_size(target, 686, 60);
+        lv_obj_set_size(target, 708, 60);
         if (target == s_wifi_password) {
             lv_obj_add_flag(s_wifi_password_helper, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(s_wifi_password_reveal, 558, 46);
+            lv_obj_set_pos(s_wifi_password_reveal, 580, 46);
             lv_obj_move_foreground(s_wifi_password_reveal);
         }
         lv_obj_scroll_to_y(s_manage_scrolls[MANAGE_CONNECTIVITY], 0,
@@ -1980,13 +1995,13 @@ static void set_connectivity_editing(lv_obj_t *target, bool editing)
     }
 
     layout_connectivity_rows();
-    lv_obj_set_size(s_connectivity_rows[1], 704, 112);
+    lv_obj_set_size(s_connectivity_rows[1], UI_MANAGE_ROW_W, 112);
     lv_obj_set_pos(s_wifi_ssid, 190, 0);
-    lv_obj_set_size(s_wifi_ssid, 482, 60);
-    lv_obj_set_size(s_connectivity_rows[2], 704, 112);
+    lv_obj_set_size(s_wifi_ssid, 504, 60);
+    lv_obj_set_size(s_connectivity_rows[2], UI_MANAGE_ROW_W, 112);
     lv_obj_set_pos(s_wifi_password, 190, 0);
-    lv_obj_set_size(s_wifi_password, 482, 60);
-    lv_obj_set_pos(s_wifi_password_reveal, 552, 4);
+    lv_obj_set_size(s_wifi_password, 504, 60);
+    lv_obj_set_pos(s_wifi_password_reveal, 574, 4);
     lv_obj_clear_flag(s_wifi_password_helper, LV_OBJ_FLAG_HIDDEN);
     lv_obj_scroll_to_y(s_manage_scrolls[MANAGE_CONNECTIVITY], 0, LV_ANIM_OFF);
 }
@@ -2987,7 +3002,7 @@ static void history_trace_draw_cb(lv_event_t *event)
 
 static void build_home_page(lv_obj_t *home)
 {
-    s_therapy_hero = make_card(home, 18, 6, 678, 132);
+    s_therapy_hero = make_card(home, UI_PANEL_X, UI_PANEL_Y, 680, 132);
     lv_obj_set_style_pad_all(s_therapy_hero, 0, 0);
     s_therapy_orb = lv_obj_create(s_therapy_hero);
     lv_obj_set_pos(s_therapy_orb, 26, 30);
@@ -3016,7 +3031,7 @@ static void build_home_page(lv_obj_t *home)
                                  FONT_DATA_HERO, COLOR_TEXT);
     lv_obj_set_style_text_align(s_runtime_label, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lv_obj_t *graph_card = make_card(home, 18, 152, 678, 298);
+    lv_obj_t *graph_card = make_card(home, UI_PANEL_X, 150, 680, 304);
     lv_obj_set_style_pad_all(graph_card, 0, 0);
     make_label(graph_card, "Breathing flow", 24, 15, 240,
                FONT_ROW_TITLE, COLOR_TEXT);
@@ -3026,7 +3041,7 @@ static void build_home_page(lv_obj_t *home)
                                 FONT_METRIC_LABEL, COLOR_SECONDARY);
     s_chart = lv_obj_create(graph_card);
     lv_obj_set_pos(s_chart, 0, 52);
-    lv_obj_set_size(s_chart, 678, 246);
+    lv_obj_set_size(s_chart, 680, 252);
     lv_obj_set_style_bg_opa(s_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
     lv_obj_set_style_pad_all(s_chart, 0, 0);
@@ -3043,16 +3058,16 @@ static void build_home_page(lv_obj_t *home)
                                      FONT_BODY, COLOR_SECONDARY);
     lv_obj_set_style_text_align(s_chart_message_sub, LV_TEXT_ALIGN_CENTER, 0);
 
-    make_value_card(home, 710, 6, "PRESSURE", "cmH₂O",
+    make_value_card(home, 710, UI_PANEL_Y, "PRESSURE", "cmH₂O",
                     &s_pressure_label, &s_metric_bars[0]);
-    make_value_card(home, 865, 6, "LEAK", "L/min",
+    make_value_card(home, 865, UI_PANEL_Y, "LEAK", "L/min",
                     &s_leak_label, &s_metric_bars[1]);
-    make_value_card(home, 710, 173, "RESP RATE", "bpm",
+    make_value_card(home, 710, 171, "RESP RATE", "bpm",
                     &s_resp_label, &s_metric_bars[2]);
-    make_value_card(home, 865, 173, "FLOW LIMIT", "",
+    make_value_card(home, 865, 171, "FLOW LIMIT", "",
                     &s_flow_lim_label, &s_metric_bars[3]);
 
-    s_therapy_button = make_touch_button(home, 710, 340, 296, 110,
+    s_therapy_button = make_touch_button(home, 710, 338, 298, 116,
                                          "Start therapy", COLOR_LIVE,
                                          action_cb, 1);
     lv_obj_set_style_radius(s_therapy_button, 28, 0);
@@ -3063,7 +3078,7 @@ static void build_home_page(lv_obj_t *home)
 
 static void build_history_page(lv_obj_t *history)
 {
-    lv_obj_t *list = make_card(history, 18, 6, 330, 444);
+    lv_obj_t *list = make_card(history, UI_PANEL_X, UI_PANEL_Y, 330, UI_PANEL_H);
     lv_obj_set_style_radius(list, 28, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
     make_label(list, "Nights", 22, 10, 180,
@@ -3116,10 +3131,11 @@ static void build_history_page(lv_obj_t *history)
     lv_obj_set_style_radius(s_history_load_more, 20, 0);
     lv_obj_add_flag(s_history_load_more, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_t *detail = make_card(history, 362, 6, 644, 444);
+    lv_obj_t *detail = make_card(history, 358, UI_PANEL_Y, 650, UI_PANEL_H);
     lv_obj_set_style_radius(detail, 28, 0);
     lv_obj_set_style_pad_all(detail, 0, 0);
-    s_history_detail_content = make_plain_container(detail, 0, 0, 644, 444);
+    s_history_detail_content = make_plain_container(detail, 0, 0, 650,
+                                                     UI_PANEL_H);
     s_history_detail_title = make_label(s_history_detail_content, "Choose a night", 24, 17, 390,
                                         FONT_SCREEN_TITLE, COLOR_TEXT);
     s_history_detail_subtitle = make_label(s_history_detail_content,
@@ -3269,7 +3285,7 @@ static void build_history_page(lv_obj_t *history)
                "For trend review. Not a diagnosis or a prescription.",
                24, 403, 596, FONT_BODY_SMALL, COLOR_TERTIARY);
 
-    s_history_empty = make_plain_container(detail, 0, 0, 644, 444);
+    s_history_empty = make_plain_container(detail, 0, 0, 650, UI_PANEL_H);
     s_history_empty_glyph = lv_obj_create(s_history_empty);
     lv_obj_set_pos(s_history_empty_glyph, 294, 92);
     lv_obj_set_size(s_history_empty_glyph, 56, 56);
@@ -3303,12 +3319,13 @@ static lv_obj_t *make_manage_section(lv_obj_t *section, int index,
                                      const char *title, const char *subtitle)
 {
     make_label(section, title, 22, 17, 500, FONT_SCREEN_TITLE, COLOR_TEXT);
-    lv_obj_t *sub = make_label(section, subtitle, 22, 45, 650,
+    lv_obj_t *sub = make_label(section, subtitle, 22, 45, 672,
                                FONT_BODY, COLOR_SECONDARY);
     if (index == MANAGE_DEVICES) s_device_section_subtitle = sub;
     if (index == MANAGE_CONNECTIVITY) s_connectivity_section_subtitle = sub;
     if (index == MANAGE_SYSTEM) s_system_section_subtitle = sub;
-    s_manage_scrolls[index] = make_plain_container(section, 14, 76, 718, 354);
+    s_manage_scrolls[index] = make_plain_container(
+        section, 14, 76, UI_MANAGE_SCROLL_W, UI_MANAGE_SCROLL_H);
     /* Only panes that can exceed the viewport should participate in LVGL's
      * drag/throw machinery.  A vertical gesture on a short pane used to move
      * the entire surface elastically and redraw hundreds of thousands of
@@ -3334,13 +3351,15 @@ static lv_obj_t *make_manage_section(lv_obj_t *section, int index,
 static lv_obj_t *make_manage_row(lv_obj_t *scroll, int y, int height)
 {
     /* Only sections whose content actually overflows reserve the handoff's
-     * 14 px scrollbar gutter. Short sections use the full 718 px column. */
+     * 14 px scrollbar gutter. Short sections use the full 740 px column. */
     bool has_scroll_gutter = scroll == s_manage_scrolls[MANAGE_DEVICES] ||
                              scroll == s_manage_scrolls[MANAGE_CONNECTIVITY] ||
                              scroll == s_manage_scrolls[MANAGE_UPLOADS] ||
                              scroll == s_manage_scrolls[MANAGE_SYSTEM];
     lv_obj_t *row = make_card(scroll, 0, y,
-                              has_scroll_gutter ? 704 : 718, height);
+                              has_scroll_gutter ? UI_MANAGE_ROW_W
+                                                : UI_MANAGE_ROW_FULL_W,
+                              height);
     lv_obj_set_style_bg_color(row, lv_color_hex(COLOR_CARD), 0);
     lv_obj_set_style_radius(row, 22, 0);
     lv_obj_set_style_pad_all(row, 16, 0);
@@ -3420,7 +3439,7 @@ static void build_devices_section(lv_obj_t *section)
     lv_obj_add_flag(s_as11_dot, LV_OBJ_FLAG_HIDDEN);
     s_as11_title = make_label(as, "AirSense 11", 0, 0, 180,
                               FONT_ROW_TITLE, COLOR_TEXT);
-    s_as11_status = make_label(as, "Starting Bluetooth service...", 190, 2, 480,
+    s_as11_status = make_label(as, "Starting Bluetooth service...", 190, 2, 502,
                                FONT_BODY_SMALL, COLOR_SECONDARY);
     s_as11_badge = make_inner_card(as, 430, -3, 82, 32, 16);
     lv_obj_set_style_bg_color(s_as11_badge, lv_color_hex(0x123b40), 0);
@@ -3448,24 +3467,24 @@ static void build_devices_section(lv_obj_t *section)
     lv_dropdown_set_options(s_as11_dropdown, "No devices found");
     lv_dropdown_set_symbol(s_as11_dropdown, NULL);
     lv_obj_set_pos(s_as11_dropdown, 0, 82);
-    lv_obj_set_size(s_as11_dropdown, 302, 56);
+    lv_obj_set_size(s_as11_dropdown, 324, 56);
     lv_obj_set_style_text_font(s_as11_dropdown, FONT_BODY_SMALL, 0);
     style_manage_field(s_as11_dropdown);
     make_manage_field_chevron(s_as11_dropdown);
     lv_obj_add_event_cb(s_as11_dropdown, manage_dropdown_list_ready_cb,
                         LV_EVENT_READY, NULL);
-    s_ble_buttons[0] = make_touch_button(as, 314, 82, 94, 56,
+    s_ble_buttons[0] = make_touch_button(as, 336, 82, 94, 56,
                                          "AirSense is ready", COLOR_CONTROL,
                                          scan_cb, 0);
     lv_obj_set_style_text_font(lv_obj_get_child(s_ble_buttons[0], 0),
                                FONT_BUTTON_COMPACT, 0);
-    s_as11_pair_button = make_touch_button(as, 420, 82, 94, 56, "Pair",
+    s_as11_pair_button = make_touch_button(as, 442, 82, 94, 56, "Pair",
                                            COLOR_INVERSE, device_action_cb,
                                            DEVICE_PAIR_AS11);
     s_ble_buttons[1] = s_as11_pair_button;
     lv_obj_set_style_text_color(lv_obj_get_child(s_as11_pair_button, 0),
                                 lv_color_hex(COLOR_BASE), 0);
-    s_ble_buttons[2] = make_touch_button(as, 526, 82, 146, 56,
+    s_ble_buttons[2] = make_touch_button(as, 548, 82, 146, 56,
                                          "Forget", COLOR_CONTROL,
                                          forget_prompt_cb, DEVICE_FORGET_AS11);
     set_button_surface(s_ble_buttons[2], 0x511e26, LV_OPA_COVER);
@@ -3479,11 +3498,11 @@ static void build_devices_section(lv_obj_t *section)
     lv_textarea_set_accepted_chars(s_passkey, "0123456789");
     lv_textarea_set_placeholder_text(s_passkey, "4-digit pairing code");
     lv_obj_set_pos(s_passkey, 0, 150);
-    lv_obj_set_size(s_passkey, 302, 56);
+    lv_obj_set_size(s_passkey, 324, 56);
     lv_obj_set_style_text_font(s_passkey, FONT_BODY, 0);
     style_manage_textarea(s_passkey);
     lv_obj_add_event_cb(s_passkey, passkey_focus_cb, LV_EVENT_FOCUSED, NULL);
-    s_passkey_confirm_button = make_touch_button(as, 314, 150, 200, 56,
+    s_passkey_confirm_button = make_touch_button(as, 336, 150, 200, 56,
                                                   "Confirm code", COLOR_CONTROL,
                                                   device_action_cb,
                                                   DEVICE_CONFIRM_AS11);
@@ -3497,7 +3516,7 @@ static void build_devices_section(lv_obj_t *section)
     lv_obj_add_flag(s_ox_dot, LV_OBJ_FLAG_HIDDEN);
     s_ox_title = make_label(ox, "O₂ Ring", 0, 0, 160,
                             FONT_ROW_TITLE, COLOR_TEXT);
-    s_ox_status = make_label(ox, "Optional oxygen sensor", 170, 2, 500,
+    s_ox_status = make_label(ox, "Optional oxygen sensor", 170, 2, 522,
                              FONT_BODY_SMALL, COLOR_SECONDARY);
     s_ox_badge = make_inner_card(ox, 430, -3, 82, 32, 16);
     lv_obj_set_style_bg_color(s_ox_badge, lv_color_hex(0x123b40), 0);
@@ -3509,20 +3528,20 @@ static void build_devices_section(lv_obj_t *section)
     lv_dropdown_set_options(s_ox_dropdown, "No devices found");
     lv_dropdown_set_symbol(s_ox_dropdown, NULL);
     lv_obj_set_pos(s_ox_dropdown, 0, 48);
-    lv_obj_set_size(s_ox_dropdown, 302, 56);
+    lv_obj_set_size(s_ox_dropdown, 324, 56);
     lv_obj_set_style_text_font(s_ox_dropdown, FONT_BODY_SMALL, 0);
     style_manage_field(s_ox_dropdown);
     make_manage_field_chevron(s_ox_dropdown);
     lv_obj_add_event_cb(s_ox_dropdown, manage_dropdown_list_ready_cb,
                         LV_EVENT_READY, NULL);
-    s_ble_buttons[3] = make_touch_button(ox, 314, 48, 94, 56,
+    s_ble_buttons[3] = make_touch_button(ox, 336, 48, 94, 56,
                                          "Scan", COLOR_CONTROL, scan_cb, 1);
-    s_ble_buttons[4] = make_touch_button(ox, 420, 48, 94, 56,
+    s_ble_buttons[4] = make_touch_button(ox, 442, 48, 94, 56,
                                          "Pair", COLOR_INVERSE,
                                          device_action_cb, DEVICE_PAIR_OX);
     lv_obj_set_style_text_color(lv_obj_get_child(s_ble_buttons[4], 0),
                                 lv_color_hex(COLOR_BASE), 0);
-    s_ble_buttons[5] = make_touch_button(ox, 526, 48, 146, 56,
+    s_ble_buttons[5] = make_touch_button(ox, 548, 48, 146, 56,
                                          "Forget", COLOR_CONTROL,
                                          forget_prompt_cb, DEVICE_FORGET_OX);
     set_button_surface(s_ble_buttons[5], 0x511e26, LV_OPA_COVER);
@@ -3537,7 +3556,7 @@ static void build_devices_section(lv_obj_t *section)
     s_device_change_detail = make_label(
         s_device_change_row,
         "Stop therapy first to pair or forget a device.",
-        0, 29, 650, FONT_BODY_SMALL, COLOR_SECONDARY);
+        0, 29, 672, FONT_BODY_SMALL, COLOR_SECONDARY);
     lv_obj_add_flag(s_device_change_row, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -3545,7 +3564,7 @@ static void build_connectivity_section(lv_obj_t *section)
 {
     lv_obj_t *scroll = make_manage_section(section, MANAGE_CONNECTIVITY, "Connectivity",
                                             "Wi-Fi and local dashboard access");
-    s_wifi_scan_button = make_touch_button(section, 594, 14, 134, 48,
+    s_wifi_scan_button = make_touch_button(section, 616, 14, 134, 48,
                                             "Scan", COLOR_CONTROL,
                                             wifi_scan_request_cb, 0);
     lv_obj_set_style_radius(s_wifi_scan_button, 24, 0);
@@ -3555,7 +3574,7 @@ static void build_connectivity_section(lv_obj_t *section)
     s_connectivity_rows[0] = make_manage_row(scroll, 0, 86);
     make_label(s_connectivity_rows[0], "Current network", 0, 0, 190,
                FONT_ROW_TITLE, COLOR_TEXT);
-    s_network_status = make_label(s_connectivity_rows[0], "Checking network...", 200, 0, 470,
+    s_network_status = make_label(s_connectivity_rows[0], "Checking network...", 200, 0, 492,
                                   FONT_BODY_SMALL, COLOR_SECONDARY);
 
     s_wifi_scan_row = make_manage_row(scroll, 94, 112);
@@ -3567,7 +3586,7 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_dropdown_set_options(s_wifi_scan_dropdown, "Scanning nearby networks...");
     lv_dropdown_set_symbol(s_wifi_scan_dropdown, NULL);
     lv_obj_set_pos(s_wifi_scan_dropdown, 190, 0);
-    lv_obj_set_size(s_wifi_scan_dropdown, 332, 56);
+    lv_obj_set_size(s_wifi_scan_dropdown, 354, 56);
     lv_obj_set_style_text_font(s_wifi_scan_dropdown, FONT_BODY_SMALL, 0);
     style_manage_field(s_wifi_scan_dropdown);
     make_manage_field_chevron(s_wifi_scan_dropdown);
@@ -3575,7 +3594,7 @@ static void build_connectivity_section(lv_obj_t *section)
                         LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(s_wifi_scan_dropdown, wifi_scan_selection_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
-    s_wifi_scan_use_button = make_touch_button(s_wifi_scan_row, 534, 0, 138, 56,
+    s_wifi_scan_use_button = make_touch_button(s_wifi_scan_row, 556, 0, 138, 56,
                                                 "Use", COLOR_INVERSE,
                                                 wifi_scan_use_cb, 0);
     lv_obj_set_style_text_color(lv_obj_get_child(s_wifi_scan_use_button, 0),
@@ -3590,7 +3609,7 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_textarea_set_max_length(s_wifi_ssid, NETPROV_SSID_MAXLEN);
     lv_textarea_set_placeholder_text(s_wifi_ssid, "Wi-Fi name (SSID)");
     lv_obj_set_pos(s_wifi_ssid, 190, 0);
-    lv_obj_set_size(s_wifi_ssid, 482, 60);
+    lv_obj_set_size(s_wifi_ssid, 504, 60);
     lv_obj_set_style_text_font(s_wifi_ssid, FONT_BODY, 0);
     style_manage_textarea(s_wifi_ssid);
     lv_obj_add_event_cb(s_wifi_ssid, text_focus_cb, LV_EVENT_FOCUSED, NULL);
@@ -3610,7 +3629,7 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_textarea_set_max_length(s_wifi_password, NETPROV_PASS_MAXLEN);
     lv_textarea_set_placeholder_text(s_wifi_password, "Enter a new password");
     lv_obj_set_pos(s_wifi_password, 190, 0);
-    lv_obj_set_size(s_wifi_password, 482, 60);
+    lv_obj_set_size(s_wifi_password, 504, 60);
     lv_obj_set_style_text_font(s_wifi_password, FONT_BODY, 0);
     style_manage_textarea(s_wifi_password);
     lv_obj_set_style_pad_right(s_wifi_password, 128, 0);
@@ -3618,7 +3637,7 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_obj_add_event_cb(s_wifi_password, wifi_field_changed_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
     s_wifi_password_reveal = make_touch_button(
-        s_connectivity_rows[2], 552, 4, 112, 52, "Reveal",
+        s_connectivity_rows[2], 574, 4, 112, 52, "Reveal",
         COLOR_CONTROL, wifi_password_reveal_cb, 0);
     lv_obj_set_style_radius(s_wifi_password_reveal, 26, 0);
     s_wifi_password_reveal_label = lv_obj_get_child(s_wifi_password_reveal, 0);
@@ -3630,7 +3649,7 @@ static void build_connectivity_section(lv_obj_t *section)
                FONT_ROW_TITLE, COLOR_TEXT);
     make_label(s_connectivity_rows[3], "Configure Wi-Fi from a phone", 0, 27, 390,
                FONT_BODY_SMALL, COLOR_SECONDARY);
-    s_wifi_hotspot_button = make_touch_button(s_connectivity_rows[3], 506, -3, 166, 56,
+    s_wifi_hotspot_button = make_touch_button(s_connectivity_rows[3], 528, -3, 166, 56,
                                                "Start", COLOR_CONTROL,
                                                action_cb, 3);
 
@@ -3640,7 +3659,7 @@ static void build_connectivity_section(lv_obj_t *section)
     s_wifi_restart_detail = make_label(
         s_connectivity_rows[4], "Save now; restart is requested separately.", 0, 27, 440,
         FONT_BODY_SMALL, COLOR_SECONDARY);
-    s_wifi_save_button = make_touch_button(s_connectivity_rows[4], 472, -3, 200, 56,
+    s_wifi_save_button = make_touch_button(s_connectivity_rows[4], 494, -3, 200, 56,
                                             "Save changes", COLOR_INVERSE,
                                             wifi_save_cb, 0);
     lv_obj_set_style_text_color(lv_obj_get_child(s_wifi_save_button, 0),
@@ -3654,14 +3673,14 @@ static int build_display_controls(lv_obj_t *scroll, int start_y)
     lv_obj_t *brightness = make_manage_row(scroll, start_y, 112);
     make_label(brightness, "Screen brightness", 0, 0, 260,
                FONT_ROW_TITLE, COLOR_TEXT);
-    s_settings_brightness_value = make_label(brightness, "100% - steady", 472, 0, 200,
+    s_settings_brightness_value = make_label(brightness, "100% - steady", 494, 0, 200,
                                               FONT_DATA_BODY, COLOR_TEXT);
     lv_obj_set_style_text_align(s_settings_brightness_value, LV_TEXT_ALIGN_RIGHT, 0);
     make_label(brightness, "Low", 0, 52, 34,
                FONT_BODY_SMALL, COLOR_TERTIARY);
     s_settings_brightness = lv_slider_create(brightness);
     lv_obj_set_pos(s_settings_brightness, 48, 54);
-    lv_obj_set_size(s_settings_brightness, 580, 12);
+    lv_obj_set_size(s_settings_brightness, 602, 12);
     lv_obj_set_ext_click_area(s_settings_brightness, 18);
     /* Inset the value endpoints by the knob radius. The visual rail still
      * spans the full object, while a min/max knob stays clear of its labels. */
@@ -3683,7 +3702,7 @@ static int build_display_controls(lv_obj_t *scroll, int start_y)
     lv_slider_set_value(s_settings_brightness,
                         initial_settings.brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(s_settings_brightness, brightness_cb, LV_EVENT_ALL, NULL);
-    make_label(brightness, "High", 642, 52, 30,
+    make_label(brightness, "High", 664, 52, 30,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 
     lv_obj_t *therapy = make_manage_row(scroll, start_y + 120, 128);
@@ -3720,7 +3739,7 @@ static int build_display_controls(lv_obj_t *scroll, int start_y)
     lv_dropdown_set_symbol(s_settings_screen_timeout, NULL);
     lv_dropdown_set_dir(s_settings_screen_timeout, LV_DIR_TOP);
     lv_obj_set_pos(s_settings_screen_timeout, 360, -3);
-    lv_obj_set_size(s_settings_screen_timeout, 172, 56);
+    lv_obj_set_size(s_settings_screen_timeout, 194, 56);
     lv_obj_set_style_text_font(s_settings_screen_timeout, FONT_BODY_SMALL, 0);
     style_manage_field(s_settings_screen_timeout);
     make_manage_field_chevron(s_settings_screen_timeout);
@@ -3731,7 +3750,7 @@ static int build_display_controls(lv_obj_t *scroll, int start_y)
                         LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_settings_screen_timeout,
                         manage_dropdown_list_ready_cb, LV_EVENT_READY, NULL);
-    lv_obj_t *screen_off = make_touch_button(off, 544, -3, 128, 56, "Off now",
+    lv_obj_t *screen_off = make_touch_button(off, 566, -3, 128, 56, "Off now",
                                               COLOR_INVERSE, action_cb, 4);
     lv_obj_set_style_text_color(lv_obj_get_child(screen_off, 0),
                                 lv_color_hex(COLOR_BASE), 0);
@@ -3749,18 +3768,18 @@ static void build_alerts_section(lv_obj_t *section)
     lv_obj_t *status = make_manage_row(scroll, 0, 114);
     make_label(status, "Push alerts", 0, 0, 190,
                FONT_ROW_TITLE, COLOR_TEXT);
-    s_alert_status = make_label(status, "Reading alert settings...", 200, 0, 472,
+    s_alert_status = make_label(status, "Reading alert settings...", 200, 0, 494,
                                 FONT_BODY_SMALL, COLOR_SECONDARY);
     make_label(status,
                "This 7-inch board has no onboard speaker; persistent on-screen alerts still wake the display.",
-               0, 48, 650, FONT_BODY_SMALL, COLOR_SECONDARY);
+               0, 48, 672, FONT_BODY_SMALL, COLOR_SECONDARY);
 
     lv_obj_t *test = make_manage_row(scroll, 122, 82);
     make_label(test, "Test alert", 0, 0, 390,
                FONT_ROW_TITLE, COLOR_TEXT);
     make_label(test, "Sends one real test push notification", 0, 27, 430,
                FONT_BODY_SMALL, COLOR_SECONDARY);
-    s_alert_test_button = make_touch_button(test, 472, -3, 200, 56,
+    s_alert_test_button = make_touch_button(test, 494, -3, 200, 56,
                                              "Send test push", COLOR_INVERSE,
                                              alert_test_cb, 0);
     lv_obj_set_style_text_color(lv_obj_get_child(s_alert_test_button, 0),
@@ -3772,7 +3791,7 @@ static void build_alerts_section(lv_obj_t *section)
     make_label(browser,
                "Notification server, schedule, and escalation settings are configured in the browser dashboard.",
                0, 29, 470, FONT_BODY_SMALL, COLOR_SECONDARY);
-    make_label(browser, "Browser dashboard only", 500, 20, 172,
+    make_label(browser, "Browser dashboard only", 522, 20, 172,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
 
@@ -3787,14 +3806,14 @@ static void build_uploads_section(lv_obj_t *section)
         s_upload_dots[i] = make_status_dot(row, 0, 7, 12);
         s_upload_titles[i] = make_label(row, "Upload destination", 28, 0, 330,
                                         FONT_ROW_TITLE, COLOR_TEXT);
-        s_upload_states[i] = make_label(row, "Checking", 520, 1, 152,
+        s_upload_states[i] = make_label(row, "Checking", 542, 1, 152,
                                         FONT_BODY, COLOR_TERTIARY);
         lv_obj_set_style_text_align(s_upload_states[i], LV_TEXT_ALIGN_RIGHT, 0);
         s_upload_details[i] = make_label(row, "Reading upload status...", 28, 29,
-                                         620, FONT_BODY_SMALL, COLOR_SECONDARY);
+                                         642, FONT_BODY_SMALL, COLOR_SECONDARY);
         s_upload_meters[i] = lv_bar_create(row);
         lv_obj_set_pos(s_upload_meters[i], 28, 54);
-        lv_obj_set_size(s_upload_meters[i], 620, 8);
+        lv_obj_set_size(s_upload_meters[i], 642, 8);
         lv_bar_set_range(s_upload_meters[i], 0, 100);
         lv_bar_set_value(s_upload_meters[i], 0, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(s_upload_meters[i], lv_color_hex(COLOR_CONTROL),
@@ -3810,7 +3829,7 @@ static void build_uploads_section(lv_obj_t *section)
     make_label(s_upload_browser_row,
                "Credentials, FTP access, formatting, and bulk upload controls stay in the browser dashboard.",
                0, 29, 470, FONT_BODY_SMALL, COLOR_SECONDARY);
-    make_label(s_upload_browser_row, "Browser dashboard only", 500, 22, 172,
+    make_label(s_upload_browser_row, "Browser dashboard only", 522, 22, 172,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
 
@@ -3836,7 +3855,7 @@ static void build_storage_section(lv_obj_t *section)
                               LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_storage_meter, lv_color_hex(COLOR_LIVE),
                               LV_PART_INDICATOR);
-    s_storage_refresh_button = make_touch_button(card, 506, 47, 166, 56,
+    s_storage_refresh_button = make_touch_button(card, 528, 47, 166, 56,
                                                   "Refresh", COLOR_CONTROL,
                                                   storage_refresh_cb, 0);
 
@@ -3846,7 +3865,7 @@ static void build_storage_section(lv_obj_t *section)
     make_label(s_storage_browser_row,
                "Browse, regenerate EDF, and delete recordings in the browser dashboard for now.",
                0, 29, 470, FONT_BODY_SMALL, COLOR_SECONDARY);
-    make_label(s_storage_browser_row, "Browser dashboard only", 500, 22, 172,
+    make_label(s_storage_browser_row, "Browser dashboard only", 522, 22, 172,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
 
@@ -4019,15 +4038,15 @@ static void build_logs_section(lv_obj_t *section)
     s_logs_status = make_label(section, "Starting retained log feed", 34, 43,
                                330, FONT_AXIS, COLOR_SECONDARY);
 
-    s_logs_pause_button = make_touch_button(section, 468, 9, 76, 44, "Pause",
+    s_logs_pause_button = make_touch_button(section, 490, 9, 76, 44, "Pause",
                                              COLOR_CONTROL, logs_pause_cb, 0);
     s_logs_pause_label = lv_obj_get_child(s_logs_pause_button, 0);
     lv_obj_set_style_text_font(s_logs_pause_label, FONT_BUTTON_SMALL, 0);
-    s_logs_clear_button = make_touch_button(section, 552, 9, 72, 44, "Clear",
+    s_logs_clear_button = make_touch_button(section, 574, 9, 72, 44, "Clear",
                                              COLOR_CONTROL, logs_clear_cb, 0);
     lv_obj_set_style_text_font(lv_obj_get_child(s_logs_clear_button, 0),
                                FONT_BUTTON_SMALL, 0);
-    s_logs_save_button = make_touch_button(section, 632, 9, 100, 44,
+    s_logs_save_button = make_touch_button(section, 654, 9, 100, 44,
                                             "Save to card", COLOR_CONTROL,
                                             logs_save_cb, 0);
     s_logs_save_label = lv_obj_get_child(s_logs_save_button, 0);
@@ -4056,13 +4075,15 @@ static void build_logs_section(lv_obj_t *section)
         lv_obj_set_style_text_font(s_logs_level_labels[i], FONT_AXIS, 0);
     }
 
-    lv_obj_t *viewport = make_inner_card(section, 14, 120, 718, 258, 18);
+    lv_obj_t *viewport = make_inner_card(
+        section, 14, 120, UI_MANAGE_SCROLL_W, 258, 18);
     lv_obj_set_style_bg_color(viewport, lv_color_hex(0x090c13), 0);
     lv_obj_set_style_border_width(viewport, 1, 0);
     lv_obj_set_style_border_color(viewport, lv_color_hex(0x252b36), 0);
     s_manage_scrolls[MANAGE_LOGS] = viewport;
     for (int i = 0; i < LOG_VISIBLE_ROWS; ++i) {
-        lv_obj_t *row = make_inner_card(viewport, 7, 4 + i * 25, 704, 24, 4);
+        lv_obj_t *row = make_inner_card(
+            viewport, 7, 4 + i * 25, UI_MANAGE_ROW_W, 24, 4);
         s_logs_rows[i] = row;
         s_logs_accents[i] = make_inner_card(row, 0, 0, 3, 24, 1);
         s_logs_times[i] = make_label(row, "--:--:--.---", 10, 6, 91,
@@ -4071,7 +4092,7 @@ static void build_logs_section(lv_obj_t *section)
                                       FONT_AXIS, COLOR_LIVE);
         s_logs_tags[i] = make_label(row, "system", 148, 6, 112,
                                     FONT_AXIS, COLOR_SECONDARY);
-        s_logs_messages[i] = make_label(row, "", 264, 6, 430,
+        s_logs_messages[i] = make_label(row, "", 264, 6, 452,
                                         FONT_AXIS, COLOR_TEXT);
         lv_label_set_long_mode(s_logs_times[i], LV_LABEL_LONG_CLIP);
         lv_label_set_long_mode(s_logs_levels[i], LV_LABEL_LONG_CLIP);
@@ -4080,18 +4101,19 @@ static void build_logs_section(lv_obj_t *section)
         lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }
 
-    s_logs_empty = make_plain_container(viewport, 0, 0, 718, 258);
-    make_label(s_logs_empty, "?", 335, 54, 48, FONT_SCREEN_TITLE,
+    s_logs_empty = make_plain_container(
+        viewport, 0, 0, UI_MANAGE_SCROLL_W, 258);
+    make_label(s_logs_empty, "?", 346, 54, 48, FONT_SCREEN_TITLE,
                COLOR_SECONDARY);
     s_logs_empty_title = make_label(s_logs_empty, "No log lines yet", 100, 105,
-                                    518, FONT_ROW_TITLE, COLOR_TEXT);
+                                    540, FONT_ROW_TITLE, COLOR_TEXT);
     lv_obj_set_style_text_align(s_logs_empty_title, LV_TEXT_ALIGN_CENTER, 0);
     s_logs_empty_body = make_label(
         s_logs_empty, "The retained feed will appear here as services report.",
-        90, 136, 538, FONT_BODY_SMALL, COLOR_SECONDARY);
+        90, 136, 560, FONT_BODY_SMALL, COLOR_SECONDARY);
     lv_obj_set_style_text_align(s_logs_empty_body, LV_TEXT_ALIGN_CENTER, 0);
     s_logs_empty_action = make_touch_button(
-        s_logs_empty, 274, 182, 170, 48, "Clear filter", COLOR_INVERSE,
+        s_logs_empty, 285, 182, 170, 48, "Clear filter", COLOR_INVERSE,
         logs_empty_action_cb, 0);
     lv_obj_set_style_radius(s_logs_empty_action, 24, 0);
     s_logs_empty_action_label = lv_obj_get_child(s_logs_empty_action, 0);
@@ -4100,7 +4122,7 @@ static void build_logs_section(lv_obj_t *section)
                                 lv_color_hex(COLOR_BASE), 0);
     lv_obj_add_flag(s_logs_empty_action, LV_OBJ_FLAG_HIDDEN);
 
-    s_logs_jump_button = make_touch_button(section, 258, 326, 226, 44,
+    s_logs_jump_button = make_touch_button(section, 269, 326, 226, 44,
                                             "Jump to newest", COLOR_INVERSE,
                                             logs_jump_cb, 0);
     lv_obj_set_style_radius(s_logs_jump_button, 22, 0);
@@ -4113,7 +4135,7 @@ static void build_logs_section(lv_obj_t *section)
                                     330, FONT_AXIS, COLOR_TERTIARY);
     s_logs_footer_right = make_label(
         section, "Older lines roll off the buffer. Save to card to keep them.",
-        350, 404, 382, FONT_AXIS, COLOR_TERTIARY);
+        372, 404, 382, FONT_AXIS, COLOR_TERTIARY);
     lv_obj_set_style_text_align(s_logs_footer_right, LV_TEXT_ALIGN_RIGHT, 0);
 
     s_logs_visible_lines = heap_caps_calloc(
@@ -4126,7 +4148,7 @@ static void build_system_section(lv_obj_t *section)
     lv_obj_t *scroll = make_manage_section(section, MANAGE_SYSTEM, "System",
                                             "Display, hardware health, and maintenance");
     lv_obj_t *header_diagnostics = make_touch_button(
-        section, 590, 12, 134, 48, "Diagnostics", COLOR_CONTROL,
+        section, 612, 12, 134, 48, "Diagnostics", COLOR_CONTROL,
         diagnostics_cb, 0);
     lv_obj_set_style_radius(header_diagnostics, 24, 0);
     lv_obj_set_style_text_font(lv_obj_get_child(header_diagnostics, 0),
@@ -4136,7 +4158,7 @@ static void build_system_section(lv_obj_t *section)
     set_dot_tone(s_system_health_dot, COLOR_LIVE, true);
     s_system_health_title = make_label(health, "All services running", 28, 1, 300,
                                        FONT_ROW_TITLE, COLOR_TEXT);
-    s_system_details = make_label(health, "Collecting diagnostics...", 28, 29, 640,
+    s_system_details = make_label(health, "Collecting diagnostics...", 28, 29, 662,
                                   FONT_BODY_SMALL, COLOR_SECONDARY);
 
     lv_obj_t *firmware = make_manage_row(scroll, 92, 68);
@@ -4144,7 +4166,7 @@ static void build_system_section(lv_obj_t *section)
                FONT_ROW_TITLE, COLOR_TEXT);
     s_system_firmware = make_label(firmware, "Version unavailable", 0, 27, 500,
                                    FONT_BODY_SMALL, COLOR_SECONDARY);
-    lv_obj_t *firmware_state = make_label(firmware, "Not checked", 520, 10, 152,
+    lv_obj_t *firmware_state = make_label(firmware, "Not checked", 542, 10, 152,
                                            FONT_BODY_LARGE, COLOR_TERTIARY);
     lv_obj_set_style_text_align(firmware_state, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -4153,7 +4175,7 @@ static void build_system_section(lv_obj_t *section)
                FONT_ROW_TITLE, COLOR_TEXT);
     make_label(diag, "Memory, task stacks, touch errors, and live status", 0, 27, 440,
                FONT_BODY_SMALL, COLOR_SECONDARY);
-    make_touch_button(diag, 526, -10, 146, 56, "Open",
+    make_touch_button(diag, 548, -10, 146, 56, "Open",
                       COLOR_CONTROL, diagnostics_cb, 0);
 
     int restart_y = build_display_controls(scroll, 244);
@@ -4164,7 +4186,7 @@ static void build_system_section(lv_obj_t *section)
                                          "Confirmation required; blocked during therapy",
                                          0, 29, 440,
                                          FONT_BODY_SMALL, COLOR_SECONDARY);
-    s_reboot_button = make_touch_button(restart, 526, -10, 146, 56, "Restart",
+    s_reboot_button = make_touch_button(restart, 548, -10, 146, 56, "Restart",
                                          0x511e26, reboot_prompt_cb, 0);
     set_button_surface(s_reboot_button, 0x511e26, LV_OPA_COVER);
     lv_obj_set_style_border_width(s_reboot_button, 1, 0);
@@ -4183,7 +4205,7 @@ static void build_advanced_section(lv_obj_t *section)
                FONT_ROW_TITLE, COLOR_TEXT);
     make_label(future,
                "OTA installation, card formatting, reset-all, and destructive file operations need a hold-to-confirm interaction before they can move here safely.",
-               0, 35, 650, FONT_BODY, COLOR_SECONDARY);
+               0, 35, 672, FONT_BODY, COLOR_SECONDARY);
     make_label(future, "Planned for Wave Three", 0, 112, 280,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
@@ -4194,19 +4216,20 @@ static void build_manage_page(lv_obj_t *manage)
         "Devices", "Connectivity", "Alerts", "Uploads",
         "Storage", "System", "Logs", "Advanced"
     };
-    lv_obj_t *rail = make_card(manage, 18, 6, 228, 444);
+    lv_obj_t *rail = make_card(manage, UI_PANEL_X, UI_PANEL_Y,
+                               UI_MANAGE_RAIL_W, UI_PANEL_H);
     lv_obj_set_style_radius(rail, 28, 0);
     lv_obj_set_style_pad_all(rail, 8, 0);
     for (int i = 0; i < MANAGE_SECTION_COUNT; ++i) {
         s_manage_buttons[i] = make_destination_button(
-            rail, 0, i * 52, 212, 48, section_names[i], COLOR_PANEL,
+            rail, 0, i * 52, 196, 46, section_names[i], COLOR_PANEL,
             manage_section_cb, i);
         lv_obj_set_style_radius(s_manage_buttons[i], 20, 0);
         s_manage_labels[i] = lv_obj_get_child(s_manage_buttons[i], 0);
         lv_obj_align(s_manage_labels[i], LV_ALIGN_LEFT_MID, 36, 0);
         lv_obj_set_style_text_font(s_manage_labels[i], FONT_BODY, 0);
         s_manage_dots[i] = lv_obj_create(s_manage_buttons[i]);
-        lv_obj_set_pos(s_manage_dots[i], 16, 20);
+        lv_obj_set_pos(s_manage_dots[i], 16, 19);
         lv_obj_set_size(s_manage_dots[i], 8, 8);
         lv_obj_set_style_radius(s_manage_dots[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(s_manage_dots[i], 0, 0);
@@ -4215,11 +4238,13 @@ static void build_manage_page(lv_obj_t *manage)
                           LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     }
 
-    lv_obj_t *panel = make_card(manage, 260, 6, 746, 444);
+    lv_obj_t *panel = make_card(manage, UI_MANAGE_DETAIL_X, UI_PANEL_Y,
+                                UI_MANAGE_DETAIL_W, UI_PANEL_H);
     lv_obj_set_style_radius(panel, 28, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
     for (int i = 0; i < MANAGE_SECTION_COUNT; ++i)
-        s_manage_sections[i] = make_plain_container(panel, 0, 0, 746, 444);
+        s_manage_sections[i] = make_plain_container(
+            panel, 0, 0, UI_MANAGE_DETAIL_W, UI_PANEL_H);
     build_devices_section(s_manage_sections[MANAGE_DEVICES]);
     build_connectivity_section(s_manage_sections[MANAGE_CONNECTIVITY]);
     build_alerts_section(s_manage_sections[MANAGE_ALERTS]);
@@ -4377,11 +4402,12 @@ static void build_ui(void)
     static const char *nav_names[] = { "Home", "History", "Manage" };
     for (int i = 0; i < 3; ++i) {
         s_nav_buttons[i] = make_destination_button(
-            nav, 244 + i * 182, 8, 172, 58, nav_names[i], COLOR_CAPSULE,
+            nav, UI_NAV_PILL_X + i * UI_NAV_PILL_STEP, UI_NAV_PILL_Y,
+            UI_NAV_PILL_W, UI_NAV_PILL_H, nav_names[i], COLOR_CAPSULE,
             nav_cb, i);
         s_nav_labels[i] = lv_obj_get_child(s_nav_buttons[i], 0);
         lv_obj_set_style_text_font(s_nav_labels[i], FONT_BODY_LARGE, 0);
-        lv_obj_set_style_radius(s_nav_buttons[i], 29, 0);
+        lv_obj_set_style_radius(s_nav_buttons[i], 27, 0);
     }
 
     s_status_scrim = lv_obj_create(screen);
@@ -5959,7 +5985,7 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
                    as_paired ? 28 : (as_pairing || show_as_results) ? 190 : 0,
                    as_paired ? 34 : (as_pairing || show_as_results) ? 2 : 29);
     lv_obj_set_width(s_as11_status,
-                     (as_pairing || show_as_results) ? 480 : 500);
+                     (as_pairing || show_as_results) ? 502 : 522);
     set_hidden(s_as11_badge, !as_paired);
     if (as_paired) lv_obj_set_pos(s_as11_badge, 150, 0);
     set_hidden(s_as11_dropdown, !show_as_results);
@@ -5969,16 +5995,16 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     set_hidden(s_passkey, !waiting_passkey);
     set_hidden(s_passkey_confirm_button, !waiting_passkey);
     if (show_as_idle || as_paired) {
-        lv_obj_set_pos(s_ble_buttons[show_as_idle ? 0 : 2], 526, -3);
+        lv_obj_set_pos(s_ble_buttons[show_as_idle ? 0 : 2], 548, -3);
         lv_obj_set_size(s_ble_buttons[show_as_idle ? 0 : 2], 146, 56);
     } else if (show_as_results) {
         lv_obj_set_pos(s_as11_dropdown, 0, 40);
-        lv_obj_set_pos(s_ble_buttons[0], 314, 40);
+        lv_obj_set_pos(s_ble_buttons[0], 336, 40);
         lv_obj_set_size(s_ble_buttons[0], 94, 56);
-        lv_obj_set_pos(s_as11_pair_button, 420, 40);
+        lv_obj_set_pos(s_as11_pair_button, 442, 40);
     } else if (waiting_passkey) {
         lv_obj_set_pos(s_passkey, 0, 82);
-        lv_obj_set_pos(s_passkey_confirm_button, 314, 82);
+        lv_obj_set_pos(s_passkey_confirm_button, 336, 82);
     }
 
     bool ox_pairing = services->ox_busy || ble_operation == BLE_UI_PAIR_OX ||
@@ -5995,7 +6021,7 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     lv_obj_set_pos(s_ox_status,
                    ox_paired ? 28 : show_ox_results || ox_pairing ? 170 : 0,
                    ox_paired ? 34 : show_ox_results || ox_pairing ? 2 : 29);
-    lv_obj_set_width(s_ox_status, 500);
+    lv_obj_set_width(s_ox_status, 522);
     set_hidden(s_ox_badge, !ox_paired);
     if (ox_paired) lv_obj_set_pos(s_ox_badge, 112, 0);
     set_hidden(s_ox_dropdown, !show_ox_results);
@@ -6003,13 +6029,13 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     set_hidden(s_ble_buttons[4], !show_ox_results);
     set_hidden(s_ble_buttons[5], !ox_paired);
     if (show_ox_idle || ox_paired) {
-        lv_obj_set_pos(s_ble_buttons[show_ox_idle ? 3 : 5], 526, -3);
+        lv_obj_set_pos(s_ble_buttons[show_ox_idle ? 3 : 5], 548, -3);
         lv_obj_set_size(s_ble_buttons[show_ox_idle ? 3 : 5], 146, 56);
     } else if (show_ox_results) {
         lv_obj_set_pos(s_ox_dropdown, 0, 40);
-        lv_obj_set_pos(s_ble_buttons[3], 314, 40);
+        lv_obj_set_pos(s_ble_buttons[3], 336, 40);
         lv_obj_set_size(s_ble_buttons[3], 94, 56);
-        lv_obj_set_pos(s_ble_buttons[4], 420, 40);
+        lv_obj_set_pos(s_ble_buttons[4], 442, 40);
     }
 
     bool show_device_change = as_paired || ox_paired;
