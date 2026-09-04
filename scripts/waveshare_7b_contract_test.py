@@ -231,6 +231,17 @@ require(display, r"s_nav_buttons\[i\]\s*=\s*make_destination_button",
         "immediate bottom navigation")
 require(display, r"s_manage_buttons\[i\]\s*=\s*make_destination_button",
         "immediate Manage section rail")
+require(display, r"s_status_capsule\s*=\s*make_destination_button",
+        "immediate non-destructive status tray")
+require(display,
+        r"static void set_destination_surface.*?"
+        r"LV_STYLE_TRANSLATE_Y,\s*0,\s*LV_STATE_PRESSED.*?"
+        r"LV_STYLE_BG_OPA,\s*resting_opa,\s*LV_STATE_PRESSED",
+        "destination controls do not replay generic press feedback on release")
+require(display,
+        r"lv_obj_add_event_cb\(s_status_scrim,\s*status_tray_close_cb,\s*"
+        r"LV_EVENT_PRESSED",
+        "immediate non-destructive status tray dismissal")
 for control, description in (
     ("s_therapy_button", "therapy command"),
     ("s_alert_ack_button", "alert acknowledgement"),
@@ -254,6 +265,9 @@ manage_section_source = display[
     manage_section_start:
     display.index("static void manage_section_cb", manage_section_start)
 ]
+require(active_page_source,
+        r"set_destination_surface\(s_nav_buttons\[i\]",
+        "bottom navigation uses stable destination surfaces")
 require(active_page_source,
         r"portENTER_CRITICAL\(&s_state_lock\);\s*"
         r"bool\s+already_active\s*=\s*page\s*==\s*s_active_page;\s*"
@@ -282,6 +296,26 @@ require(display,
 
 # QEMU keeps the full-fidelity handoff, while the physical build compiles out
 # large software-blurred shadows and expensive flow fill/glow layers.
+require(display,
+        r"#if\s+CONFIG_SOMNOTRACE_BOARD_QEMU.*?"
+        r"UI_STATUS_SCRIM_OPA\s+LV_OPA_60.*?"
+        r"#else.*?UI_STATUS_SCRIM_OPA\s+LV_OPA_COVER",
+        "opaque physical status scrim avoids full-screen alpha blending")
+status_open_start = display.index("static void status_tray_open_cb(lv_event_t *event)\n{")
+status_open_source = display[
+    status_open_start:display.index("static void status_tray_route_cb", status_open_start)
+]
+assert "lv_obj_move_foreground" not in status_open_source, \
+       "opening status tray must not invalidate the screen through reordering"
+require(display,
+        r"lv_obj_move_foreground\(s_status_scrim\);\s*"
+        r"lv_obj_move_foreground\(s_status_tray\);.*?"
+        r"set_manage_section\(0\);",
+        "status overlay z-order established before first frame")
+require(display,
+        r"active_tab\s*==\s*0\s*&&\s*!status_tray_open.*?"
+        r"status_tray_just_closed",
+        "live chart redraw pauses behind status tray and resyncs on close")
 require(display,
         r"#if\s+CONFIG_SOMNOTRACE_BOARD_QEMU.*?"
         r"UI_DECORATIVE_SHADOW_WIDTH\(pixels\)\s+\(pixels\).*?"

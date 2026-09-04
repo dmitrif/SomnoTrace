@@ -96,6 +96,8 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define FLOW_RENDER_POINTS                 FLOW_POINTS
 #define FLOW_RENDER_FILL                   1
 #define FLOW_RENDER_GLOW                   1
+#define UI_STATUS_SCRIM_COLOR              0x000000
+#define UI_STATUS_SCRIM_OPA                LV_OPA_60
 #else
 /* Large software-blurred shadows and the filled/glowing 300-point trace are
  * disproportionately expensive on the physical ESP32-S3. Solid surfaces,
@@ -106,6 +108,12 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define FLOW_RENDER_POINTS                 150
 #define FLOW_RENDER_FILL                   0
 #define FLOW_RENDER_GLOW                   0
+/* Blending a translucent 1024x600 modal scrim requires reading and mixing
+ * every destination pixel in software. A pre-composited near-black surface
+ * preserves the bedside dimming effect while making the status tray an
+ * ordinary opaque redraw on the physical panel. */
+#define UI_STATUS_SCRIM_COLOR              0x020306
+#define UI_STATUS_SCRIM_OPA                LV_OPA_COVER
 #endif
 
 /* Typography roles from the 7-inch design handoff.  Keeping the role names
@@ -988,6 +996,21 @@ static void set_button_surface(lv_obj_t *button, uint32_t color,
     set_style_color_if_changed(button, LV_STYLE_BG_COLOR, color,
                                LV_STATE_FOCUSED | LV_STATE_PRESSED);
     set_style_num_if_changed(button, LV_STYLE_BG_OPA, LV_OPA_80,
+                             LV_STATE_FOCUSED | LV_STATE_PRESSED);
+}
+
+static void set_destination_surface(lv_obj_t *button, uint32_t color,
+                                    lv_opa_t resting_opa)
+{
+    set_button_surface(button, color, resting_opa);
+    /* A destination changes immediately on touch-down. Reusing the generic
+     * action-button press animation makes its old surface move/fade one frame
+     * later on release, which reads as delayed or stuck feedback. */
+    set_style_num_if_changed(button, LV_STYLE_TRANSLATE_Y, 0,
+                             LV_STATE_PRESSED);
+    set_style_num_if_changed(button, LV_STYLE_BG_OPA, resting_opa,
+                             LV_STATE_PRESSED);
+    set_style_num_if_changed(button, LV_STYLE_BG_OPA, resting_opa,
                              LV_STATE_FOCUSED | LV_STATE_PRESSED);
 }
 
@@ -2301,9 +2324,9 @@ static void set_active_page(int page)
     for (int i = 0; i < 3; ++i) {
         bool selected = i == page;
         set_hidden(s_pages[i], !selected);
-        set_button_surface(s_nav_buttons[i],
-                           selected ? COLOR_INVERSE : COLOR_CAPSULE,
-                           LV_OPA_COVER);
+        set_destination_surface(s_nav_buttons[i],
+                                selected ? COLOR_INVERSE : COLOR_CAPSULE,
+                                LV_OPA_COVER);
         set_style_color_if_changed(s_nav_labels[i], LV_STYLE_TEXT_COLOR,
                                    selected ? COLOR_BASE : COLOR_SECONDARY, 0);
         set_style_ptr_if_changed(s_nav_labels[i], LV_STYLE_TEXT_FONT,
@@ -2340,9 +2363,9 @@ static void set_manage_section(int section)
     for (int i = 0; i < 6; ++i) {
         bool selected = i == section;
         set_hidden(s_manage_sections[i], !selected);
-        set_button_surface(s_manage_buttons[i],
-                           selected ? COLOR_INVERSE : COLOR_PANEL,
-                           selected ? LV_OPA_COVER : LV_OPA_TRANSP);
+        set_destination_surface(s_manage_buttons[i],
+                                selected ? COLOR_INVERSE : COLOR_PANEL,
+                                selected ? LV_OPA_COVER : LV_OPA_TRANSP);
         set_style_color_if_changed(s_manage_labels[i], LV_STYLE_TEXT_COLOR,
                                    selected ? COLOR_BASE : COLOR_SECONDARY, 0);
         set_style_ptr_if_changed(s_manage_labels[i], LV_STYLE_TEXT_FONT,
@@ -2387,8 +2410,6 @@ static void status_tray_open_cb(lv_event_t *event)
     (void)event;
     lv_obj_clear_flag(s_status_scrim, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_status_tray, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_status_scrim);
-    lv_obj_move_foreground(s_status_tray);
 }
 
 static void status_tray_route_cb(lv_event_t *event)
@@ -3753,8 +3774,12 @@ static void build_ui(void)
 #endif
                               130, 23, 330,
                               FONT_BODY, COLOR_SECONDARY);
-    s_status_capsule = make_touch_button(header, 725, 7, 281, STATUS_CAPSULE_H, "",
-                                         COLOR_CAPSULE, status_tray_open_cb, 0);
+    /* This only reveals a navigation overlay, so respond on touch-down like
+     * the bottom navigation instead of waiting for a complete tap/release. */
+    s_status_capsule = make_destination_button(
+        header, 725, 7, 281, STATUS_CAPSULE_H, "", COLOR_CAPSULE,
+        status_tray_open_cb, 0);
+    set_destination_surface(s_status_capsule, COLOR_CAPSULE, LV_OPA_COVER);
     lv_obj_set_style_radius(s_status_capsule, 28, 0);
     lv_obj_set_style_bg_color(s_status_capsule, lv_color_hex(COLOR_CAPSULE), 0);
     lv_obj_set_style_shadow_width(s_status_capsule, 0, 0);
@@ -3798,12 +3823,13 @@ static void build_ui(void)
     s_status_scrim = lv_obj_create(screen);
     lv_obj_set_pos(s_status_scrim, 0, 0);
     lv_obj_set_size(s_status_scrim, 1024, 600);
-    lv_obj_set_style_bg_color(s_status_scrim, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_status_scrim, LV_OPA_60, 0);
+    lv_obj_set_style_bg_color(s_status_scrim,
+                              lv_color_hex(UI_STATUS_SCRIM_COLOR), 0);
+    lv_obj_set_style_bg_opa(s_status_scrim, UI_STATUS_SCRIM_OPA, 0);
     lv_obj_set_style_border_width(s_status_scrim, 0, 0);
     lv_obj_clear_flag(s_status_scrim, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_status_scrim, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_status_scrim, status_tray_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_status_scrim, status_tray_close_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_flag(s_status_scrim, LV_OBJ_FLAG_HIDDEN);
 
     s_status_tray = make_card(screen, 510, 74, 496, 462);
@@ -3970,6 +3996,13 @@ static void build_ui(void)
     lv_obj_add_flag(s_wake_overlay, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_add_event_cb(s_wake_overlay, wake_overlay_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_flag(s_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    /* Establish the ordinary modal order once, before the first frame. Runtime
+     * reordering invalidates the entire screen; visibility toggles are enough.
+     * Notices, alerts, and the keyboard can still move above this pair when
+     * they become active. */
+    lv_obj_move_foreground(s_status_scrim);
+    lv_obj_move_foreground(s_status_tray);
 
     set_manage_section(0);
     set_active_page(0);
@@ -5276,6 +5309,7 @@ static void update_ui(void)
     static unsigned seen_flow_version;
     static bool plotted_flow_live;
     static bool home_was_active;
+    static bool status_tray_was_open;
     static uint8_t flow_presentation_phase;
     static bool alarm_forced_awake;
     ui_state_t state;
@@ -5379,10 +5413,13 @@ static void update_ui(void)
     int active_tab = s_active_page;
     bool entered_home = active_tab == 0 && !home_was_active;
     home_was_active = active_tab == 0;
+    bool status_tray_open = !lv_obj_has_flag(s_status_tray, LV_OBJ_FLAG_HIDDEN);
+    bool status_tray_just_closed = status_tray_was_open && !status_tray_open;
+    status_tray_was_open = status_tray_open;
     bool flow_live = state.therapy && state.flow_count >= FLOW_READY_POINTS &&
                      state.flow_sample_us > 0 &&
                      now_us - state.flow_sample_us < 2500000;
-    if (active_tab == 0) {
+    if (active_tab == 0 && !status_tray_open) {
         bool chart_dirty = false;
         if (!flow_live) {
             if (plotted_flow_live || s_flow_visual_count > 0) {
@@ -5399,7 +5436,7 @@ static void update_ui(void)
              * reveal 1,1,1,2 samples across four frames. This preserves the
              * source rate without the old five-point jump or a 25-fps redraw
              * load that can starve touch handling in the emulator. */
-            if (!plotted_flow_live || entered_home ||
+            if (!plotted_flow_live || entered_home || status_tray_just_closed ||
                 pending > state.flow_count ||
                 pending > FLOW_RESYNC_THRESHOLD) {
                 resync_flow_visual(&state);
