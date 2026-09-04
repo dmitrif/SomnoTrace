@@ -2251,10 +2251,21 @@ void session_writer_on_stream_data_raw(const char *json, int len)
         }
     }
 
-    /* PatientFlow: push to display, detect active flow */
+    /* PatientFlow is encoded as hundredths of a litre per second.  The
+     * display API uses litres per minute, so convert at this boundary:
+     *
+     *     raw / 100 L/s * 60 s/min = raw * 0.6 L/min
+     *
+     * Keeping the display-side unit explicit matters on the 7-inch UI: it
+     * stores tenths of L/min. Passing L/s made ordinary breathing values
+     * smaller than a single chart pixel and rendered an apparent flat line. */
     bool has_active_flow = false;
     for (int j = 0; j < flow_n; j++) {
-        bsp_display_push_flow(flow_vals[j] / 100.0f);
+        /* null samples are retained as gaps in the recording below, but are
+         * not measurements and must neither move the live trace nor trigger
+         * the mid-therapy recovery heuristic. */
+        if (flow_vals[j] == SNT_MISSING) continue;
+        bsp_display_push_flow(flow_vals[j] * 0.6f);
         if (abs(flow_vals[j]) > 50) has_active_flow = true;
     }
 

@@ -40,4 +40,5 @@ python3 scripts/psram_task_lifecycle_contract_test.py
 python3 scripts/history_storage_lifecycle_contract_test.py
 python3 scripts/rapid_session_lifecycle_contract_test.py
 python3 scripts/clock_snapshot_contract_test.py
+python3 scripts/live_flow_units_contract_test.py
 echo "All synthetic host tests passed"

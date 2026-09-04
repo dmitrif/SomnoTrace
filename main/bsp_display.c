@@ -255,7 +255,7 @@ void bsp_display_push_flow(float flow_lpm)
     bool notify = false;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     if (s_mode == DISP_MODE_GRAPH && s_flow_buf) {
-        s_flow_buf[s_flow_head] = flow_lpm * 60.0f;
+        s_flow_buf[s_flow_head] = flow_lpm;
         s_flow_head = (s_flow_head + 1) % FLOW_BUF_SIZE;
         if (s_flow_count < FLOW_BUF_SIZE) s_flow_count++;
         notify = true;

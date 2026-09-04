@@ -46,7 +46,7 @@ void bsp_display_set_as11_paired(bool paired);
 void bsp_display_set_sd_ready(bool ready);
 void bsp_display_set_battery(int percent, bool charging);
 
-/* Therapy graph mode */
+/* Therapy graph mode. Flow samples are expressed in litres per minute. */
 void bsp_display_set_therapy_active(bool active);
 void bsp_display_push_flow(float flow_lpm);
 void bsp_display_push_leak(float leak_lpm);
