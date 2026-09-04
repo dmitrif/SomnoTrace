@@ -99,13 +99,12 @@ static esp_err_t init_rgb_panel(void)
     esp_lcd_rgb_panel_config_t cfg = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
-            /* Keep enough PSRAM-to-bounce-buffer margin while LVGL is
-             * actively repainting a 1024x600 view.  The board is stable at
-             * 24 MHz for static frames, but physical scrolling/touch tests
-             * can still starve scanout and shift the lower part of a frame.
-             * 18 MHz remains effectively a 20 fps panel with these porches,
-             * matching the UI's 20 Hz live-chart presentation ceiling. */
-            .pclk_hz = 18000000,
+            /* Physical testing accepted Waveshare's 30.85 MHz scan clock as
+             * the no-shimmer/no-tearing default when paired with the
+             * cache-sized ten-line bounce buffer below.  Keep this boot value
+             * aligned with the accepted runtime A/B result so a later flash
+             * cannot silently restore the visibly shimmering 18 MHz mode. */
+            .pclk_hz = 30850000,
             .h_res = WAVESHARE_7B_H_RES,
             .v_res = WAVESHARE_7B_V_RES,
             .hsync_pulse_width = 162,
@@ -234,9 +233,8 @@ esp_err_t waveshare_7b_set_brightness(uint8_t percent)
 
 esp_err_t waveshare_7b_set_panel_pclk(uint32_t hz)
 {
-    /* Keep this deliberately narrow: 18 MHz is SomnoTrace's redraw-safe
-     * clock, while 30.85 MHz comes from Waveshare's older 7B LVGL examples.
-     * The diagnostic endpoint must not become an arbitrary clock control. */
+    /* Keep this deliberately narrow: 30.85 MHz is the accepted boot clock;
+     * 18 MHz remains available only as an A/B diagnostic fallback. */
     if (hz != 18000000U && hz != 30850000U) return ESP_ERR_INVALID_ARG;
     if (!s_panel) return ESP_ERR_INVALID_STATE;
 

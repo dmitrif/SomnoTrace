@@ -44,7 +44,7 @@ expected_scalars = {
     r"#define\s+I2C_SDA\s+GPIO_NUM_8\b": "I2C SDA GPIO8",
     r"#define\s+I2C_SCL\s+GPIO_NUM_9\b": "I2C SCL GPIO9",
     r"#define\s+IOX_ADDR\s+0x24\b": "CH32V003 controller address 0x24",
-    r"\.pclk_hz\s*=\s*18000000\b": "redraw-safe 18 MHz pixel clock",
+    r"\.pclk_hz\s*=\s*30850000\b": "accepted 30.85 MHz pixel clock",
     r"\.hsync_pulse_width\s*=\s*162\b": "HSYNC pulse",
     r"\.hsync_back_porch\s*=\s*152\b": "HSYNC back porch",
     r"\.hsync_front_porch\s*=\s*48\b": "HSYNC front porch",
@@ -112,6 +112,8 @@ require(net_provision,
         r'hz_item->valuedouble\s*!=\s*30850000\.0.*?'
         r'waveshare_7b_set_panel_pclk\(hz\)',
         "non-persistent display PCLK action with a strict two-clock allowlist")
+require(net_provision, r'"boot_default_hz\\":30850000',
+        "PCLK diagnostic reports the accepted boot clock")
 assert '"/api/diagnostics/display-pclk"' not in net_provision, \
        "PCLK diagnostic must reuse /api/actions without consuming a URI slot"
 

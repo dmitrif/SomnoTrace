@@ -3186,7 +3186,7 @@ static esp_err_t actions_handler(httpd_req_t *req)
         char response[160];
         snprintf(response, sizeof(response),
                  "{\"ok\":true,\"pclk_hz\":%" PRIu32
-                 ",\"nominal_frame_hz\":%.4f,\"boot_default_hz\":18000000}",
+                 ",\"nominal_frame_hz\":%.4f,\"boot_default_hz\":30850000}",
                  hz, frame_hz);
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
