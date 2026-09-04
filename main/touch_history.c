@@ -2,6 +2,7 @@
 #include "touch_history.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -9,11 +10,19 @@
 #include <string.h>
 #include "cJSON.h"
 #include "edf_gen.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sd_storage.h"
 
 #define SNT_MAGIC 0x534E5442u
 #define FLOW_TRACE_MAX_RECORDS (24U * 60U * 60U)
 #define FLOW_READ_RECORDS 128U
+#define HISTORY_STORAGE_WAIT_MS 15000U
+#define HISTORY_RECORDING_POLL_MS 25U
+
+static const char *TAG = "touch_history";
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -50,23 +59,72 @@ static int newest_first(const void *a, const void *b)
     return strcmp(db->day, da->day);
 }
 
-static int session_count(const char *day)
+static esp_err_t session_count(const char *day, int *out_count)
 {
+    if (!out_count) return ESP_ERR_INVALID_ARG;
+    *out_count = 0;
     char path[320];
     snprintf(path, sizeof(path), "%s/%s", SD_STREAMS_DIR, day);
     DIR *dir = opendir(path);
-    if (!dir) return 0;
+    if (!dir) {
+        int err = errno;
+        if (err == ENOENT || err == ENOTDIR) return ESP_ERR_NOT_FOUND;
+        ESP_LOGE(TAG, "cannot open history day %s: errno=%d (%s)",
+                 path, err, strerror(err));
+        return ESP_FAIL;
+    }
     const char *suffix = "_session.json";
     const size_t suffix_len = strlen(suffix);
     int count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
+    int read_err = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            read_err = errno;
+            break;
+        }
         size_t len = strlen(entry->d_name);
         if (len > suffix_len &&
             strcmp(entry->d_name + len - suffix_len, suffix) == 0) count++;
     }
-    closedir(dir);
-    return count;
+    int close_err = closedir(dir) == 0 ? 0 : errno;
+    if (read_err || close_err) {
+        int err = read_err ? read_err : close_err;
+        ESP_LOGE(TAG, "cannot enumerate history day %s: errno=%d (%s)",
+                 path, err, strerror(err));
+        return ESP_FAIL;
+    }
+    *out_count = count;
+    return ESP_OK;
+}
+
+/* History runs off the LVGL task, so it can afford to wait for the short
+ * storage-finalise/export window after TherapyStop.  One shared deadline
+ * bounds both waits; a genuinely active therapy session still returns busy. */
+static esp_err_t history_lease_acquire(void)
+{
+    if (!sd_storage_is_ready()) return ESP_ERR_NOT_FOUND;
+
+    const int64_t deadline_us = esp_timer_get_time() +
+                                (int64_t)HISTORY_STORAGE_WAIT_MS * 1000;
+    while (sd_storage_recording_active() && esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(HISTORY_RECORDING_POLL_MS));
+    }
+    if (sd_storage_recording_active()) return ESP_ERR_INVALID_STATE;
+
+    int64_t remaining_us = deadline_us - esp_timer_get_time();
+    if (remaining_us <= 0) return ESP_ERR_TIMEOUT;
+    uint32_t remaining_ms = (uint32_t)((remaining_us + 999) / 1000);
+    if (!sd_storage_lease_acquire(SD_LEASE_UPLOAD, remaining_ms))
+        return ESP_ERR_TIMEOUT;
+
+    /* A fresh session can start between the poll and lease acquisition. */
+    if (sd_storage_recording_active()) {
+        sd_storage_lease_release(SD_LEASE_UPLOAD);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
 }
 
 static bool json_number(cJSON *object, const char *key, float *out)
@@ -264,9 +322,8 @@ esp_err_t touch_history_load_flow_trace(touch_history_day_t *day)
     day->has_flow_trace = false;
     day->flow_trace_loaded = false;
     day->flow_trace_count = 0;
-    if (!sd_storage_is_ready()) return ESP_ERR_NOT_FOUND;
-    if (sd_storage_recording_active()) return ESP_ERR_INVALID_STATE;
-    if (!sd_storage_lease_acquire(SD_LEASE_UPLOAD, 250)) return ESP_ERR_TIMEOUT;
+    esp_err_t lease_result = history_lease_acquire();
+    if (lease_result != ESP_OK) return lease_result;
     bool loaded = load_flow_trace_leased(day);
     sd_storage_lease_release(SD_LEASE_UPLOAD);
     day->flow_trace_loaded = true;
@@ -280,20 +337,38 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
     *count = 0;
     const size_t limit = capacity < TOUCH_HISTORY_MAX_DAYS
                          ? capacity : TOUCH_HISTORY_MAX_DAYS;
-    if (!sd_storage_is_ready()) return ESP_ERR_NOT_FOUND;
-    if (sd_storage_recording_active()) return ESP_ERR_INVALID_STATE;
-    if (!sd_storage_lease_acquire(SD_LEASE_UPLOAD, 250)) return ESP_ERR_TIMEOUT;
+    esp_err_t lease_result = history_lease_acquire();
+    if (lease_result != ESP_OK) return lease_result;
 
     DIR *dir = opendir(SD_STREAMS_DIR);
     if (!dir) {
+        int err = errno;
+        ESP_LOGE(TAG, "cannot open history root %s: errno=%d (%s)",
+                 SD_STREAMS_DIR, err, strerror(err));
         sd_storage_lease_release(SD_LEASE_UPLOAD);
-        return ESP_ERR_NOT_FOUND;
+        return err == ENOENT || err == ENOTDIR ? ESP_ERR_NOT_FOUND : ESP_FAIL;
     }
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
+    esp_err_t result = ESP_OK;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            if (errno != 0) {
+                ESP_LOGE(TAG, "cannot enumerate history root %s: errno=%d (%s)",
+                         SD_STREAMS_DIR, errno, strerror(errno));
+                result = ESP_FAIL;
+            }
+            break;
+        }
         if (!valid_day(entry->d_name)) continue;
-        int sessions = session_count(entry->d_name);
+        int sessions = 0;
+        esp_err_t count_result = session_count(entry->d_name, &sessions);
+        if (count_result == ESP_ERR_NOT_FOUND) continue;
+        if (count_result != ESP_OK) {
+            result = count_result;
+            break;
+        }
         if (sessions == 0) continue;
         size_t slot;
         if (*count < limit) {
@@ -312,7 +387,16 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
         strlcpy(day->day, entry->d_name, sizeof(day->day));
         day->sessions = sessions;
     }
-    closedir(dir);
+    if (closedir(dir) != 0 && result == ESP_OK) {
+        ESP_LOGE(TAG, "cannot close history root %s: errno=%d (%s)",
+                 SD_STREAMS_DIR, errno, strerror(errno));
+        result = ESP_FAIL;
+    }
+    if (result != ESP_OK) {
+        *count = 0;
+        sd_storage_lease_release(SD_LEASE_UPLOAD);
+        return result;
+    }
     qsort(days, *count, sizeof(*days), newest_first);
 
     for (size_t i = 0; i < *count; ++i) {

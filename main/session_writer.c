@@ -221,7 +221,7 @@ typedef struct {
     int64_t           drift_measured_at_ms;
     const char       *state;        /* static string                   */
     bool              free_session; /* worker owns the struct (no sw_post) */
-    SemaphoreHandle_t done;
+    TaskHandle_t       done_task;     /* notified after SW_CMD_FINALIZE */
 } sw_cmd_t;
 
 /* ── Post-stop pipeline job ───────────────────────────────────────── */
@@ -252,6 +252,10 @@ struct session_writer {
 
     /* ── producer state ──────────────────────────────────────────── */
     volatile bool     active;
+    /* Held from publication until the storage worker has closed every file
+     * and committed the terminal manifest.  `active` only describes whether
+     * producers may append; it is deliberately cleared earlier. */
+    bool              recording_claim_held;
     SemaphoreHandle_t fill_mutex;
     stream_batch_t   *fill;          /* current producer batch          */
     QueueHandle_t     batch_pool;    /* free stream_batch_t*            */
@@ -1023,6 +1027,15 @@ static void storage_finalize(session_writer_t *s, const sw_cmd_t *cmd)
     if (s->storage_failed) state = "storage_failed";
     write_manifest(s, state);
 
+    /* A stopped producer is not yet safe for History to inspect: queued
+     * batches, open stdio descriptors and the terminal manifest all belong to
+     * the recording lifecycle.  Publish storage-idle only after those are
+     * complete, otherwise an immediate History refresh races FATFS finalise. */
+    if (s->recording_claim_held) {
+        s->recording_claim_held = false;
+        sd_storage_recording_end();
+    }
+
     ESP_LOGI(TAG, "=== SESSION STOPPED: %s (%s) ===", s->session_id, state);
     ESP_LOGI(TAG, "flow=%u press=%u sa2=%u pld=%u total samples",
              (unsigned)s->flow.sample_count, (unsigned)s->press.sample_count,
@@ -1094,7 +1107,7 @@ static void sw_storage_task(void *arg)
                 session_writer_t *fs = cmd.s;
                 bool own = cmd.free_session;
                 storage_finalize(fs, &cmd);
-                if (cmd.done) xSemaphoreGive(cmd.done);
+                if (cmd.done_task) xTaskNotifyGive(cmd.done_task);
                 /* Normally sw_post owns the struct and frees it after the
                  * export pipeline; only the fallback path hands it to us. */
                 if (own) free(fs);
@@ -1490,7 +1503,10 @@ static void sw_post_task(void *arg)
 
         /* 2. Hand the drift to the storage worker and wait for the files to
          * be finalised, so the manifest is complete before anything reads it. */
-        SemaphoreHandle_t done = xSemaphoreCreateBinary();
+        /* A task notification needs no late internal-heap allocation.  The
+         * post worker owns `s`, so it must not read or free the session until
+         * the storage worker has fully finalised it. */
+        (void)ulTaskNotifyTake(pdTRUE, 0);
         sw_cmd_t fin = {
             .type = SW_CMD_FINALIZE,
             .s = s,
@@ -1500,13 +1516,10 @@ static void sw_post_task(void *arg)
             .drift_source = drift_source,
             .drift_measured_at_ms = drift_at,
             .state = job.state,
-            .done = done,
+            .done_task = xTaskGetCurrentTaskHandle(),
         };
         xQueueSend(s_storage_q, &fin, portMAX_DELAY);
-        if (done) {
-            xSemaphoreTake(done, pdMS_TO_TICKS(60000));
-            vSemaphoreDelete(done);
-        }
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         /* 3. Persist drift only when the clock was NTP-authoritative, else a
          * degraded-mode session would feed its own estimate back in. */
@@ -1679,6 +1692,7 @@ session_writer_t *session_writer_start(void)
     /* Declare the recording so destructive maintenance actions are refused
      * for its duration (raw capture outranks derived output). */
     sd_storage_recording_begin();
+    s->recording_claim_held = true;
 
     /* Publish before the files exist on purpose.  The producer can start
      * filling immediately while the worker creates and syncs the headers,
@@ -1696,7 +1710,10 @@ session_writer_t *session_writer_start(void)
         if (s_active == s) s_active = NULL;
         xSemaphoreGive(s_active_mutex);
         s->active = false;
-        sd_storage_recording_end();
+        if (s->recording_claim_held) {
+            s->recording_claim_held = false;
+            sd_storage_recording_end();
+        }
         batch_pool_destroy(s);
         vSemaphoreDelete(s->fill_mutex);
         free(s);
@@ -1717,11 +1734,9 @@ static void sw_request_finalize(session_writer_t *s, const char *state,
     /* Clear s_active first so a TherapyStart arriving during the stop
      * pipeline creates a fresh session instead of writing into this one. */
     xSemaphoreTake(s_active_mutex, portMAX_DELAY);
-    bool was_active = s->active;
     s->active = false;
     if (s_active == s) s_active = NULL;
     xSemaphoreGive(s_active_mutex);
-    if (was_active) sd_storage_recording_end();
 
     crash_diag_note_activity(state ? state : "finalize");
     crash_diag_note_session(NULL);
