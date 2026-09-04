@@ -119,10 +119,12 @@ static esp_err_t init_rgb_panel(void)
         .data_width = 16,
         .bits_per_pixel = 16,
         .num_fbs = 2,
-        /* Twenty lines is the current Waveshare 7B reference value. It
-         * absorbs the short PSRAM bandwidth bursts caused by touch redraws,
-         * Wi-Fi, and BLE without allocating another full framebuffer. */
-        .bounce_buffer_size_px = WAVESHARE_7B_H_RES * 20,
+        /* Ten lines matches Waveshare's older 30.85 MHz 7B configuration.
+         * Each RGB565 refill is 20 KiB, comfortably inside the configured
+         * 64 KiB data cache, so scanout does not evict LVGL's entire working
+         * set on every DMA EOF. The two buffers also use 40 KiB less internal
+         * RAM than the previous twenty-line configuration. */
+        .bounce_buffer_size_px = WAVESHARE_7B_H_RES * 10,
         .sram_trans_align = 4,
         .psram_trans_align = 64,
         .hsync_gpio_num = GPIO_NUM_46,

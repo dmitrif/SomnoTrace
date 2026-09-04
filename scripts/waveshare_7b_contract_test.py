@@ -56,8 +56,8 @@ expected_scalars = {
     r"\.de_gpio_num\s*=\s*GPIO_NUM_5\b": "DE GPIO5",
     r"\.pclk_gpio_num\s*=\s*GPIO_NUM_7\b": "PCLK GPIO7",
     r"\.num_fbs\s*=\s*2\b": "double framebuffer",
-    r"\.bounce_buffer_size_px\s*=\s*WAVESHARE_7B_H_RES\s*\*\s*20\b":
-        "twenty-line bounce buffer",
+    r"\.bounce_buffer_size_px\s*=\s*WAVESHARE_7B_H_RES\s*\*\s*10\b":
+        "cache-sized ten-line bounce buffer",
     r"\.flags\.fb_in_psram\s*=\s*true\b": "PSRAM framebuffers",
     r"\.flags\.pclk_active_neg\s*=\s*true\b": "negative PCLK edge",
 }
@@ -141,6 +141,8 @@ for family in ("space_grotesk", "ibm_plex_mono"):
 
 for setting in (
     "CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B=y",
+    "CONFIG_ESP32S3_DATA_CACHE_64KB=y",
+    "CONFIG_ESP32S3_DATA_CACHE_SIZE=0x10000",
     "CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y",
     "CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y",
     "CONFIG_SPIRAM_RODATA=y",
