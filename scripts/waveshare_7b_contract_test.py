@@ -225,8 +225,6 @@ require(display, r"static\s+int\s+s_active_page\s*=\s*-1",
         "unselected page sentinel for first render")
 require(display, r"static\s+int\s+s_active_manage_section\s*=\s*-1",
         "unselected Manage-section sentinel for first render")
-require(display, r"if\s*\(page\s*==\s*s_active_page\)\s*return",
-        "current-page navigation no-op")
 require(display,
         r"if\s*\(section\s*==\s*s_active_manage_section\)\s*return",
         "current Manage-section navigation no-op")
@@ -239,6 +237,15 @@ manage_section_source = display[
     manage_section_start:
     display.index("static void manage_section_cb", manage_section_start)
 ]
+require(active_page_source,
+        r"portENTER_CRITICAL\(&s_state_lock\);\s*"
+        r"bool\s+already_active\s*=\s*page\s*==\s*s_active_page;\s*"
+        r"if\s*\(!already_active\)\s*s_active_page\s*=\s*page;\s*"
+        r"portEXIT_CRITICAL\(&s_state_lock\);\s*"
+        r"if\s*\(already_active\)\s*return;",
+        "page navigation publishes and checks the active page under lock")
+require(active_page_source, r"if\s*\(page\s*==\s*1\)\s*start_history_load\(\);",
+        "History navigation requests a metadata refresh")
 for selection_source, description in (
     (active_page_source, "page navigation"),
     (manage_section_source, "Manage section navigation"),
@@ -439,8 +446,131 @@ assert "load_flow_trace(&days[i])" not in history, \
        "trace must not be read eagerly for every history day"
 require(display, r"queue_history_trace_load\(selected_day\)",
         "trace loads only after a night is selected")
-require(display, r'xTaskCreate\(history_trace_task,\s*"ui_hist_trace"',
-        "trace file I/O stays off the LVGL thread")
+
+history_trace_task_start = display.index("static void history_trace_task(void *arg)\n{")
+history_trace_task_source = display[
+    history_trace_task_start:
+    display.index("static void queue_history_trace_load", history_trace_task_start)
+]
+history_queue_start = display.index("static void queue_history_trace_load(const char *day)\n{")
+history_queue_source = display[
+    history_queue_start:display.index("static void history_task", history_queue_start)
+]
+history_task_start = display.index("static void history_task(void *arg)\n{")
+history_task_source = display[
+    history_task_start:display.index("#endif", history_task_start)
+]
+history_load_start = display.index("static void start_history_load(void)\n{")
+history_load_source = display[
+    history_load_start:display.index("static void qemu_upload_progress", history_load_start)
+]
+history_row_start = display.index("static void history_row_cb(lv_event_t *event)\n{")
+history_row_source = display[
+    history_row_start:display.index("static void refresh_cb", history_row_start)
+]
+history_refresh_start = display.index(
+    "static void refresh_history_widgets(const ui_service_state_t *services)\n{"
+)
+history_refresh_source = display[
+    history_refresh_start:
+    display.index("static void refresh_device_dropdown", history_refresh_start)
+]
+therapy_state_start = display.index(
+    "void bsp_display_set_therapy_active(bool active)\n{"
+)
+therapy_state_source = display[
+    therapy_state_start:display.index("void bsp_display_push_flow", therapy_state_start)
+]
+for worker_source, description in (
+    (history_task_source, "History metadata worker"),
+    (history_trace_task_source, "History trace worker"),
+):
+    require(worker_source, r"for\s*\(;;\).*?ulTaskNotifyTake\(pdTRUE,\s*portMAX_DELAY\)",
+            f"persistent notification-driven {description}")
+require(history_load_source, r"xTaskNotifyGive\(s_history_worker_task\)",
+        "History refresh notification")
+require(history_queue_source, r"xTaskNotifyGive\(s_history_trace_worker_task\)",
+        "History trace notification")
+require(history_task_source,
+        r"if\s*\(result\s*==\s*ESP_OK\).*?"
+        r"s_services\.history_count\s*=\s*count;.*?"
+        r"else\s*\{.*?s_services\.history_count\s*=\s*0;.*?\}.*?"
+        r"s_services\.history_result\s*=\s*result;",
+        "failed History metadata refresh clears stale rows")
+require(history_task_source,
+        r"s_services\.history_busy\s*=\s*false;\s*"
+        r"s_services\.history_version\+\+;\s*"
+        r"s_services\.history_metadata_version\+\+;",
+        "metadata completion publishes its own version")
+require(history_refresh_source,
+        r"metadata_changed\s*=\s*services->history_metadata_version\s*!=\s*"
+        r"s_seen_history_metadata_version;.*?"
+        r"if\s*\(changed\)\s*\{.*?"
+        r"s_seen_history_metadata_version\s*=\s*"
+        r"services->history_metadata_version;.*?"
+        r"if\s*\(!metadata_changed\s*&&\s*s_history_selected_day\[0\]\)\s*\{.*?"
+        r"strcmp\(s_history_selected_day,\s*services->history\[i\]\.day\).*?"
+        r"s_history_selection\s*=\s*\(int\)i;",
+        "trace-only History updates preserve the selected day")
+require(history_refresh_source,
+        r"if\s*\(services->history_count\s*==\s*0\).*?"
+        r"else\s+if\s*\(metadata_changed\s*\|\|\s*"
+        r"s_history_selection\s*<\s*0\)\s*\{.*?"
+        r"s_history_selection\s*=\s*0;.*?"
+        r"services->history\[0\]\.day.*?"
+        r"if\s*\(metadata_changed\s*&&\s*s_history_selection\s*>=\s*0\)\s*"
+        r"queue_history_trace_load\(s_history_selected_day\)",
+        "completed non-empty metadata refresh selects and queues row zero")
+require(therapy_state_source,
+        r"portENTER_CRITICAL\(&s_state_lock\);\s*"
+        r"bool\s+changed\s*=\s*s_state\.therapy\s*!=\s*active;.*?"
+        r"s_state\.therapy\s*=\s*active;.*?"
+        r"bool\s+refresh_history\s*=\s*changed\s*&&\s*!active\s*&&\s*"
+        r"s_active_page\s*==\s*1;\s*"
+        r"portEXIT_CRITICAL\(&s_state_lock\);.*?"
+        r"if\s*\(refresh_history\)\s*start_history_load\(\);",
+        "therapy stop snapshots History refresh eligibility under lock")
+require(history_row_source,
+        r"selection\s*<\s*\(int\)s_render_services->history_count.*?"
+        r"s_render_services->history\[selection\]\.day.*?"
+        r"queue_history_trace_load\(selected_day\)",
+        "History row taps resolve against the painted service snapshot")
+assert not re.search(r"\bs_services(?:\.|->)", history_row_source), \
+       "History row taps must not resolve against mutable live services"
+require(history_trace_task_source,
+        r"if\s*\(already_loaded\)\s*\{.*?"
+        r"if\s*\(!s_history_trace_requested_day\[0\]\)\s*\{.*?"
+        r"s_services\.history_trace_result\s*=\s*ESP_OK;.*?"
+        r"s_services\.history_trace_busy\s*=\s*false;.*?\}\s*"
+        r"s_services\.history_version\+\+;.*?continue;",
+        "cached trace completion publishes and clears terminal busy state")
+require(history_trace_task_source,
+        r"touch_history_load_flow_trace\(&loaded\);.*?"
+        r"if\s*\(!s_history_trace_requested_day\[0\]\)\s*\{.*?"
+        r"s_services\.history_trace_result\s*=\s*result;.*?"
+        r"s_services\.history_trace_busy\s*=\s*false;.*?\}\s*"
+        r"s_services\.history_version\+\+;",
+        "every SD trace result publishes and clears terminal busy state")
+require(history_queue_source,
+        r"s_history_trace_requested_day\[0\]\s*=\s*'\\0';\s*"
+        r"s_services\.history_trace_busy\s*=\s*false;\s*"
+        r"s_services\.history_trace_result\s*=\s*ESP_ERR_NO_MEM;\s*"
+        r"s_services\.history_version\+\+;",
+        "unavailable trace worker publishes a terminal result")
+require(history_refresh_source,
+        r"trace_failed\s*=\s*trace_request_matches\s*&&\s*"
+        r"!services->history_trace_busy\s*&&\s*"
+        r"services->history_trace_result\s*!=\s*ESP_OK;.*?"
+        r'"Flow trace temporarily unavailable - tap this night to retry"',
+        "terminal trace errors expose tap-to-retry guidance")
+for task, label in (
+    ("history_task", "metadata"),
+    ("history_trace_task", "trace"),
+):
+    assert len(re.findall(rf"psram_task_create\(\s*{task}\b", display)) == 1, \
+           f"{label} worker must be created once with a PSRAM stack"
+    assert not re.search(rf"xTaskCreate(?:PinnedToCore)?\(\s*{task}\b", display), \
+           f"{label} worker must not be recreated per request"
 require(display, r"heap_caps_calloc\(.*?HISTORY_MAX_DAYS.*?MALLOC_CAP_SPIRAM",
         "expanded history model stays off the worker stack")
 require(display, r"lv_chart_set_all_value\(s_history_trace_chart.*?LV_CHART_POINT_NONE",

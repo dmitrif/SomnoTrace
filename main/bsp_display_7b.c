@@ -36,6 +36,7 @@
 #include "lvgl.h"
 #include "net_provision.h"
 #include "oximeter.h"
+#include "psram_task.h"
 #include "sd_storage.h"
 #include "somnotrace_fonts.h"
 #include "therapy_alert.h"
@@ -164,7 +165,11 @@ typedef struct {
     touch_history_day_t history[HISTORY_MAX_DAYS];
     size_t history_count;
     unsigned history_version;
+    unsigned history_metadata_version;
     bool history_busy;
+    bool history_trace_busy;
+    char history_trace_day[9];
+    esp_err_t history_trace_result;
     ui_device_result_t as11[DEVICE_RESULT_MAX];
     size_t as11_count;
     unsigned as11_version;
@@ -431,6 +436,7 @@ static lv_obj_t *s_keyboard_target;
 static char s_keyboard_initial[NETPROV_PASS_MAXLEN + 1];
 static lv_obj_t *s_wake_overlay;
 static unsigned s_seen_history_version;
+static unsigned s_seen_history_metadata_version;
 static unsigned s_seen_as11_version;
 static unsigned s_seen_ox_version;
 static int s_history_selection = -1;
@@ -438,6 +444,8 @@ static char s_history_selected_day[9];
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
 static bool s_history_trace_worker_running;
 static char s_history_trace_requested_day[9];
+static TaskHandle_t s_history_worker_task;
+static TaskHandle_t s_history_trace_worker_task;
 #endif
 static bool s_settings_synced;
 static uint16_t s_rendered_screen_timeout_s = UINT16_MAX;
@@ -1164,95 +1172,133 @@ static void history_trace_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        char requested_day[9];
-        bool already_loaded = false;
-        portENTER_CRITICAL(&s_state_lock);
-        strlcpy(requested_day, s_history_trace_requested_day,
-                sizeof(requested_day));
-        s_history_trace_requested_day[0] = '\0';
-        if (!requested_day[0]) {
-            s_history_trace_worker_running = false;
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (;;) {
+            char requested_day[9];
+            bool already_loaded = false;
+            portENTER_CRITICAL(&s_state_lock);
+            strlcpy(requested_day, s_history_trace_requested_day,
+                    sizeof(requested_day));
+            s_history_trace_requested_day[0] = '\0';
+            if (!requested_day[0])
+                s_history_trace_worker_running = false;
             portEXIT_CRITICAL(&s_state_lock);
-            break;
-        }
-        touch_history_day_t *cached = history_day_locked(requested_day);
-        already_loaded = cached && cached->flow_trace_loaded;
-        portEXIT_CRITICAL(&s_state_lock);
-        if (already_loaded) continue;
+            if (!requested_day[0]) break;
 
-        touch_history_day_t loaded = {0};
-        strlcpy(loaded.day, requested_day, sizeof(loaded.day));
-        esp_err_t result = touch_history_load_flow_trace(&loaded);
+            portENTER_CRITICAL(&s_state_lock);
+            touch_history_day_t *cached = history_day_locked(requested_day);
+            already_loaded = cached && cached->flow_trace_loaded;
+            portEXIT_CRITICAL(&s_state_lock);
+            if (already_loaded) {
+                portENTER_CRITICAL(&s_state_lock);
+                if (!s_history_trace_requested_day[0]) {
+                    strlcpy(s_services.history_trace_day, requested_day,
+                            sizeof(s_services.history_trace_day));
+                    s_services.history_trace_result = ESP_OK;
+                    s_services.history_trace_busy = false;
+                }
+                s_services.history_version++;
+                portEXIT_CRITICAL(&s_state_lock);
+                continue;
+            }
 
-        portENTER_CRITICAL(&s_state_lock);
-        touch_history_day_t *destination = history_day_locked(requested_day);
-        if (destination) {
-            copy_history_trace(destination, &loaded);
+            touch_history_day_t loaded = {0};
+            strlcpy(loaded.day, requested_day, sizeof(loaded.day));
+            esp_err_t result = touch_history_load_flow_trace(&loaded);
+
+            portENTER_CRITICAL(&s_state_lock);
+            touch_history_day_t *destination = history_day_locked(requested_day);
             /* A completed negative lookup is cached; a lease/recording error
              * remains retryable on the next tap. */
-            if (result == ESP_OK || loaded.flow_trace_loaded)
-                s_services.history_version++;
+            if (destination && (result == ESP_OK || loaded.flow_trace_loaded))
+                copy_history_trace(destination, &loaded);
+            /* A newer request may have arrived while this file was being
+             * read.  Keep that request visibly busy; otherwise publish this
+             * result even when it is transient so the UI cannot say
+             * "Reading" forever and a tap can retry it. */
+            if (!s_history_trace_requested_day[0]) {
+                strlcpy(s_services.history_trace_day, requested_day,
+                        sizeof(s_services.history_trace_day));
+                s_services.history_trace_result = result;
+                s_services.history_trace_busy = false;
+            }
+            s_services.history_version++;
+            portEXIT_CRITICAL(&s_state_lock);
         }
-        portEXIT_CRITICAL(&s_state_lock);
     }
-    vTaskDelete(NULL);
 }
 
 static void queue_history_trace_load(const char *day)
 {
-    bool start_worker = false;
+    bool notify_worker = false;
+    bool worker_unavailable = false;
     if (!day || !day[0]) return;
     portENTER_CRITICAL(&s_state_lock);
     touch_history_day_t *cached = history_day_locked(day);
-    if (cached && !cached->flow_trace_loaded) {
+    if (cached && !cached->flow_trace_loaded &&
+        (!s_services.history_trace_busy ||
+         strcmp(s_services.history_trace_day, day) != 0)) {
         strlcpy(s_history_trace_requested_day, day,
                 sizeof(s_history_trace_requested_day));
+        strlcpy(s_services.history_trace_day, day,
+                sizeof(s_services.history_trace_day));
+        s_services.history_trace_busy = true;
+        s_services.history_version++;
         if (!s_history_trace_worker_running) {
-            s_history_trace_worker_running = true;
-            start_worker = true;
+            if (s_history_trace_worker_task) {
+                s_history_trace_worker_running = true;
+                notify_worker = true;
+            } else {
+                s_history_trace_requested_day[0] = '\0';
+                s_services.history_trace_busy = false;
+                s_services.history_trace_result = ESP_ERR_NO_MEM;
+                s_services.history_version++;
+                worker_unavailable = true;
+            }
         }
     }
     portEXIT_CRITICAL(&s_state_lock);
-    if (start_worker &&
-        xTaskCreate(history_trace_task, "ui_hist_trace", 6144, NULL, 2, NULL) !=
-            pdPASS) {
-        portENTER_CRITICAL(&s_state_lock);
-        s_history_trace_worker_running = false;
-        s_history_trace_requested_day[0] = '\0';
-        portEXIT_CRITICAL(&s_state_lock);
+    if (notify_worker) xTaskNotifyGive(s_history_trace_worker_task);
+    if (worker_unavailable)
         bsp_display_set_notice("Unable to read recorded flow");
-    }
 }
 
 static void history_task(void *arg)
 {
     (void)arg;
-    touch_history_day_t *local = heap_caps_calloc(
-        HISTORY_MAX_DAYS, sizeof(*local), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!local) local = calloc(HISTORY_MAX_DAYS, sizeof(*local));
-    size_t count = 0;
-    esp_err_t result = local ? touch_history_load(local, HISTORY_MAX_DAYS, &count)
-                             : ESP_ERR_NO_MEM;
-    portENTER_CRITICAL(&s_state_lock);
-    if (result == ESP_OK) {
-        /* A metadata refresh must not discard a trace that was loaded by the
-         * separate, selection-driven worker. */
-        for (size_t i = 0; i < count; ++i) {
-            touch_history_day_t *cached = history_day_locked(local[i].day);
-            if (cached && cached->flow_trace_loaded)
-                copy_history_trace(&local[i], cached);
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        touch_history_day_t *local = heap_caps_calloc(
+            HISTORY_MAX_DAYS, sizeof(*local), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!local) local = calloc(HISTORY_MAX_DAYS, sizeof(*local));
+        size_t count = 0;
+        esp_err_t result = local
+                               ? touch_history_load(local, HISTORY_MAX_DAYS, &count)
+                               : ESP_ERR_NO_MEM;
+        portENTER_CRITICAL(&s_state_lock);
+        if (result == ESP_OK) {
+            /* A metadata refresh must not discard a trace that was loaded by
+             * the separate, selection-driven worker. */
+            for (size_t i = 0; i < count; ++i) {
+                touch_history_day_t *cached = history_day_locked(local[i].day);
+                if (cached && cached->flow_trace_loaded)
+                    copy_history_trace(&local[i], cached);
+            }
+            memcpy(s_services.history, local, sizeof(s_services.history));
+            s_services.history_count = count;
+        } else {
+            /* Never present a cached list as if a failed refresh were
+             * current; in particular, that could hide the night which just
+             * finished recording. */
+            s_services.history_count = 0;
         }
-        memcpy(s_services.history, local, sizeof(s_services.history));
-        s_services.history_count = count;
-    } else {
-        s_services.history_count = 0;
+        s_services.history_result = result;
+        s_services.history_busy = false;
+        s_services.history_version++;
+        s_services.history_metadata_version++;
+        portEXIT_CRITICAL(&s_state_lock);
+        free(local);
     }
-    s_services.history_result = result;
-    s_services.history_busy = false;
-    s_services.history_version++;
-    portEXIT_CRITICAL(&s_state_lock);
-    free(local);
-    vTaskDelete(NULL);
 }
 #endif
 
@@ -1262,18 +1308,33 @@ static void start_history_load(void)
     /* Keep the seeded preview history intact. QEMU does not emulate SDMMC. */
     return;
 #else
+    bool notify_worker = false;
+    bool worker_unavailable = false;
+    bool recording_active = bsp_display_is_therapy_active();
     portENTER_CRITICAL(&s_state_lock);
     bool busy = s_services.history_busy;
-    if (!busy) s_services.history_busy = true;
-    portEXIT_CRITICAL(&s_state_lock);
-    if (!busy && xTaskCreate(history_task, "ui_history", 8192, NULL, 2, NULL) != pdPASS) {
-        portENTER_CRITICAL(&s_state_lock);
-        s_services.history_busy = false;
+    if (!busy && recording_active) {
+        /* Never wait through an active therapy session. Keep an existing
+         * cached list visible; on a first visit publish the truthful busy
+         * state immediately and let the next post-stop entry refresh it. */
+        if (s_services.history_count == 0) {
+            s_services.history_result = ESP_ERR_INVALID_STATE;
+            s_services.history_version++;
+            s_services.history_metadata_version++;
+        }
+    } else if (!busy && s_history_worker_task) {
+        s_services.history_busy = true;
+        notify_worker = true;
+    } else if (!busy) {
         s_services.history_result = ESP_ERR_NO_MEM;
         s_services.history_version++;
-        portEXIT_CRITICAL(&s_state_lock);
-        bsp_display_set_notice("Unable to start history refresh");
+        s_services.history_metadata_version++;
+        worker_unavailable = true;
     }
+    portEXIT_CRITICAL(&s_state_lock);
+    if (notify_worker) xTaskNotifyGive(s_history_worker_task);
+    if (worker_unavailable)
+        bsp_display_set_notice("Unable to start history refresh");
 #endif
 }
 
@@ -1969,15 +2030,18 @@ static void history_row_cb(lv_event_t *event)
 {
     int selection = (int)(intptr_t)lv_event_get_user_data(event);
     char selected_day[9] = {0};
-    portENTER_CRITICAL(&s_state_lock);
-    if (selection >= 0 && selection < (int)s_services.history_count) {
-        strlcpy(s_history_selected_day, s_services.history[selection].day,
+    /* Resolve the tap against the snapshot which actually painted this row.
+     * The live worker state may already contain a newly inserted night while
+     * the visible frame is still up to one service tick behind. */
+    if (selection >= 0 &&
+        selection < (int)s_render_services->history_count) {
+        strlcpy(s_history_selected_day,
+                s_render_services->history[selection].day,
                 sizeof(s_history_selected_day));
         strlcpy(selected_day, s_history_selected_day, sizeof(selected_day));
     } else {
         s_history_selected_day[0] = '\0';
     }
-    portEXIT_CRITICAL(&s_state_lock);
     s_history_selection = selection;
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
     queue_history_trace_load(selected_day);
@@ -2169,8 +2233,11 @@ static void wifi_save_cb(lv_event_t *event)
 static void set_active_page(int page)
 {
     if (page < 0 || page >= 3) return;
-    if (page == s_active_page) return;
-    s_active_page = page;
+    portENTER_CRITICAL(&s_state_lock);
+    bool already_active = page == s_active_page;
+    if (!already_active) s_active_page = page;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (already_active) return;
     for (int i = 0; i < 3; ++i) {
         bool selected = i == page;
         set_hidden(s_pages[i], !selected);
@@ -2197,6 +2264,7 @@ static void set_active_page(int page)
     ESP_LOGI(TAG, "emulated touch selected page %u", (unsigned)page);
 #endif
     close_keyboard_sheet(true);
+    if (page == 1) start_history_load();
 }
 
 static void nav_cb(lv_event_t *event)
@@ -3914,10 +3982,13 @@ static void refresh_history_widgets(const ui_service_state_t *services)
     static int rendered_selection = -2;
     static size_t rendered_revealed;
     bool changed = services->history_version != s_seen_history_version;
+    bool metadata_changed = services->history_metadata_version !=
+                            s_seen_history_metadata_version;
     if (changed) {
         s_seen_history_version = services->history_version;
+        s_seen_history_metadata_version = services->history_metadata_version;
         s_history_selection = -1;
-        if (s_history_selected_day[0]) {
+        if (!metadata_changed && s_history_selected_day[0]) {
             for (size_t i = 0; i < services->history_count; ++i) {
                 if (!strcmp(s_history_selected_day, services->history[i].day)) {
                     s_history_selection = (int)i;
@@ -3929,7 +4000,18 @@ static void refresh_history_widgets(const ui_service_state_t *services)
         if (services->history_count == 0) {
             s_history_selection = -1;
             s_history_selected_day[0] = '\0';
+        } else if (metadata_changed || s_history_selection < 0) {
+            /* Every completed metadata refresh represents a newly opened or
+             * newly finalised History view, so show its newest-first row.
+             * Trace-only updates still preserve an explicit older choice. */
+            s_history_selection = 0;
+            strlcpy(s_history_selected_day, services->history[0].day,
+                    sizeof(s_history_selected_day));
         }
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+        if (metadata_changed && s_history_selection >= 0)
+            queue_history_trace_load(s_history_selected_day);
+#endif
     }
     if (render_valid && !changed && rendered_busy == services->history_busy &&
         rendered_selection == s_history_selection &&
@@ -3948,6 +4030,8 @@ static void refresh_history_widgets(const ui_service_state_t *services)
     bool read_error = !services->history_busy && services->history_version > 0 &&
                       services->history_count == 0 &&
                       services->history_result != ESP_OK && !card_busy;
+    bool memory_error = read_error &&
+                        services->history_result == ESP_ERR_NO_MEM;
     size_t shown = services->history_count < s_history_revealed
                        ? services->history_count : s_history_revealed;
 
@@ -4035,6 +4119,10 @@ static void refresh_history_widgets(const ui_service_state_t *services)
             history_show_empty("!", "microSD is busy",
                                "The card is recording right now. History is available again once the session ends.",
                                NULL, COLOR_AMBER);
+        } else if (memory_error) {
+            history_show_empty("!", "History temporarily unavailable",
+                               "Not enough working memory to start the history reader. Live therapy is unaffected.",
+                               "Retry", COLOR_AMBER);
         } else if (read_error) {
             history_show_empty("!", "Could not read the card",
                                "The microSD card did not respond. Live therapy is unaffected.",
@@ -4163,13 +4251,23 @@ static void refresh_history_widgets(const ui_service_state_t *services)
         lv_label_set_text(s_history_trace_start, "--:--");
         lv_label_set_text(s_history_trace_end, "--:--");
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-        const char *trace_message = day->flow_trace_loaded
-                                        ? "No on-device flow trace for this night"
-                                    : sd_storage_recording_active()
-                                        ? "Available after recording stops"
-                                    : !sd_storage_is_ready()
-                                        ? "microSD card unavailable"
-                                        : "Reading recorded flow...";
+        bool trace_request_matches =
+            !strcmp(services->history_trace_day, day->day);
+        bool trace_failed = trace_request_matches &&
+                            !services->history_trace_busy &&
+                            services->history_trace_result != ESP_OK;
+        const char *trace_message =
+            day->flow_trace_loaded
+                ? "No on-device flow trace for this night"
+            : trace_request_matches && services->history_trace_busy
+                ? "Reading recorded flow..."
+            : trace_failed
+                ? "Flow trace temporarily unavailable - tap this night to retry"
+            : sd_storage_recording_active()
+                ? "Available after recording stops"
+            : !sd_storage_is_ready()
+                ? "microSD card unavailable"
+                : "Reading recorded flow...";
         lv_label_set_text(s_history_trace_message, trace_message);
 #endif
         lv_obj_clear_flag(s_history_trace_message, LV_OBJ_FLAG_HIDDEN);
@@ -5752,6 +5850,22 @@ esp_err_t bsp_display_init(void)
                                                NULL, 5, &s_lvgl_task, 1) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "create display task");
 
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+    /* Create the on-demand readers while boot still has ample internal RAM.
+     * Their stacks live in PSRAM and the tasks sleep between requests. The old
+     * per-refresh xTaskCreate() path needed contiguous internal stack memory
+     * precisely when post-therapy processing had made it scarcest. */
+    s_history_worker_task = psram_task_create(
+        history_task, "ui_history", 8192, NULL, 2, tskNO_AFFINITY, NULL, NULL);
+    s_history_trace_worker_task = psram_task_create(
+        history_trace_task, "ui_hist_trace", 6144, NULL, 2,
+        tskNO_AFFINITY, NULL, NULL);
+    if (!s_history_worker_task)
+        ESP_LOGE(TAG, "history metadata worker unavailable");
+    if (!s_history_trace_worker_task)
+        ESP_LOGE(TAG, "history trace worker unavailable");
+#endif
+
     /* Start at the exact steady/full-on endpoint. Persisted hardware PWM
      * dimming is applied by main once NVS is available. */
     waveshare_7b_set_brightness(100);
@@ -5869,9 +5983,14 @@ void bsp_display_set_therapy_active(bool active)
     bool changed = s_state.therapy != active;
     s_state.therapy = active;
     if (!active) s_state.leak = NAN;
+    bool refresh_history = changed && !active && s_active_page == 1;
     portEXIT_CRITICAL(&s_state_lock);
     if (changed) bsp_display_restart_idle_timeout();
     bsp_display_apply_backlight_policy(false);
+    /* If the user watched the busy History state during therapy, complete
+     * their original request automatically once finalisation starts.  The
+     * History worker waits on the recording claim without blocking LVGL. */
+    if (refresh_history) start_history_load();
 }
 
 void bsp_display_push_flow(float flow_lpm)
@@ -6156,6 +6275,7 @@ void bsp_display_qemu_seed_demo(void)
     s_services.history_count = sizeof(demo_history) / sizeof(demo_history[0]);
     s_services.history_result = ESP_OK;
     s_services.history_version++;
+    s_services.history_metadata_version++;
     s_services.as11_count = 1;
     strlcpy(s_services.as11[0].addr, "AA:11:00:00:00:01",
             sizeof(s_services.as11[0].addr));
