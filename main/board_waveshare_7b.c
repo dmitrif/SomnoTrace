@@ -210,6 +210,8 @@ esp_err_t waveshare_7b_init(esp_lcd_panel_handle_t *panel,
 esp_err_t waveshare_7b_set_backlight(bool on)
 {
     ESP_RETURN_ON_ERROR(init_i2c_and_expander(), TAG, "board control init");
+    /* EXIO2 is the panel's hardware enable. An off request removes the
+     * backlight electrically; it is not a black framebuffer or 0% PWM. */
     return iox_output(IOX_BACKLIGHT, on);
 }
 

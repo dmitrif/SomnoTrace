@@ -11,6 +11,7 @@ SOURCE = (ROOT / "main/device_settings.c").read_text(encoding="utf-8")
 PORTAL = (ROOT / "main/portal.html").read_text(encoding="utf-8")
 DISPLAY_HEADER = (ROOT / "main/bsp_display.h").read_text(encoding="utf-8")
 TOUCH_BSP = (ROOT / "main/bsp_display_7b.c").read_text(encoding="utf-8")
+TOUCH_BOARD = (ROOT / "main/board_waveshare_7b.c").read_text(encoding="utf-8")
 COMPACT_BSP = (ROOT / "main/bsp_display.c").read_text(encoding="utf-8")
 HOST_TEST = (ROOT / "scripts/test-host.sh").read_text(encoding="utf-8")
 BODY_FONT = (
@@ -218,9 +219,19 @@ require(TOUCH_BSP,
         r"s_backlight_requested\s*=\s*false",
         "idle-off eligibility and request are atomic and fail open without touch")
 require(TOUCH_BSP,
+        r"request_idle_sleep_if_due\(&display_settings,\s*visual_alarm,\s*now_us\)"
+        r".*?apply_pending_backlight_locked\(\)",
+        "standby timeout applies its hardware-off request")
+require(TOUCH_BSP,
         r"bsp_display_apply_backlight_policy.*?!screen_wake_input_available\(\)"
         r".*?bsp_display_set_backlight\(true\)",
         "therapy display policy also fails open without touch")
+require(TOUCH_BSP,
+        r"bsp_display_apply_backlight_policy.*?bool\s+off\s*=\s*"
+        r"settings\.lcd_therapy_mode\s*==\s*LCD_THERAPY_ALWAYS_OFF.*?"
+        r"therapy\s*&&\s*settings\.lcd_therapy_mode\s*==\s*LCD_THERAPY_OFF.*?"
+        r"bsp_display_set_backlight\(!off\)",
+        "therapy screen-off modes request a physical backlight change")
 require(update_ui,
         r"if\s*\(\s*!screen_wake_input_available\(\)\s*&&\s*!backlight\s*\)"
         r".*?bsp_display_set_backlight\(true\).*?"
@@ -288,6 +299,10 @@ require(backlight_apply,
         r"s_backlight\s*=\s*requested\s*;.*?"
         r"s_backlight_retry_after_us\s*=\s*0",
         "authoritative backlight state changes only after hardware success")
+require(TOUCH_BOARD,
+        r"waveshare_7b_set_backlight\(bool\s+on\).*?"
+        r"iox_output\(IOX_BACKLIGHT,\s*on\)",
+        "logical screen off hard-disables the panel backlight through EXIO2")
 require(TOUCH_BSP,
         r"s_rendered_screen_timeout_s.*?!lv_dropdown_is_open.*?"
         r"settings\.screen_timeout_s.*?lv_dropdown_set_selected",
