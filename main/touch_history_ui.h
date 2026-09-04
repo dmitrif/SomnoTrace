@@ -61,6 +61,7 @@ typedef enum {
     TOUCH_HISTORY_UI_INTENT_ZOOM_RELATIVE,
     TOUCH_HISTORY_UI_INTENT_PAN_RELATIVE,
     TOUCH_HISTORY_UI_INTENT_SET_CURSOR,
+    TOUCH_HISTORY_UI_INTENT_CLEAR_CURSOR,
     TOUCH_HISTORY_UI_INTENT_TOGGLE_THERAPY_ONLY,
 } touch_history_ui_intent_type_t;
 
@@ -131,6 +132,9 @@ typedef struct {
     const char *status_text;
     const char *error_text;
     const char *degraded_text;
+    /* Non-blocking channel-statistics warning rendered in the graph header;
+     * it must not cover or disable an otherwise valid graph. */
+    const char *stats_warning_text;
 } touch_history_ui_snapshot_t;
 
 /* Allocates the retained UI/context only from external PSRAM. LVGL owns its

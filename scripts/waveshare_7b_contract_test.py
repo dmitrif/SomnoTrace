@@ -34,6 +34,10 @@ fonts = source("main/somnotrace_fonts.h")
 board_defaults = source("sdkconfig.7b.defaults")
 history = source("main/touch_history.c")
 history_header = source("main/touch_history.h")
+history_ui = source("main/touch_history_ui.c")
+history_ui_header = source("main/touch_history_ui.h")
+history_controller = source("main/touch_history_controller.c")
+history_controller_header = source("main/touch_history_controller.h")
 edf = source("main/edf_gen.c")
 main = source("main/main.c")
 as11 = source("main/as11_ble.c")
@@ -195,10 +199,9 @@ for pattern, description in (
      "Home graph reaches the shared panel bottom"),
     (r"make_touch_button\(home,\s*710,\s*338,\s*298,\s*116",
      "Home action reaches x=1008 and y=518"),
-    (r"make_card\(history,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*330,\s*UI_PANEL_H\)",
-     "History list uses the shared frame"),
-    (r"make_card\(history,\s*358,\s*UI_PANEL_Y,\s*650,\s*UI_PANEL_H\)",
-     "History detail uses the shared frame"),
+    (r"make_plain_container\(\s*history,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*"
+     r"TOUCH_HISTORY_UI_WIDTH,\s*TOUCH_HISTORY_UI_HEIGHT\s*\)",
+     "rich History surface fills the shared 992x450 frame"),
     (r"make_card\(manage,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*"
      r"UI_MANAGE_RAIL_W,\s*UI_PANEL_H\)",
      "Manage rail is (16,68) 212x450"),
@@ -356,9 +359,10 @@ require(display, r"s_status_capsule\s*=\s*make_destination_button",
 require(display,
         r"s_status_tray_actions\[i\]\s*=\s*make_destination_button",
         "immediate status-tray destination actions")
-require(display,
-        r"s_history_channel_buttons\[i\]\s*=\s*make_destination_button",
-        "immediate History trace channel selection")
+require(history_ui,
+        r"ui->channels\[i\]\.button.*?history_ui_channel_pressed,\s*"
+        r"LV_EVENT_PRESSED",
+        "immediate rich History channel selection")
 require(display,
         r"static void set_destination_surface.*?"
         r"LV_STYLE_TRANSLATE_Y,\s*0,\s*LV_STATE_PRESSED.*?"
@@ -401,8 +405,13 @@ require(active_page_source,
         r"portEXIT_CRITICAL\(&s_state_lock\);\s*"
         r"if\s*\(already_active\)\s*return;",
         "page navigation publishes and checks the active page under lock")
-require(active_page_source, r"if\s*\(page\s*==\s*1\)\s*start_history_load\(\);",
-        "History navigation requests a metadata refresh")
+require(active_page_source,
+        r"previous_page\s*==\s*1.*?touch_history_controller_set_active\("
+        r".*?false\)",
+        "leaving History cancels active controller work")
+require(active_page_source,
+        r"page\s*==\s*1.*?touch_history_controller_set_active\(.*?true\)",
+        "entering History activates newest-first loading")
 for selection_source, description in (
     (active_page_source, "page navigation"),
     (manage_section_source, "Manage section navigation"),
@@ -430,11 +439,10 @@ require(display,
         r"index\s*==\s*MANAGE_SYSTEM;.*?if\s*\(can_overflow\)\s*\{.*?"
         r"LV_OBJ_FLAG_SCROLLABLE.*?LV_OBJ_FLAG_SCROLL_ELASTIC",
         "only overflowing Manage panes scroll without elasticity")
-require(display,
-        r"s_history_list_scroll.*?LV_OBJ_FLAG_SCROLLABLE.*?"
-        r"lv_obj_clear_flag\(s_history_list_scroll,\s*"
-        r"LV_OBJ_FLAG_SCROLL_ELASTIC\)",
-        "History list scrolls without elastic overscroll")
+require(history_ui,
+        r"list_viewport.*?LV_OBJ_FLAG_SCROLLABLE.*?LV_DIR_VER.*?"
+        r"LV_EVENT_SCROLL_END",
+        "History list uses bounded scroll-driven page recycling")
 tray_scroll_start = display.index(
     "lv_obj_t *tray_scroll = make_plain_container(s_status_tray"
 )
@@ -504,10 +512,10 @@ for target, description in (
             rf"lv_obj_set_style_shadow_width\(\s*{target}.*?"
             r"UI_DECORATIVE_SHADOW_WIDTH",
             f"physical shadow suppression for {description}")
-require(display,
-        r"set_style_num_if_changed\(\s*s_history_rows\[i\],\s*"
-        r"LV_STYLE_SHADOW_WIDTH,\s*UI_DECORATIVE_SHADOW_WIDTH",
-        "changed-only physical shadow suppression for selected History row")
+require(history_ui,
+        r"static lv_obj_t \*history_ui_button.*?"
+        r"lv_obj_set_style_shadow_width\(button,\s*0,\s*0\)",
+        "rich History controls avoid software-blurred shadows")
 for target, description in (
     ("s_nav_buttons\\[i\\]", "selected navigation"),
     ("s_manage_buttons\\[i\\]", "selected Manage rail"),
@@ -537,15 +545,6 @@ for literal, description in (
     ("Pair a device", "unpaired primary state"),
     ("Therapy stopped unexpectedly", "interruption alert state"),
     ("Acknowledge", "interruption acknowledgement control"),
-    ("History not loaded", "History initial state"),
-    ("Reading history...", "History busy state"),
-    ("Load 7 more", "bounded History pagination"),
-    ("No completed sessions yet", "History empty state"),
-    ("Could not read the card", "History error state"),
-    ("microSD is busy", "History card-busy state"),
-    ("Select a night", "History unselected state"),
-    ("Retry", "History error recovery action"),
-    ("For trend review. Not a diagnosis or a prescription.", "History safety copy"),
     ("Searching for nearby machines", "AirSense scanning state"),
     ("Connecting securely", "AirSense connecting state"),
     ("Enter the 4-digit code shown on your AirSense", "AirSense passcode state"),
@@ -566,8 +565,18 @@ require(display, r'"Waiting for (?:therapy|breathing) data(?:\.\.\.|…)?"',
 require(display, r"flow_count\s*>=\s*FLOW_READY_POINTS",
         "valid sample threshold before chart becomes live")
 require(display, r'"Therapy status unknown"', "stale AirSense state")
-for metric in ("AHI", "PRESSURE 95%", "LEAK 95%", "EVENTS PER HOUR"):
-    assert metric in display, f"missing History component: {metric}"
+for history_copy in (
+    "Loading recorded night",
+    "No recorded nights yet",
+    "Could not read the card",
+    "Retry",
+    "Card status",
+    "Trend review only. Not a diagnosis or a prescription.",
+):
+    assert history_copy in history_ui, \
+           f"missing rich History state: {history_copy}"
+for metric in ("Usage", "ST AHI", "Device AHI", "Recorded", "O₂ coverage"):
+    assert f'"{metric}"' in history_ui, f"missing rich History metric: {metric}"
 
 # Home has one contextual therapy action.  Administration and acknowledgement
 # live in Manage or transient banners, never in a permanent Home utility row.
@@ -592,10 +601,17 @@ require(display, r"device_settings_set_brightness", "native brightness control")
 require(display, r"device_settings_set_lcd_therapy_mode", "native therapy display policy")
 require(display, r"netprov_save_config\(&cfg\)", "native Wi-Fi credential save")
 require(display, r"LV_KEYBOARD_MODE_TEXT_LOWER", "on-screen Wi-Fi keyboard")
-require(display, r"touch_history_load", "background SD history load")
+for api in (
+    "touch_history_load_page", "touch_history_load_night_ex",
+    "touch_history_load_view_ex", "touch_history_load_stats_ex",
+):
+    require(history_controller, rf"\b{api}\b",
+            f"controller-backed asynchronous rich History read {api}")
 require(history, r"touch_history_decode_summary_record",
         "allocation-conscious native History summary decoder")
-assert '"touch_history.c"' in cmake, "7B build omits touch history adapter"
+for unit in ("touch_history.c", "touch_history_ui.c",
+             "touch_history_controller.c"):
+    assert f'"{unit}"' in cmake, f"7B build omits {unit}"
 require(main, r"oximeter_init\(\).*?bsp_display_enable_touch_services\(as11_ready,\s*oximeter_ready\)",
         "touch BLE controls enabled only after service initialization")
 
@@ -668,257 +684,121 @@ require(update_source,
 require(update_source,
         r"alert_visibility_changed\s*=\s*set_hidden\(s_alert_banner",
         "state-aware alert banner visibility")
-require(history, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD", "leased history reads")
-require(history_header, r"TOUCH_HISTORY_TRACE_POINTS\s+48\b",
-        "bounded native overnight trace")
-require(history_header, r"int16_t\s+points\[TOUCH_HISTORY_TRACE_POINTS\]",
-        "compact selected-channel trace storage")
-require(history_header, r"int16_t\s+upper_points\[TOUCH_HISTORY_TRACE_POINTS\]",
-        "bounded parallel flow-envelope storage")
-require(history_header, r"bool\s+has_data\s*;",
-        "truthful trace availability")
-require(history, r"terminal_session.*?completed.*?interrupted.*?timed_out.*?rotated.*?split",
-        "trace excludes active and failed sessions")
-require(history, r"_flow_mm\.snt.*?_brp_mm\.snt.*?_pld\.snt",
-        "v2 and legacy bounded overview sources")
-require(history, r"touch_history_load_trace", "selection-driven trace API")
-require(history, r"HISTORY_TRACE_MAX_RECORDS\s+\(24U\s*\*\s*60U\s*\*\s*60U\)",
-        "one-day hard bound on trace input")
-require(history, r"HISTORY_READ_VALUES\s+512U", "bounded block-read buffer")
-require(history, r"fread\(records,.*?wanted.*?for\s*\(size_t r = 0; r < got;.*?processed \+= \(uint32_t\)got",
-        "only complete buffered records populate trace bins")
-require(history, r"record\s*=\s*&records\[r\s*\*\s*best\.n_channels\]",
-        "channel-width-aware v2 record stride")
-require(history, r"fmt >= 2.*?channels = 2;.*?channels = 4;",
-        "v2 flow pair and legacy v1 BRP channel semantics")
-assert "touch_history_load_trace(days[i]" not in history, \
-       "trace must not be read eagerly for every history day"
-require(display, r"queue_history_trace_load\(selected_day,\s*s_history_channel\)",
-        "trace loads only after a night is selected")
 
-history_trace_task_start = display.index("static void history_trace_task(void *arg)\n{")
-history_trace_task_source = display[
-    history_trace_task_start:
-    display.index("static void queue_history_trace_load", history_trace_task_start)
+# Rich History is one retained 992x450 surface backed by one serialized
+# controller. The display task alone applies coherent revisions to LVGL; the
+# worker callback only schedules that apply.
+for pattern, description in (
+    (r"TOUCH_HISTORY_UI_WIDTH\s+992\b", "992-pixel History width"),
+    (r"TOUCH_HISTORY_UI_HEIGHT\s+450\b", "450-pixel History height"),
+    (r"TOUCH_HISTORY_UI_LIST_ROWS\s+7\b", "seven recycled night rows"),
+    (r"TOUCH_HISTORY_UI_CHANNEL_CONTROLS\s+TOUCH_HISTORY_SIGNAL_COUNT",
+     "all eight signal controls"),
+):
+    require(history_ui_header, pattern, description)
+for label in (
+    "Breathing / Flow", "Pressure", "Leak", "Flow limit",
+    "Snore", "SpO₂", "Pulse", "Motion",
+):
+    assert f'"{label}"' in history_ui, f"missing rich History channel {label}"
+assert "lv_chart_create" not in history_ui, \
+       "rich History must use one bounded draw surface, not an LVGL chart"
+assert "lv_canvas_create" not in history_ui, \
+       "rich History must not allocate a full-frame canvas"
+require(history_ui,
+        r"heap_caps_calloc\(\s*1,\s*sizeof\(\*ui\),\s*"
+        r"MALLOC_CAP_SPIRAM\s*\|\s*MALLOC_CAP_8BIT\)",
+        "retained History snapshot lives in PSRAM")
+
+build_history_start = display.index("static void build_history_page(lv_obj_t *history)\n{")
+build_history_source = display[
+    build_history_start:
+    display.index("static lv_obj_t *make_manage_section", build_history_start)
 ]
-history_queue_start = display.index("static void queue_history_trace_load(const char *day,")
-history_queue_source = display[
-    history_queue_start:display.index("static void history_task", history_queue_start)
-]
-history_task_start = display.index("static void history_task(void *arg)\n{")
-history_task_source = display[
-    history_task_start:display.index("#endif", history_task_start)
-]
-history_load_start = display.index("static void start_history_load(void)\n{")
-history_load_source = display[
-    history_load_start:display.index("static void qemu_upload_progress", history_load_start)
-]
-history_row_start = display.index("static void history_row_cb(lv_event_t *event)\n{")
-history_row_source = display[
-    history_row_start:display.index("static void refresh_cb", history_row_start)
-]
-history_refresh_start = display.index(
-    "static void refresh_history_widgets(const ui_service_state_t *services)\n{"
+require(build_history_source,
+        r"touch_history_ui_create\(\s*s_history_host,\s*&config,\s*"
+        r"&s_history_ui\s*\)",
+        "one retained rich History object tree")
+require(display,
+        r"touch_history_controller_create\(\s*&history_config,\s*"
+        r"&s_history_controller\s*\).*?build_ui\(\);",
+        "History controller exists before its retained UI is built")
+require(display,
+        r"CONFIG_SOMNOTRACE_BOARD_QEMU.*?\.deterministic_preview\s*=\s*true",
+        "QEMU exercises deterministic rich History data")
+
+history_changed_start = display.index(
+    "static void history_controller_changed(void *context)\n{"
 )
-history_refresh_source = display[
-    history_refresh_start:
-    display.index("static void refresh_device_dropdown", history_refresh_start)
+history_changed_source = display[
+    history_changed_start:
+    display.index("static void history_route_card", history_changed_start)
 ]
-therapy_state_start = display.index(
-    "void bsp_display_set_therapy_active(bool active)\n{"
-)
-therapy_state_source = display[
-    therapy_state_start:display.index("void bsp_display_push_flow", therapy_state_start)
-]
-for worker_source, description in (
-    (history_task_source, "History metadata worker"),
-    (history_trace_task_source, "History trace worker"),
-):
-    require(worker_source, r"for\s*\(;;\).*?ulTaskNotifyTake\(pdTRUE,\s*portMAX_DELAY\)",
-            f"persistent notification-driven {description}")
-require(history_load_source, r"xTaskNotifyGive\(s_history_worker_task\)",
-        "History refresh notification")
-require(history_queue_source, r"xTaskNotifyGive\(s_history_trace_worker_task\)",
-        "History trace notification")
-require(history_task_source,
-        r"if\s*\(result\s*==\s*ESP_OK\).*?"
-        r"s_services\.history_count\s*=\s*count;.*?"
-        r"else\s*\{.*?s_services\.history_count\s*=\s*0;.*?\}.*?"
-        r"s_services\.history_result\s*=\s*result;",
-        "failed History metadata refresh clears stale rows")
-require(history_task_source,
-        r"s_services\.history_busy\s*=\s*rerun;\s*"
-        r"s_services\.history_version\+\+;\s*"
-        r"s_services\.history_metadata_version\+\+;",
-        "metadata completion publishes its own version")
+assert "__atomic_store_n" in history_changed_source
+assert "lv_" not in history_changed_source and \
+       "xTaskNotify" not in history_changed_source, \
+       "History worker callback must only schedule an LVGL-task apply"
 require(display,
-        r"static\s+unsigned\s+s_history_refresh_generation\s*=\s*1;.*?"
-        r"static\s+unsigned\s+s_history_refresh_started_generation;.*?"
-        r"static\s+unsigned\s+s_history_refresh_completed_generation;",
-        "boot starts with a stale History metadata generation")
-require(history_load_source,
-        r"refresh_required\s*=\s*s_history_refresh_generation\s*!=\s*"
-        r"s_history_refresh_completed_generation;.*?"
-        r"refresh_required\s*&&\s*s_history_worker_task.*?"
-        r"s_history_refresh_started_generation\s*=\s*"
-        r"s_history_refresh_generation;",
-        "History page entry only starts a stale metadata generation")
-require(history_load_source,
-        r"static void request_history_refresh\(void\).*?"
-        r"s_history_refresh_generation\+\+;.*?start_history_load\(\);",
-        "manual History refresh forces a new metadata generation")
-require(history_task_source,
-        r"s_history_refresh_completed_generation\s*=\s*load_generation;.*?"
-        r"bool\s+rerun\s*=\s*s_history_refresh_generation\s*!=\s*"
-        r"load_generation.*?xTaskNotifyGive\(s_history_worker_task\);",
-        "metadata worker preserves a stale generation requested in flight")
-require(history_refresh_source,
-        r"metadata_changed\s*=\s*services->history_metadata_version\s*!=\s*"
-        r"s_seen_history_metadata_version;.*?"
-        r"if\s*\(version_changed\)\s*\{.*?"
-        r"s_seen_history_metadata_version\s*=\s*"
-        r"services->history_metadata_version;.*?"
-        r"if\s*\(!metadata_changed\s*&&\s*s_history_selected_day\[0\]\)\s*\{.*?"
-        r"strcmp\(s_history_selected_day,\s*services->history\[i\]\.day\).*?"
-        r"s_history_selection\s*=\s*\(int\)i;",
-        "trace-only History updates preserve the selected day")
-require(history_refresh_source,
-        r"if\s*\(services->history_count\s*==\s*0\).*?"
-        r"else\s+if\s*\(metadata_changed\s*\|\|\s*"
-        r"s_history_selection\s*<\s*0\)\s*\{.*?"
-        r"s_history_selection\s*=\s*0;.*?"
-        r"services->history\[0\]\.day.*?"
-        r"if\s*\(metadata_changed\s*&&\s*s_history_selection\s*>=\s*0\)\s*"
-        r"queue_history_trace_load\(s_history_selected_day,\s*s_history_channel\)",
-        "completed non-empty metadata refresh selects and queues row zero")
-require(therapy_state_source,
-        r"portENTER_CRITICAL\(&s_state_lock\);\s*"
-        r"bool\s+changed\s*=\s*s_state\.therapy\s*!=\s*active;.*?"
-        r"s_state\.therapy\s*=\s*active;.*?"
-        r"therapy_finished\s*=\s*changed\s*&&\s*!active;.*?"
-        r"if\s*\(therapy_finished\)\s*s_history_refresh_generation\+\+;.*?"
-        r"bool\s+refresh_history\s*=\s*therapy_finished\s*&&\s*"
-        r"s_active_page\s*==\s*1;\s*"
-        r"portEXIT_CRITICAL\(&s_state_lock\);.*?"
-        r"if\s*\(refresh_history\)\s*start_history_load\(\);",
-        "therapy stop snapshots History refresh eligibility under lock")
-require(history_row_source,
-        r"selection\s*<\s*\(int\)s_render_services->history_count.*?"
-        r"s_render_services->history\[selection\]\.day.*?"
-        r"queue_history_trace_load\(selected_day,\s*s_history_channel\)",
-        "History row taps resolve against the painted service snapshot")
-assert not re.search(r"\bs_services(?:\.|->)", history_row_source), \
-       "History row taps must not resolve against mutable live services"
-require(history_trace_task_source,
-        r"touch_history_load_trace\(.*?requested_day,\s*requested_channel,\s*&loaded\);.*?"
-        r"if\s*\(request_generation\s*==\s*s_history_trace_request_generation\)\s*\{.*?"
-        r"s_services\.history_trace\s*=\s*loaded;.*?"
-        r"s_services\.history_trace_result\s*=\s*result;.*?"
-        r"s_services\.history_trace_busy\s*=\s*false;.*?\}\s*"
-        r"s_services\.history_version\+\+;",
-        "only the latest day/channel trace result publishes")
-require(history_queue_source,
-        r"s_history_trace_requested_day\[0\]\s*=\s*'\\0';\s*"
-        r"s_services\.history_trace_busy\s*=\s*false;\s*"
-        r"s_services\.history_trace_result\s*=\s*ESP_ERR_NO_MEM;\s*"
-        r"s_services\.history_version\+\+;",
-        "unavailable trace worker publishes a terminal result")
-require(history_refresh_source,
-        r"trace_failed\s*=\s*trace_request_matches\s*&&\s*"
-        r"!services->history_trace_busy\s*&&\s*"
-        r"!trace->loaded\s*&&.*?"
-        r'"No O₂ Ring data for this night".*?"O₂ Ring data unavailable - tap SpO₂ to retry"',
-        "terminal trace errors expose tap-to-retry guidance")
-for task, label in (
-    ("history_task", "metadata"),
-    ("history_trace_task", "trace"),
-):
-    assert len(re.findall(rf"psram_task_create\(\s*{task}\b", display)) == 1, \
-           f"{label} worker must be created once with a PSRAM stack"
-    assert not re.search(rf"xTaskCreate(?:PinnedToCore)?\(\s*{task}\b", display), \
-           f"{label} worker must not be recreated per request"
-require(display, r"heap_caps_calloc\(.*?HISTORY_MAX_DAYS.*?MALLOC_CAP_SPIRAM",
-        "expanded history model stays off the worker stack")
+        r"apply_history_controller_if_needed.*?"
+        r"touch_history_controller_revision.*?touch_history_controller_apply",
+        "History revisions are coherently applied by LVGL")
+require(update_source,
+        r"active_tab\s*==\s*1.*?apply_history_controller_if_needed",
+        "visible History revisions are applied from the display task")
 require(display,
-        r"lv_chart_set_ext_y_array\(s_history_trace_chart,\s*"
-        r"s_history_trace_series,\s*s_history_trace_values\).*?"
-        r"s_history_trace_values\[i\]\s*=\s*LV_CHART_POINT_NONE;",
-        "external History chart array preserves missing-sample gaps")
+        r"history_route_card.*?set_manage_section\(MANAGE_STORAGE\).*?"
+        r"set_active_page\(2\)",
+        "card failures route to Manage Storage")
 require(display,
-        r"lv_chart_set_point_count\(s_history_trace_chart,\s*"
-        r"TOUCH_HISTORY_TRACE_POINTS\)",
-        "History chart point count follows its fixed buffers")
-assert "lv_chart_set_next_value" not in history_refresh_source, \
-       "History renderer must not invalidate the chart once per point"
-require(history_refresh_source,
-        r"trace_count\s*=\s*trace->count\s*<\s*TOUCH_HISTORY_TRACE_POINTS.*?"
-        r"s_history_trace_values\[i\]\s*=.*?"
-        r"lv_chart_refresh\(s_history_trace_chart\);",
-        "bounded History chart arrays publish with one final refresh")
-assert history_refresh_source.count("lv_chart_refresh(s_history_trace_chart);") == 1, \
-       "History renderer must refresh its direct arrays exactly once"
-require(history_refresh_source,
-        r"bool\s+list_changed\s*=.*?bool\s+summary_changed\s*=.*?"
-        r"bool\s+trace_changed\s*=.*?if\s*\(list_changed\).*?"
-        r"if\s*\(summary_changed\).*?if\s*\(!trace_changed\)\s*return;",
-        "History metadata, summary, and trace render independently")
-require(history_refresh_source,
-        r"if\s*\(channel_changed\).*?"
-        r"set_destination_surface\(s_history_channel_buttons\[i\]",
-        "History channel selection has no release-phase animation")
-require(history_refresh_source,
-        r"if\s*\(busy_changed\s*\|\|\s*metadata_changed\s*\|\|\s*"
-        r"revealed_changed\).*?Latest %u · showing %u",
-        "History pagination immediately updates its showing count")
-require(history_refresh_source,
-        r"bool\s+selected\s*=\s*s_history_selection\s*>=\s*0\s*&&\s*"
-        r"s_history_selection\s*<\s*\(int\)services->history_count;",
-        "valid cached History detail stays visible during metadata refresh")
-for direct_invalidation in (
-    "lv_obj_clear_flag(s_history_detail_content",
-    "lv_obj_clear_flag(s_history_rows[i]",
-    "lv_obj_clear_flag(s_history_trace_message",
+        r"therapy_finished.*?touch_history_controller_refresh",
+        "therapy completion invalidates the History index")
+
+for api in (
+    "touch_history_controller_create", "touch_history_controller_destroy",
+    "touch_history_controller_set_active", "touch_history_controller_refresh",
+    "touch_history_controller_handle_intent", "touch_history_controller_apply",
 ):
-    assert direct_invalidation not in history_refresh_source, \
-           f"History renderer bypasses changed-only visibility: {direct_invalidation}"
-require(display, r"trace->loaded.*?trace->has_data.*?trace_count",
-        "physical History renders only available recorded trace data")
-require(history,
-        r"decoded\.has_device_ahi\s*=\s*history_summary_index_value.*?"
-        r"decoded\.has_ahi\s*=\s*decoded\.has_device_ahi",
-        "device AHI provenance and compatibility availability")
-require(history_header, r"int\s+mask_off_count\s*;",
-        "nightly mask-off count value")
-require(history_header, r"bool\s+has_mask_off_count\s*;",
-        "nightly mask-off availability")
-require(history, r'decoded\.has_mask_off_count\s*=\s*parsed\.has_sessions.*?'
-                 r'decoded\.mask_off_count\s*=\s*\(int\)parsed\.session_count',
-        "summary-backed mask-off parsing")
-require(edf, r'cJSON_AddNumberToObject\(root,\s*"mask_off_count",\s*ctx->n_session_entries\)',
-        "one mask-off endpoint per Summary session entry")
-require(display, r'"Mask on/off · %d".*?day->mask_off_count',
-        "History mask on/off badge")
-require(display, r'"Mask on/off · —"',
-        "truthful unavailable mask on/off state")
-require(display, r'\.mask_off_count\s*=\s*12.*?\.has_mask_off_count\s*=\s*true',
-        "two-digit QEMU mask-off layout fixture")
-require(history_header, r"#define\s+TOUCH_HISTORY_MAX_DAYS\s+30\b",
-        "bounded current-UI history page")
-for metric in ("oai", "cai", "hi", "rera"):
-    require(history_header, rf"float\s+{metric}\s*;", f"{metric} history value")
-    require(history_header, rf"bool\s+has_{metric}\s*;", f"{metric} availability flag")
-    require(history, rf"decoded\.has_{metric}\s*=\s*history_summary_index_value",
-            f"truthful optional {metric} parsing")
-require(history, r"history_load_page_leased\(.*?"
-                 r"page->total_days\s*=\s*total.*?page->has_more",
-        "pageable full-card history index")
-assert not re.search(
-    r"capacity\s*<\s*TOUCH_HISTORY_MAX_DAYS.*?capacity\s*:\s*TOUCH_HISTORY_MAX_DAYS",
-    history, re.DOTALL), "History service must not impose a 30-night product cap"
-require(display, r"TOUCH_HISTORY_MAX_DAYS", "touch UI consumes a bounded history page")
-for event_label in ("Obstructive", "Central", "Hypopnea", "RERA"):
-    require(display, rf'"{event_label}"', f"{event_label} History event label")
-require(display, r'"AHI"', "handoff AHI metric label")
+    assert api in history_controller_header and api in history_controller, \
+           f"missing rich History controller API {api}"
+require(history_controller, r"xSemaphoreCreateMutex\(\).*?xQueueCreate\(",
+        "internal-RAM History control objects")
+require(history_controller,
+        r"heap_caps_calloc\(.*?sizeof\(\*controller\).*?MALLOC_CAP_SPIRAM.*?"
+        r"psram_task_create\(.*?history_controller_worker",
+        "bounded History model and worker stack live in PSRAM")
+require(history_controller,
+        r"vQueueDelete\(controller->queue\).*?"
+        r"vSemaphoreDelete\(controller->mutex\).*?heap_caps_free\(controller\)",
+        "History controller releases kernel objects before its PSRAM model")
+require(history_controller,
+        r"HISTORY_JOB_INITIAL.*?result->days\[0\]\.day.*?global_index\s*=\s*0",
+        "newest night is selected and loaded automatically")
+for intent in (
+    "PAGE_RELATIVE", "OPEN_CALENDAR", "SELECT_CHANNEL", "FIT_NIGHT",
+    "ZOOM_RELATIVE", "PAN_RELATIVE", "SET_CURSOR",
+):
+    assert f"TOUCH_HISTORY_UI_INTENT_{intent}" in history_controller, \
+           f"controller omits History intent {intent}"
+require(history_controller,
+        r"touch_history_load_view_ex\(.*?window_start_ms.*?window_end_ms",
+        "History graph follows the visible window")
+require(history_controller,
+        r"touch_history_load_stats_ex\(.*?window_start_ms.*?window_end_ms",
+        "History source statistics follow the visible window")
+require(history_controller,
+        r"touch_history_load_events_ex.*?event->end_ms\s*<\s*"
+        r"model->window_start_ms.*?event->start_ms\s*>=\s*"
+        r"model->window_end_ms",
+        "History event markers are filtered to the visible window")
+assert "TOUCH_HISTORY_MAX_DAYS" not in history_ui + history_controller, \
+       "rich History UI must page the full index instead of imposing a 30-night cap"
+for legacy in (
+    "s_history_worker_task", "s_history_trace_worker_task",
+    "history_trace_task", "queue_history_trace_load", "start_history_load",
+    "refresh_history_widgets", "s_services.history",
+):
+    assert legacy not in display, f"duplicate legacy History path remains: {legacy}"
+
 require(display, r"s_keyboard_sheet.*?keyboard_sheet_action_cb",
         "explicit touch keyboard sheet with completion actions")
 require(display, r"s_text_keyboard_lower_map.*?\"q\".*?\"p\".*?LV_SYMBOL_BACKSPACE.*?LV_SYMBOL_UP.*?\"123\".*?\"@\".*?\"space\".*?\"-\".*?\"_\"",

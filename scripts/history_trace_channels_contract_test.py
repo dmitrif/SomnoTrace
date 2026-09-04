@@ -16,101 +16,64 @@ def require(source: str, pattern: str, label: str) -> None:
         raise AssertionError(f"missing {label}")
 
 
-# One selected trace stays compact; it is not multiplied across 30 day rows.
+# The retained graph is one selected 480-bin view, never eight graphs per day.
+UI = (ROOT / "main/touch_history_ui.c").read_text(encoding="utf-8")
+CONTROLLER = (ROOT / "main/touch_history_controller.c").read_text(encoding="utf-8")
 day_model = HEADER[HEADER.index("typedef struct {", HEADER.index("touch_history_trace_t")):
                    HEADER.index("} touch_history_day_t;")]
-assert "points[" not in day_model, "every History day must not own channel samples"
-require(HEADER, r"TOUCH_HISTORY_CHANNEL_FLOW.*?TOUCH_HISTORY_CHANNEL_SPO2.*?"
-                r"TOUCH_HISTORY_CHANNEL_LEAK", "three native History channels")
-require(DISPLAY, r"touch_history_trace_t\s+history_trace\s*;",
-        "single selected-channel service cache")
+assert "points[" not in day_model, "every History day must not own samples"
+for signal in (
+    "FLOW", "PRESSURE", "LEAK", "FLOW_LIMIT", "SNORE",
+    "SPO2", "PULSE", "MOTION",
+):
+    assert f"TOUCH_HISTORY_SIGNAL_{signal}" in HEADER
+require(HEADER, r"TOUCH_HISTORY_OVERVIEW_POINTS\s+480", "480-bin retained view")
+require(HEADER, r"value_x100\[TOUCH_HISTORY_OVERVIEW_POINTS\].*?"
+                r"upper_x100\[TOUCH_HISTORY_OVERVIEW_POINTS\].*?"
+                r"companion_x100\[TOUCH_HISTORY_OVERVIEW_POINTS\]",
+        "value, Flow envelope, and Pressure EPR arrays")
 
-# The v2 flow file has two int16 values per record. Index with the header's
-# channel width, then preserve both bin extrema as parallel time series instead
-# of flattening each bin or fabricating an alternating sawtooth.
-require(HISTORY, r"record\s*=\s*&records\[r\s*\*\s*best\.n_channels\]",
-        "channel-width-aware record stride")
-assert "records[HISTORY_READ_RECORDS][4]" not in HISTORY
-require(HEADER, r"upper_points\[TOUCH_HISTORY_TRACE_POINTS\]",
-        "bounded upper edge for flow envelope")
-require(HISTORY, r"points\[i\]\s*=.*?low_lpm.*?"
-                 r"upper_points\[i\]\s*=.*?high_lpm",
-        "parallel flow min/max envelope")
-assert "points[i * 2]" not in HISTORY, \
-       "flow extrema must not be serialised into one sawtooth series"
-require(DISPLAY, r"s_history_trace_upper_series\s*=\s*lv_chart_add_series.*?"
-                 r"lv_chart_set_ext_y_array\(s_history_trace_chart,\s*"
-                 r"s_history_trace_upper_series,\s*"
-                 r"s_history_trace_upper_values\).*?"
-                 r"upper\s*=\s*trace->upper_points\[i\].*?"
-                 r"s_history_trace_upper_values\[i\]",
-        "external second LVGL series for the flow envelope")
-assert "lv_chart_set_next_value" not in DISPLAY[
-    DISPLAY.index("static void refresh_history_widgets"):
-    DISPLAY.index("static void refresh_device_dropdown")
-], "History chart must refresh once after direct array population"
-refresh_source = DISPLAY[
-    DISPLAY.index("static void refresh_history_widgets"):
-    DISPLAY.index("static void refresh_device_dropdown")
-]
-require(refresh_source,
-        r"trace_count\s*=\s*trace->count\s*<\s*TOUCH_HISTORY_TRACE_POINTS.*?"
-        r"s_history_trace_values\[i\]\s*=.*?"
-        r"lv_chart_refresh\(s_history_trace_chart\);",
-        "bounded direct chart population followed by one refresh")
-assert refresh_source.count("lv_chart_refresh(s_history_trace_chart);") == 1, \
-       "History chart should publish direct-array changes exactly once"
-require(DISPLAY, r"s_history_channel\s*==\s*TOUCH_HISTORY_CHANNEL_FLOW\)\s*return;",
-        "single-trace area fill disabled for flow envelope")
+# Rich Flow stays source-native L/s. Accepted 22-minute zooms prefer raw 25 Hz
+# and the min/max sidecar remains an honest fallback.
+require(HISTORY, r"history_flow_raw_candidate.*?history_accumulate_as11",
+        "raw Flow candidate")
+require(HISTORY, r"touch_history_flow_range_prefers_raw.*?"
+                 r"22ULL\s*\*\s*60ULL\s*\*\s*1000ULL.*?"
+                 r"night_duration_ms\s*/\s*4U",
+        "raw Flow preference includes 22-minute window")
+require(HISTORY, r"Rich Flow remains source-native hundredths L/s",
+        "Flow L/s unit preservation")
+require(HISTORY, r"TOUCH_HISTORY_AGGREGATION_ENVELOPE.*?upper_x100",
+        "sidecar min/max envelope")
+assert '"Breathing / Flow"' in UI and '"L/s"' in UI
 
-# SpO2 comes from the ready canonical O2 Ring SNT3 track, not the empty AS11
-# SA2 placeholder. Desaturation nadirs and leak spikes survive decimation.
-require(HISTORY, r"SD_OXYMETRY_DIR\s+\"/recordings/%s\".*?"
-                 r"generations/%d/data/vitals\.snt", "canonical O2 Ring track")
+# Canonical SpO2 uses status-good samples and deterministic multi-recording
+# overlap ownership. Missing spans remain gaps rather than zero-valued data.
 require(HISTORY, r"OXIMETRY_CANONICAL_VITALS_SPO2.*?"
                  r"OXIMETRY_CANONICAL_VITALS_STATUS.*?&\s*1U",
         "canonical SpO2 value and quality gate")
-require(HISTORY, r"while\s*\(checked\s*<\s*actual\).*?valid_spo2\+\+.*?"
-                 r"candidate->valid_records\s*=\s*valid_spo2",
-        "full-recording valid SpO2 coverage count")
-require(HISTORY, r"history_collect_ox_candidates.*?qsort\(candidates.*?"
-                 r"candidate_valid_coverage_us\(&candidates\[i\]\).*?"
-                 r"coverage\s*>\s*best_coverage.*?duration\s*>\s*best_duration",
-        "coverage-first O2 Ring candidate ranking")
-require(HISTORY, r"for\s*\(size_t c = 0; c < candidate_count; \+\+c\).*?"
-                 r"later.*?recording owns every display bin it touches",
-        "multi-recording O2 merge with deterministic overlap precedence")
-require(HISTORY, r"channel\s*==\s*TOUCH_HISTORY_CHANNEL_SPO2.*?"
-                 r"value\s*<\s*aggregate->trend\.extreme.*?"
-                 r"else if\s*\(value\s*>\s*aggregate->trend\.extreme",
-        "SpO2 nadir and Leak peak aggregation")
-assert '"%s/%s_sa2.snt"' not in HISTORY, "History SpO2 must not use AS11 SA2"
+require(HISTORY, r"retain_overlap_owners.*?has_selected_data.*?"
+                 r"qsort\(candidates", "missing-aware O2 overlap ownership")
 
-# A published canonical package is either genuinely absent or readable.
-# Allocation, partial reads, malformed pointers/manifests, and missing files
-# referenced by a ready generation remain retryable failures.
-require(HISTORY, r"static esp_err_t read_json_text.*?ESP_ERR_NO_MEM.*?ESP_FAIL",
-        "typed JSON discovery failures")
-require(HISTORY, r"validate_generation_manifest.*?"
-                 r"result\s*==\s*ESP_ERR_NOT_FOUND\)\s*return\s+ESP_FAIL",
-        "missing published generation is not cached as no-data")
-require(HISTORY, r"pointer_result\s*==\s*ESP_ERR_NOT_FOUND\)\s*"
-                 r"pointer_result\s*=\s*ESP_FAIL",
-        "observed recording without pointer remains retryable")
-require(HISTORY, r"discovery_error\s*!=\s*ESP_OK\)\s*\{.*?"
-                 r"return\s+discovery_error;.*?if\s*\(!candidate_count\).*?"
-                 r"return\s+ESP_ERR_NOT_FOUND",
-        "discovery failures propagate before genuine absence")
+# One serialized generation-safe worker publishes only complete current views.
+require(CONTROLLER, r"HISTORY_CONTROLLER_QUEUE_LENGTH\s+1U.*?xQueueOverwrite",
+        "one-slot latest-intent worker")
+require(CONTROLLER, r"controller->generation\s*==\s*job->generation.*?"
+                    r"controller->model\s*=\s*\*result",
+        "stale result rejection")
+require(CONTROLLER, r"job->non_cancellable\s*\?\s*NULL\s*:\s*&operation",
+        "non-cancellable zoom read")
+require(CONTROLLER, r"touch_history_load_view_ex\(.*?window_start_ms.*?"
+                    r"window_end_ms", "selected-window reread")
 
-# Rapid pill taps are latest-request-wins. Missing Ring data is a completed,
-# truthful state while card/read failures remain retryable.
-require(DISPLAY, r"request_generation\s*==\s*s_history_trace_request_generation",
-        "generation-gated worker completion")
-require(DISPLAY, r"queue_history_trace_load\(s_history_selected_day,\s*"
-                 r"s_history_channel\)", "channel-specific touch request")
-require(DISPLAY, r'"No O₂ Ring data for this night"', "truthful Ring empty state")
-require(DISPLAY, r'"O₂ Ring data unavailable - tap SpO₂ to retry"',
-        "retryable Ring read error")
-assert "lv_obj_add_state(s_history_channel_buttons[i], LV_STATE_DISABLED)" not in DISPLAY
+# Rendering is one bounded custom-draw object with gaps, event markers,
+# session captions, cursor, and the Pressure companion.
+assert "lv_chart_create" not in UI
+require(UI, r"history_ui_graph_draw.*?TOUCH_HISTORY_POINT_VALID.*?"
+            r"TOUCH_HISTORY_POINT_COMPANION_VALID.*?"
+            r"history_ui_event_color\(marker->type\).*?SESSION %u.*?cursor_x",
+        "bounded rich graph layers")
+require(UI, r"history_ui_row_pressed.*?LV_EVENT_SHORT_CLICKED",
+        "night selection waits for scroll arbitration")
 
 print("history trace channel contract passed")

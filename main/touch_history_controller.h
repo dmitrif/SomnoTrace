@@ -24,11 +24,14 @@ typedef struct {
     void *context;
     /* Zero means the usage target is unknown. */
     uint16_t usage_target_minutes;
+    /* QEMU-only acceptance model. Production callers must leave this false;
+     * it keeps touch/zoom/channel behavior testable without emulating SDMMC. */
+    bool deterministic_preview;
 } touch_history_controller_config_t;
 
-/* The controller, its coherent published model, its inactive work result,
- * and the single worker queue are allocated from PSRAM. The worker stack is
- * also PSRAM-backed through psram_task_create(). */
+/* The controller and its coherent published model are allocated from PSRAM.
+ * Its mutex and one-slot queue use FreeRTOS's internal allocator, while the
+ * worker stack and inactive work result remain PSRAM-backed. */
 esp_err_t touch_history_controller_create(
     const touch_history_controller_config_t *config,
     touch_history_controller_t **out_controller);
@@ -39,6 +42,11 @@ void touch_history_controller_destroy(touch_history_controller_t *controller);
  * every in-flight generation without destroying the cached surface. */
 esp_err_t touch_history_controller_set_active(
     touch_history_controller_t *controller, bool active);
+
+/* Invalidates the cached index/night. If History is visible, immediately
+ * queues a newest-first reload; otherwise the next activation reloads. */
+esp_err_t touch_history_controller_refresh(
+    touch_history_controller_t *controller);
 
 /* Signature intentionally matches touch_history_ui_intent_fn. */
 void touch_history_controller_handle_intent(

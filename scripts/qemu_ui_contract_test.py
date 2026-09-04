@@ -27,6 +27,8 @@ component = source("main/idf_component.yml")
 board = source("main/board_qemu.c")
 display = source("main/bsp_display_7b.c")
 logs_ui = source("main/touch_logs_ui.c")
+history_ui = source("main/touch_history_ui.c")
+history_controller = source("main/touch_history_controller.c")
 demo = source("main/main_qemu.c")
 defaults = source("sdkconfig.qemu.defaults")
 setup = source("scripts/setup-qemu-macos.sh")
@@ -117,10 +119,9 @@ for pattern, description in (
      "Home graph reaches the shared panel bottom"),
     (r"make_touch_button\(home,\s*710,\s*338,\s*298,\s*116",
      "Home action reaches x=1008 and y=518"),
-    (r"make_card\(history,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*330,\s*UI_PANEL_H\)",
-     "History list uses the shared frame"),
-    (r"make_card\(history,\s*358,\s*UI_PANEL_Y,\s*650,\s*UI_PANEL_H\)",
-     "History detail uses the shared frame"),
+    (r"make_plain_container\(\s*history,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*"
+     r"TOUCH_HISTORY_UI_WIDTH,\s*TOUCH_HISTORY_UI_HEIGHT\s*\)",
+     "rich History surface uses the shared 992x450 frame"),
     (r"make_card\(manage,\s*UI_PANEL_X,\s*UI_PANEL_Y,\s*"
      r"UI_MANAGE_RAIL_W,\s*UI_PANEL_H\)",
      "Manage rail is (16,68) 212x450"),
@@ -203,7 +204,7 @@ require(display,
 # Protect the concrete bedside state vocabulary, not just the shell. These
 # literals correspond to visible controls or explicit loading/degraded states
 # in the handoff and must remain present in the firmware exercised by QEMU.
-bedside_ui = display + "\n" + logs_ui
+bedside_ui = display + "\n" + logs_ui + "\n" + history_ui + "\n" + history_controller
 for literal, description in (
     ("Therapy active", "active therapy state"),
     ("Therapy stopped", "stopped therapy state"),
@@ -212,15 +213,15 @@ for literal, description in (
     ("Pair a device", "unpaired primary state"),
     ("Therapy stopped unexpectedly", "interruption alert state"),
     ("Acknowledge", "interruption acknowledgement control"),
-    ("History not loaded", "History initial state"),
-    ("Reading history...", "History busy state"),
-    ("Load 7 more", "bounded History pagination"),
-    ("No completed sessions yet", "History empty state"),
+    ("Loading History…", "History initial auto-load state"),
+    ("Reading detailed samples from the card...", "History zoom state"),
+    ("ALL %u RECORDED\\nNIGHTS", "complete History index count"),
+    ("No recorded nights yet", "History empty state"),
     ("Could not read the card", "History error state"),
-    ("microSD is busy", "History card-busy state"),
-    ("Select a night", "History unselected state"),
+    ("The card is busy. Try again in a moment.", "History card-busy state"),
+    ("Select a recorded night", "History unselected state"),
     ("Retry", "History error recovery action"),
-    ("For trend review. Not a diagnosis or a prescription.", "History safety copy"),
+    ("Trend review only. Not a diagnosis or a prescription.", "History safety copy"),
     ("Searching for nearby machines", "AirSense scanning state"),
     ("Connecting securely", "AirSense connecting state"),
     ("Enter the 4-digit code shown on your AirSense", "AirSense passcode state"),
@@ -245,12 +246,13 @@ require(display, r'"Waiting for (?:therapy|breathing) data(?:\.\.\.|…)?"',
 require(display, r"flow_count\s*>=\s*FLOW_READY_POINTS",
         "valid sample threshold before chart becomes live")
 require(display, r'"Therapy status unknown"', "stale AirSense state")
-for metric in ("AHI", "PRESSURE 95%", "LEAK 95%", "EVENTS PER HOUR"):
-    assert metric in display, f"missing History component: {metric}"
-require(display, r"history_trace_draw_cb.*?LV_DRAW_MASK_LINE_SIDE_BOTTOM.*?lv_draw_mask_fade_init",
-        "faded History overnight area")
-require(display, r"trace_baseline.*?lv_obj_set_style_line_dash_width.*?3.*?lv_obj_set_style_line_dash_gap.*?9",
-        "3/9 dashed History baseline")
+for channel in ("Breathing / Flow", "Pressure", "Leak", "Flow limit",
+                "Snore", "SpO₂", "Pulse", "Motion"):
+    assert channel in history_ui, f"missing rich History channel: {channel}"
+require(history_ui, r"history_ui_graph_draw.*?aggregation\s*==\s*"
+                    r"TOUCH_HISTORY_AGGREGATION_ENVELOPE.*?"
+                    r"history_ui_event_color\(marker->type\).*?cursor_x",
+        "one custom-draw rich graph with envelope, event lane, and cursor")
 require(demo, r"QEMU preview.*simulated data", "honest simulated-data labeling")
 require(display, r"simulated preview", "honest simulated device status")
 require(demo, r"bsp_display_qemu_seed_demo\(\)", "deterministic histories and devices")
@@ -366,8 +368,6 @@ require(display,
         r"close_keyboard_sheet.*?target\s*==\s*s_wifi_password.*?"
         r"lv_textarea_set_password_mode\(s_wifi_password,\s*true\)",
         "password remasked whenever editing closes")
-require(display, r"if\s*\(x2\s*>\s*x1\)\s*x2--;",
-        "half-open History fill spans")
 require(display,
         r"has_scroll_gutter.*?s_manage_scrolls\[MANAGE_DEVICES\].*?"
         r"s_manage_scrolls\[MANAGE_CONNECTIVITY\].*?"

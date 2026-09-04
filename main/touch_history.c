@@ -3,6 +3,7 @@
 
 #include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -341,6 +342,49 @@ touch_history_event_type_t touch_history_event_type_from_name(const char *name)
     return TOUCH_HISTORY_EVENT_UNKNOWN;
 }
 
+static int history_event_identity_order(const void *left, const void *right)
+{
+    const touch_history_event_t *a = left;
+    const touch_history_event_t *b = right;
+    int64_t a_second = a->end_ms / 1000;
+    int64_t b_second = b->end_ms / 1000;
+    if (a_second < b_second) return -1;
+    if (a_second > b_second) return 1;
+    if (a->type < b->type) return -1;
+    if (a->type > b->type) return 1;
+    if (a->start_ms < b->start_ms) return -1;
+    if (a->start_ms > b->start_ms) return 1;
+    return 0;
+}
+
+static int history_event_time_order(const void *left, const void *right)
+{
+    const touch_history_event_t *a = left;
+    const touch_history_event_t *b = right;
+    if (a->start_ms < b->start_ms) return -1;
+    if (a->start_ms > b->start_ms) return 1;
+    if (a->type < b->type) return -1;
+    if (a->type > b->type) return 1;
+    return 0;
+}
+
+size_t touch_history_deduplicate_events(touch_history_event_t *events,
+                                        size_t count)
+{
+    if (!events || count < 2) return events ? count : 0;
+    qsort(events, count, sizeof(*events), history_event_identity_order);
+    size_t retained = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (retained > 0 &&
+            events[retained - 1].end_ms / 1000 == events[i].end_ms / 1000 &&
+            events[retained - 1].type == events[i].type)
+            continue;
+        events[retained++] = events[i];
+    }
+    qsort(events, retained, sizeof(*events), history_event_time_order);
+    return retained;
+}
+
 bool touch_history_compute_event_indices(
     const uint32_t counts[TOUCH_HISTORY_EVENT_TYPE_COUNT],
     uint64_t eligible_therapy_ms,
@@ -409,6 +453,23 @@ bool touch_history_flow_range_prefers_raw(uint64_t duration_ms,
         duration_ms > night_duration_ms) return false;
     return duration_ms <= minimum_zoom_ms ||
            duration_ms <= night_duration_ms / 4U;
+}
+
+bool touch_history_sample_span_within(uint32_t sample_count,
+                                      uint32_t period_num_us,
+                                      uint32_t period_den,
+                                      uint64_t maximum_ms)
+{
+    if (!sample_count || !period_num_us || !period_den || !maximum_ms ||
+        maximum_ms > UINT64_MAX / 1000U)
+        return false;
+    if ((uint64_t)sample_count > UINT64_MAX / period_num_us)
+        return false;
+    uint64_t sample_span = (uint64_t)sample_count * period_num_us;
+    uint64_t maximum_us = maximum_ms * 1000U;
+    if (maximum_us > UINT64_MAX / period_den)
+        return true;
+    return sample_span <= maximum_us * period_den;
 }
 
 bool touch_history_scale_source_x100(touch_history_signal_t signal,
@@ -520,6 +581,7 @@ bool touch_history_weighted_percentile_histogram(
 #include <sys/stat.h>
 #include "cJSON.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -528,12 +590,13 @@ bool touch_history_weighted_percentile_histogram(
 #include "sd_storage.h"
 
 #define SNT_MAGIC 0x534E5442u
-#define HISTORY_TRACE_MAX_RECORDS (24U * 60U * 60U)
 #define HISTORY_READ_VALUES 512U
 #define HISTORY_STORAGE_WAIT_MS 15000U
 #define HISTORY_RECORDING_POLL_MS 25U
 #define HISTORY_INTERNAL_FALLBACK_MAX_BYTES 2048U
 #define HISTORY_AXIS_MAX_MS (36LL * 60LL * 60LL * 1000LL)
+
+static const char *const TAG = "touch_history";
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -877,17 +940,22 @@ static esp_err_t inspect_ox_trace_candidate(
         fclose(file);
         return ESP_FAIL;
     }
-    /* Canonical noon-day recordings are bounded to one day. Reject an
-     * implausible header instead of ranking from only a prefix: coverage must
-     * describe the whole candidate recording. */
-    if (header.sample_count > HISTORY_TRACE_MAX_RECORDS) {
-        fclose(file);
-        return ESP_FAIL;
-    }
     uint32_t actual = header.sample_count;
     if (actual < 2) {
         fclose(file);
         return ESP_ERR_NOT_FOUND;
+    }
+    /* Bound elapsed time, not record count: canonical sources can have a
+     * sub-second cadence, just like raw AirSense Flow. */
+    if (!touch_history_sample_span_within(
+            actual, header.period_num_us, header.period_den,
+            HISTORY_AXIS_MAX_MS)) {
+        ESP_LOGW(TAG,
+                 "inspect O2 duration invalid path=%s count=%u period=%u/%u us",
+                 path, (unsigned)actual, (unsigned)header.period_num_us,
+                 (unsigned)header.period_den);
+        fclose(file);
+        return ESP_FAIL;
     }
     uint64_t duration_us = (uint64_t)actual * header.period_num_us /
                            header.period_den;
@@ -1267,29 +1335,86 @@ static esp_err_t inspect_trace_candidate(const char *path, uint8_t tier,
 {
     FILE *file = fopen(path, "rb");
     if (!file) {
-        return errno == ENOENT || errno == ENOTDIR
+        int open_error = errno;
+        if (open_error != ENOENT && open_error != ENOTDIR)
+            ESP_LOGW(TAG, "inspect open failed path=%s errno=%d", path,
+                     open_error);
+        return open_error == ENOENT || open_error == ENOTDIR
                    ? ESP_ERR_NOT_FOUND : ESP_FAIL;
     }
-    touch_snt_header_t header;
-    bool valid = fread(&header, sizeof(header), 1, file) == 1 &&
-                 header.magic == SNT_MAGIC && header.version >= 1 &&
+    touch_snt_header_t header = {0};
+    size_t header_items = fread(&header, sizeof(header), 1, file);
+    if (header_items != 1) {
+        ESP_LOGW(TAG, "inspect header read failed path=%s errno=%d", path,
+                 errno);
+        fclose(file);
+        return ESP_FAIL;
+    }
+    bool valid = header.magic == SNT_MAGIC && header.version >= 1 &&
                  header.version <= 2 && header.tier == tier &&
                  header.n_channels == channels && header.sample_bytes == 2 &&
-                 header.sample_hz_x10 == hz_x10;
-    if (!valid || fseek(file, 0, SEEK_END) != 0) {
+                 header.sample_hz_x10 == hz_x10 && hz_x10 > 0;
+    if (!valid) {
+        ESP_LOGW(TAG,
+                 "inspect header invalid path=%s magic=%08lx v=%u tier=%u/%u channels=%u/%u bytes=%u hz10=%u/%u",
+                 path, (unsigned long)header.magic, (unsigned)header.version,
+                 (unsigned)header.tier, (unsigned)tier,
+                 (unsigned)header.n_channels, (unsigned)channels,
+                 (unsigned)header.sample_bytes,
+                 (unsigned)header.sample_hz_x10, (unsigned)hz_x10);
+        fclose(file);
+        return ESP_FAIL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        ESP_LOGW(TAG, "inspect end seek failed path=%s errno=%d", path,
+                 errno);
         fclose(file);
         return ESP_FAIL;
     }
     long size = ftell(file);
     int close_result = fclose(file);
-    if (size < (long)sizeof(header) || close_result != 0) return ESP_FAIL;
+    if (size < (long)sizeof(header)) {
+        ESP_LOGW(TAG, "inspect size failed path=%s size=%ld errno=%d", path,
+                 size, errno);
+        return ESP_FAIL;
+    }
+    if (close_result != 0) {
+        ESP_LOGW(TAG, "inspect close failed path=%s errno=%d", path, errno);
+        return ESP_FAIL;
+    }
     const uint32_t record_bytes = header.n_channels * sizeof(int16_t);
     const uint64_t body_bytes = (uint64_t)(size - (long)sizeof(header));
     if (body_bytes % record_bytes != 0 ||
-        body_bytes / record_bytes != header.sample_count ||
-        header.sample_count > HISTORY_TRACE_MAX_RECORDS) return ESP_FAIL;
+        body_bytes / record_bytes != header.sample_count) {
+        ESP_LOGW(TAG,
+                 "inspect geometry invalid path=%s size=%ld body=%llu record=%u count=%u hz10=%u",
+                 path, size, (unsigned long long)body_bytes,
+                 (unsigned)record_bytes, (unsigned)header.sample_count,
+                 (unsigned)header.sample_hz_x10);
+        return ESP_FAIL;
+    }
     uint32_t actual = header.sample_count;
     if (actual < 2) return ESP_ERR_NOT_FOUND;
+    if (!touch_history_sample_span_within(
+            actual, 10000000U, header.sample_hz_x10,
+            HISTORY_AXIS_MAX_MS)) {
+        ESP_LOGW(TAG,
+                 "inspect duration invalid path=%s count=%u hz10=%u",
+                 path, (unsigned)actual,
+                 (unsigned)header.sample_hz_x10);
+        return ESP_FAIL;
+    }
+    uint64_t duration_us = (uint64_t)actual * 10000000U /
+                           header.sample_hz_x10;
+    if (header.start_epoch_ms < 946684800000LL || !duration_us ||
+        duration_us / 1000U >
+            (uint64_t)(INT64_MAX - header.start_epoch_ms)) {
+        ESP_LOGW(TAG,
+                 "inspect timestamp invalid path=%s start=%lld duration_us=%llu",
+                 path, (long long)header.start_epoch_ms,
+                 (unsigned long long)duration_us);
+        return ESP_FAIL;
+    }
     strlcpy(candidate->path, path, sizeof(candidate->path));
     candidate->version = header.version;
     candidate->n_channels = header.n_channels;
@@ -1609,6 +1734,7 @@ typedef struct {
     int64_t end_ms;
     int64_t clock_drift_ms;
     uint32_t brp_samples;
+    uint32_t event_dropped;
     uint32_t pld_records;
     uint16_t available_signals;
     int fmt;
@@ -1635,6 +1761,7 @@ static bool history_interval_contains(
 typedef struct {
     char day[9];
     int sessions;
+    uint16_t skipped_sessions;
     bool has_therapy;
     bool has_oximetry;
 } history_day_index_t;
@@ -1738,6 +1865,8 @@ static esp_err_t parse_session_manifest(const char *json, const char *id,
         numeric <= INT_MAX) session->fmt = (int)numeric;
     if (json_text_i64(json, "brp_samples", &numeric) && numeric >= 0 &&
         numeric <= UINT32_MAX) session->brp_samples = (uint32_t)numeric;
+    if (json_text_i64(json, "event_dropped", &numeric) && numeric > 0 &&
+        numeric <= UINT32_MAX) session->event_dropped = (uint32_t)numeric;
     bool drift_flag = false;
     if (json_text_bool(json, "clock_drift_usable", &drift_flag) ||
         json_text_bool(json, "clock_drift_valid", &drift_flag))
@@ -1749,12 +1878,14 @@ static esp_err_t parse_session_manifest(const char *json, const char *id,
 
 static esp_err_t history_load_sessions_leased(
     const char *day, history_session_info_t **sessions_out, size_t *count_out,
+    size_t *skipped_out,
     const touch_history_operation_t *operation)
 {
     if (!valid_day(day) || !sessions_out || !count_out)
         return ESP_ERR_INVALID_ARG;
     *sessions_out = NULL;
     *count_out = 0;
+    if (skipped_out) *skipped_out = 0;
     char day_path[320];
     if (snprintf(day_path, sizeof(day_path), "%s/%s", SD_STREAMS_DIR, day) >=
         (int)sizeof(day_path)) return ESP_FAIL;
@@ -1764,6 +1895,7 @@ static esp_err_t history_load_sessions_leased(
 
     size_t count = 0;
     size_t capacity = 0;
+    size_t skipped = 0;
     history_session_info_t *sessions = NULL;
     esp_err_t result = ESP_OK;
     const char *suffix = "_session.json";
@@ -1784,8 +1916,10 @@ static esp_err_t history_load_sessions_leased(
             strcmp(entry->d_name + name_len - suffix_len, suffix)) continue;
         size_t id_len = name_len - suffix_len;
         if (id_len == 0 || id_len >= TOUCH_HISTORY_SESSION_ID_LEN) {
-            result = ESP_FAIL;
-            break;
+            ESP_LOGW(TAG, "skip malformed session filename day=%s name=%s",
+                     day, entry->d_name);
+            skipped++;
+            continue;
         }
         char id[TOUCH_HISTORY_SESSION_ID_LEN];
         memcpy(id, entry->d_name, id_len);
@@ -1793,17 +1927,31 @@ static esp_err_t history_load_sessions_leased(
         char path[384];
         if (snprintf(path, sizeof(path), "%s/%s", day_path, entry->d_name) >=
             (int)sizeof(path)) {
-            result = ESP_FAIL;
-            break;
+            ESP_LOGW(TAG, "skip overlong session path day=%s id=%s", day, id);
+            skipped++;
+            continue;
         }
         char *json = NULL;
         result = read_json_text(path, &json);
-        if (result != ESP_OK) break;
+        if (result != ESP_OK) {
+            if (result == ESP_ERR_NO_MEM) break;
+            ESP_LOGW(TAG, "skip unreadable session manifest day=%s id=%s: %s",
+                     day, id, esp_err_to_name(result));
+            skipped++;
+            result = ESP_OK;
+            continue;
+        }
         history_session_info_t parsed;
         bool is_terminal = false;
         result = parse_session_manifest(json, id, &parsed, &is_terminal);
         free(json);
-        if (result != ESP_OK) break;
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "skip malformed session manifest day=%s id=%s: %s",
+                     day, id, esp_err_to_name(result));
+            skipped++;
+            result = ESP_OK;
+            continue;
+        }
         if (!is_terminal) continue;
         if (count == capacity) {
             size_t next_capacity = capacity ? capacity * 2
@@ -1829,6 +1977,10 @@ static esp_err_t history_load_sessions_leased(
         free(sessions);
         return ESP_ERR_NOT_FOUND;
     }
+    if (skipped)
+        ESP_LOGW(TAG, "day=%s loaded %u sessions; skipped %u bad manifests",
+                 day, (unsigned)count, (unsigned)skipped);
+    if (skipped_out) *skipped_out = skipped;
     qsort(sessions, count, sizeof(*sessions), history_session_start_order);
     *sessions_out = sessions;
     *count_out = count;
@@ -1916,7 +2068,11 @@ static esp_err_t history_select_flow_range_source(
             have_raw = true;
             continue;
         }
-        if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) return result;
+        if (result == ESP_ERR_NO_MEM || result == TOUCH_HISTORY_ERR_CANCELLED)
+            return result;
+        if (result != ESP_OK && result != ESP_ERR_NOT_FOUND)
+            ESP_LOGW(TAG, "ignore corrupt raw Flow day=%s session=%s: %s",
+                     day, sessions[i].id, esp_err_to_name(result));
 
         trace_candidate_t sidecar = {0};
         result = history_session_candidate(
@@ -1926,7 +2082,11 @@ static esp_err_t history_select_flow_range_source(
             need_sidecar = true;
             continue;
         }
-        if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) return result;
+        if (result == ESP_ERR_NO_MEM || result == TOUCH_HISTORY_ERR_CANCELLED)
+            return result;
+        if (result != ESP_OK && result != ESP_ERR_NOT_FOUND)
+            ESP_LOGW(TAG, "ignore corrupt Flow sidecar day=%s session=%s: %s",
+                     day, sessions[i].id, esp_err_to_name(result));
     }
     *used_fallback = need_sidecar;
     *use_raw = !need_sidecar && (have_raw || session_count > 0);
@@ -1956,12 +2116,20 @@ static esp_err_t history_resolve_session_ends(
                 session->end_ms = history_candidate_end_ms(&candidate);
                 session->end_estimated = true;
             } else if (result != ESP_ERR_NOT_FOUND) {
-                return result;
+                if (result == ESP_ERR_NO_MEM ||
+                    result == TOUCH_HISTORY_ERR_CANCELLED) return result;
+                ESP_LOGW(TAG,
+                         "ignore corrupt end source day=%s session=%s: %s",
+                         day, session->id, esp_err_to_name(result));
+                session->end_ms = session->start_ms;
             }
         }
         if (session->end_ms < session->start_ms ||
-            session->end_ms - session->start_ms > HISTORY_AXIS_MAX_MS)
-            return ESP_FAIL;
+            session->end_ms - session->start_ms > HISTORY_AXIS_MAX_MS) {
+            ESP_LOGW(TAG, "ignore invalid session extent day=%s session=%s",
+                     day, session->id);
+            session->end_ms = session->start_ms;
+        }
     }
     return ESP_OK;
 }
@@ -1987,19 +2155,27 @@ static bool history_axis(const history_session_info_t *sessions, size_t count,
 static esp_err_t history_unified_axis(
     const char *day, const history_session_info_t *sessions,
     size_t session_count, int64_t *start_ms, int64_t *end_ms,
-    uint16_t *oximetry_signals,
+    uint16_t *oximetry_signals, bool *oximetry_error,
     const touch_history_operation_t *operation)
 {
     if (!day || !start_ms || !end_ms ||
         (session_count && !sessions)) return ESP_ERR_INVALID_ARG;
     bool have_axis = history_axis(sessions, session_count, start_ms, end_ms);
+    if (oximetry_error) *oximetry_error = false;
     int64_t ox_start = 0;
     int64_t ox_end = 0;
     uint16_t ox_signals = 0;
     esp_err_t ox_result = history_ox_metadata(
         day, &ox_start, &ox_end, &ox_signals, operation);
-    if (ox_result != ESP_OK && ox_result != ESP_ERR_NOT_FOUND)
-        return ox_result;
+    if (ox_result != ESP_OK && ox_result != ESP_ERR_NOT_FOUND) {
+        if (ox_result == ESP_ERR_NO_MEM ||
+            ox_result == TOUCH_HISTORY_ERR_CANCELLED || !have_axis)
+            return ox_result;
+        ESP_LOGW(TAG, "ignore unreadable O2 metadata day=%s: %s", day,
+                 esp_err_to_name(ox_result));
+        if (oximetry_error) *oximetry_error = true;
+        ox_result = ESP_ERR_NOT_FOUND;
+    }
     if (ox_result == ESP_OK) {
         if (!have_axis) {
             *start_ms = ox_start;
@@ -2329,8 +2505,18 @@ static esp_err_t history_accumulate_as11(
             continue;
         }
         if (inspect != ESP_OK) {
-            result = inspect;
-            break;
+            if (inspect == ESP_ERR_NO_MEM ||
+                inspect == TOUCH_HISTORY_ERR_CANCELLED) {
+                result = inspect;
+                break;
+            }
+            ESP_LOGW(TAG, "skip corrupt graph source day=%s session=%s signal=%u: %s",
+                     day, sessions[s].id, (unsigned)signal,
+                     esp_err_to_name(inspect));
+            if (overview->unreadable_sessions < UINT16_MAX)
+                overview->unreadable_sessions++;
+            history_operation_progress(operation, session_progress_end);
+            continue;
         }
         uint32_t first_record = history_as11_record_at_or_after(
             &candidate, axis_start_ms);
@@ -2707,7 +2893,7 @@ static esp_err_t history_load_overview_leased(
     history_session_info_t *sessions = NULL;
     size_t session_count = 0;
     esp_err_t result = history_load_sessions_leased(
-        day, &sessions, &session_count, operation);
+        day, &sessions, &session_count, NULL, operation);
     if (result == ESP_ERR_NOT_FOUND) result = ESP_OK;
     if (result != ESP_OK) return result;
     uint16_t data_progress_start = history_progress_fraction(
@@ -2720,7 +2906,7 @@ static esp_err_t history_load_overview_leased(
     if (result == ESP_OK)
         result = history_unified_axis(
             day, sessions, session_count, &night_start_ms, &night_end_ms,
-            NULL, operation);
+            NULL, NULL, operation);
     bool ranged = requested_start_ms != 0 || requested_end_ms != 0;
     int64_t axis_start_ms = night_start_ms;
     int64_t axis_end_ms = night_end_ms;
@@ -3175,7 +3361,9 @@ static esp_err_t history_collect_eligible_intervals_leased(
             continue;
         }
         if (inspect != ESP_OK) {
-            result = inspect;
+            result = (inspect == ESP_ERR_NO_MEM ||
+                      inspect == TOUCH_HISTORY_ERR_CANCELLED)
+                         ? inspect : ESP_ERR_NOT_FOUND;
             break;
         }
         if (pld.records < pld.sample_hz_x10 * 6U) continue;
@@ -3189,7 +3377,16 @@ static esp_err_t history_collect_eligible_intervals_leased(
         history_gate_t gate = {0};
         result = history_parse_event_file(
             path, &sessions[i], i, &gate, NULL, operation);
-        if (result != ESP_OK) break;
+        if (result != ESP_OK) {
+            if (result != ESP_ERR_NO_MEM &&
+                result != TOUCH_HISTORY_ERR_CANCELLED) {
+                ESP_LOGW(TAG,
+                         "exact therapy gate unavailable day=%s session=%s: %s",
+                         day, sessions[i].id, esp_err_to_name(result));
+                result = ESP_ERR_NOT_FOUND;
+            }
+            break;
+        }
         int64_t gate_start = gate.rise_ms > 0 ? gate.rise_ms : gate.mask_on_ms;
         int64_t gate_end = gate.fall_ms > 0 ? gate.fall_ms : gate.mask_off_ms;
         if (gate_start > 0 && gate_end > 0 && gate_end <= gate_start) {
@@ -3432,7 +3629,17 @@ static esp_err_t history_stats_accumulate_as11(
         /* Exact Flow statistics are never manufactured from the min/max
          * sidecar. A missing source for any eligible contributing session
          * invalidates the result instead of silently returning a partial. */
-        if (inspect != ESP_OK) return inspect;
+        if (inspect != ESP_OK) {
+            if (inspect != ESP_ERR_NO_MEM &&
+                inspect != TOUCH_HISTORY_ERR_CANCELLED)
+                ESP_LOGW(TAG,
+                         "exact stats source unavailable day=%s session=%s signal=%u: %s",
+                         day, sessions[s].id, (unsigned)signal,
+                         esp_err_to_name(inspect));
+            return (inspect == ESP_ERR_NO_MEM ||
+                    inspect == TOUCH_HISTORY_ERR_CANCELLED)
+                       ? inspect : ESP_ERR_NOT_FOUND;
+        }
         uint32_t first = history_as11_record_at_or_after(&candidate, start_ms);
         uint32_t end = history_as11_record_at_or_after(&candidate, end_ms);
         if (end <= first) continue;
@@ -3625,7 +3832,7 @@ static esp_err_t history_load_stats_leased(
     history_session_info_t *sessions = NULL;
     size_t session_count = 0;
     esp_err_t sessions_result = history_load_sessions_leased(
-        day, &sessions, &session_count, operation);
+        day, &sessions, &session_count, NULL, operation);
     if (sessions_result == ESP_ERR_NOT_FOUND &&
         (signal == TOUCH_HISTORY_SIGNAL_SPO2 ||
          signal == TOUCH_HISTORY_SIGNAL_PULSE)) sessions_result = ESP_OK;
@@ -3642,7 +3849,7 @@ static esp_err_t history_load_stats_leased(
     int64_t night_end_ms = 0;
     sessions_result = history_unified_axis(
         day, sessions, session_count, &night_start_ms, &night_end_ms,
-        NULL, operation);
+        NULL, NULL, operation);
     if (sessions_result != ESP_OK) {
         free(sessions);
         return sessions_result;
@@ -3728,17 +3935,6 @@ esp_err_t touch_history_load_stats_ex(
     return result;
 }
 
-static int history_event_start_order(const void *left, const void *right)
-{
-    const touch_history_event_t *a = left;
-    const touch_history_event_t *b = right;
-    if (a->start_ms < b->start_ms) return -1;
-    if (a->start_ms > b->start_ms) return 1;
-    if (a->type < b->type) return -1;
-    if (a->type > b->type) return 1;
-    return 0;
-}
-
 static esp_err_t history_collect_events_leased(
     const char *day, const history_session_info_t *sessions,
     size_t session_count, history_event_vector_t *events,
@@ -3774,7 +3970,9 @@ static esp_err_t history_collect_events_leased(
             continue;
         }
         if (inspect != ESP_OK) {
-            result = inspect;
+            result = (inspect == ESP_ERR_NO_MEM ||
+                      inspect == TOUCH_HISTORY_ERR_CANCELLED)
+                         ? inspect : ESP_ERR_NOT_FOUND;
             break;
         }
         if (pld.records < pld.sample_hz_x10 * 6U) continue;
@@ -3793,7 +3991,13 @@ static esp_err_t history_collect_events_leased(
         esp_err_t parse = history_parse_event_file(
             path, &sessions[i], i, &gate, events, operation);
         if (parse != ESP_OK) {
-            result = parse;
+            if (parse != ESP_ERR_NO_MEM &&
+                parse != TOUCH_HISTORY_ERR_CANCELLED)
+                ESP_LOGW(TAG, "event source unavailable day=%s session=%s: %s",
+                         day, sessions[i].id, esp_err_to_name(parse));
+            result = (parse == ESP_ERR_NO_MEM ||
+                      parse == TOUCH_HISTORY_ERR_CANCELLED)
+                         ? parse : ESP_ERR_NOT_FOUND;
             break;
         }
         int64_t gate_start = gate.rise_ms > 0 ? gate.rise_ms : gate.mask_on_ms;
@@ -3852,11 +4056,30 @@ static esp_err_t history_collect_events_leased(
         }
     }
     if (result == ESP_OK) {
-        if (events->count > 1)
-            qsort(events->items, events->count, sizeof(*events->items),
-                  history_event_start_order);
+        size_t before_dedup = events->count;
+        events->count = touch_history_deduplicate_events(
+            events->items, events->count);
+        if (events->count < before_dedup)
+            ESP_LOGI(TAG, "day=%s deduplicated %u replayed respiratory events",
+                     day, (unsigned)(before_dedup - events->count));
+        memset(events->counts, 0, sizeof(events->counts));
+        for (size_t i = 0; i < events->count; ++i) {
+            touch_history_event_type_t type = events->items[i].type;
+            if (type >= 0 && type < TOUCH_HISTORY_EVENT_TYPE_COUNT &&
+                events->counts[type] < UINT32_MAX)
+                events->counts[type]++;
+        }
         (void)touch_history_compute_event_indices(
             events->counts, eligible_ms, totals);
+        for (size_t i = 0; i < session_count; ++i) {
+            if (!sessions[i].event_dropped) continue;
+            totals->complete = false;
+            totals->has_indices = false;
+            ESP_LOGW(TAG,
+                     "day=%s session=%s dropped %u event notifications; ST AHI unavailable",
+                     day, sessions[i].id,
+                     (unsigned)sessions[i].event_dropped);
+        }
     }
     free(intervals);
     return result;
@@ -3871,8 +4094,9 @@ static esp_err_t history_load_events_leased(
     history_operation_progress(operation, progress_start);
     history_session_info_t *sessions = NULL;
     size_t session_count = 0;
+    size_t skipped_sessions = 0;
     esp_err_t result = history_load_sessions_leased(
-        day, &sessions, &session_count, operation);
+        day, &sessions, &session_count, &skipped_sessions, operation);
     history_event_vector_t vector = {0};
     touch_history_event_totals_t totals = {0};
     if (result == ESP_OK)
@@ -3890,6 +4114,10 @@ static esp_err_t history_load_events_leased(
         page->total_count = vector.count;
         page->has_more = offset + returned < vector.count;
         page->totals = totals;
+        if (skipped_sessions) {
+            page->totals.complete = false;
+            page->totals.has_indices = false;
+        }
     }
     free(vector.items);
     free(sessions);
@@ -3982,8 +4210,10 @@ static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
         if (!valid_day(directory->d_name)) continue;
         history_session_info_t *sessions = NULL;
         size_t session_count_value = 0;
+        size_t skipped_sessions = 0;
         esp_err_t load = history_load_sessions_leased(
-            directory->d_name, &sessions, &session_count_value, NULL);
+            directory->d_name, &sessions, &session_count_value,
+            &skipped_sessions, NULL);
         free(sessions);
         if (load == ESP_ERR_NOT_FOUND) continue;
         if (load != ESP_OK) {
@@ -3996,6 +4226,8 @@ static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
         if (result != ESP_OK) break;
         entry->sessions = session_count_value > INT_MAX
             ? INT_MAX : (int)session_count_value;
+        entry->skipped_sessions = skipped_sessions > UINT16_MAX
+            ? UINT16_MAX : (uint16_t)skipped_sessions;
         entry->has_therapy = true;
     }
     if (dir && closedir(dir) != 0 && result == ESP_OK) result = ESP_FAIL;
@@ -4089,13 +4321,15 @@ static esp_err_t history_load_page_leased(
         memset(day, 0, sizeof(*day));
         strlcpy(day->day, index[offset + i].day, sizeof(day->day));
         day->sessions = index[offset + i].sessions;
+        day->skipped_sessions = index[offset + i].skipped_sessions;
+        day->has_incomplete_sessions = day->skipped_sessions > 0;
         day->has_therapy = index[offset + i].has_therapy;
         day->has_oximetry = index[offset + i].has_oximetry;
         result = history_fill_day_summary(day);
         if (result != ESP_OK) {
-            memset(days, 0, capacity * sizeof(*days));
-            free(index);
-            return result;
+            ESP_LOGW(TAG, "summary unavailable day=%s: %s", day->day,
+                     esp_err_to_name(result));
+            result = ESP_OK;
         }
     }
     page->offset = offset;
@@ -4225,8 +4459,9 @@ esp_err_t touch_history_load_night_ex(
 
     history_session_info_t *sessions = NULL;
     size_t session_count_value = 0;
+    size_t skipped_sessions = 0;
     esp_err_t result = history_load_sessions_leased(
-        day, &sessions, &session_count_value, operation);
+        day, &sessions, &session_count_value, &skipped_sessions, operation);
     if (result == ESP_ERR_NOT_FOUND) result = ESP_OK;
     history_operation_progress(operation, 100);
     if (result == ESP_OK && session_count_value)
@@ -4236,9 +4471,13 @@ esp_err_t touch_history_load_night_ex(
     if (result == ESP_OK)
         result = history_unified_axis(
             day, sessions, session_count_value, &night->axis_start_ms,
-            &night->axis_end_ms, &oximetry_signals, operation);
+            &night->axis_end_ms, &oximetry_signals,
+            &night->has_oximetry_error, operation);
 
     if (result == ESP_OK) {
+        night->skipped_sessions = skipped_sessions > UINT16_MAX
+            ? UINT16_MAX : (uint16_t)skipped_sessions;
+        night->has_session_errors = skipped_sessions > 0;
         night->available_signals = oximetry_signals;
         night->session_count = session_count_value;
         night->sessions_returned = session_count_value < session_capacity
@@ -4250,8 +4489,24 @@ esp_err_t touch_history_load_night_ex(
                 result = TOUCH_HISTORY_ERR_CANCELLED;
                 break;
             }
-            result = history_probe_session(day, &sessions[i]);
-            if (result != ESP_OK) break;
+            if (sessions[i].end_ms <= sessions[i].start_ms) continue;
+            esp_err_t probe_result = history_probe_session(day, &sessions[i]);
+            if (probe_result == ESP_ERR_NO_MEM ||
+                probe_result == TOUCH_HISTORY_ERR_CANCELLED) {
+                result = probe_result;
+                break;
+            }
+            if (probe_result != ESP_OK)
+                ESP_LOGW(TAG,
+                         "partial night day=%s session=%s probe failed: %s",
+                         day, sessions[i].id, esp_err_to_name(probe_result));
+            if (probe_result != ESP_OK) {
+                if (night->probe_failed_sessions < UINT16_MAX)
+                    night->probe_failed_sessions++;
+                night->has_session_errors = true;
+            }
+            if (sessions[i].event_dropped)
+                night->has_event_loss = true;
             night->available_signals |= sessions[i].available_signals;
             if (i < night->sessions_returned) {
                 touch_history_session_t *out = &session_out[i];
@@ -4294,6 +4549,17 @@ esp_err_t touch_history_load_night_ex(
                     overview->therapy_coverage_per_mille;
             if (result == ESP_OK)
                 night->has_o2_coverage = overview->has_therapy_coverage;
+            if (result != ESP_OK && result != ESP_ERR_NO_MEM &&
+                result != TOUCH_HISTORY_ERR_CANCELLED) {
+                ESP_LOGW(TAG, "omit unreadable O2 coverage day=%s: %s", day,
+                         esp_err_to_name(result));
+                night->available_signals &= (uint16_t)~(
+                    TOUCH_HISTORY_SIGNAL_BIT(TOUCH_HISTORY_SIGNAL_SPO2) |
+                    TOUCH_HISTORY_SIGNAL_BIT(TOUCH_HISTORY_SIGNAL_PULSE) |
+                    TOUCH_HISTORY_SIGNAL_BIT(TOUCH_HISTORY_SIGNAL_MOTION));
+                night->has_oximetry_error = true;
+                result = ESP_OK;
+            }
         }
         free(aggregate);
         free(overview);
@@ -4308,7 +4574,13 @@ esp_err_t touch_history_load_night_ex(
             night->device_ahi = summary.device_ahi;
             night->has_device_ahi = true;
         } else if (summary_result != ESP_OK) {
-            result = summary_result;
+            /* Summary spools are optional metadata written by an independent
+             * ingest path.  An old/truncated spool must not hide otherwise
+             * readable raw traces, sessions, or respiratory events. */
+            ESP_LOGW(TAG, "device summary unavailable day=%s: %s (0x%x)",
+                     day, esp_err_to_name(summary_result),
+                     (unsigned)summary_result);
+            night->has_summary_error = true;
         }
     }
 
@@ -4318,6 +4590,10 @@ esp_err_t touch_history_load_night_ex(
             day, sessions, session_count_value, &vector,
             &night->event_totals, operation, 700, 980);
         free(vector.items);
+        if (night->has_session_errors || night->has_event_loss) {
+            night->event_totals.complete = false;
+            night->event_totals.has_indices = false;
+        }
         if (night->events_result == ESP_OK &&
             night->event_totals.has_indices) {
             night->st_ahi = night->event_totals.ahi;

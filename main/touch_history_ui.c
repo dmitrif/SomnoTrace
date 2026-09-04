@@ -118,6 +118,7 @@ struct touch_history_ui {
     lv_obj_t *graph_source;
     lv_obj_t *stat_labels[TOUCH_HISTORY_UI_STAT_COUNT];
     lv_obj_t *stat_values[TOUCH_HISTORY_UI_STAT_COUNT];
+    lv_obj_t *stats_warning;
     lv_obj_t *fit_button;
     lv_obj_t *zoom_out_button;
     lv_obj_t *zoom_in_button;
@@ -181,6 +182,7 @@ struct touch_history_ui {
     char status_text[TOUCH_HISTORY_UI_TEXT_MAX];
     char error_text[TOUCH_HISTORY_UI_TEXT_MAX];
     char degraded_text[TOUCH_HISTORY_UI_TEXT_MAX];
+    char stats_warning_text[TOUCH_HISTORY_UI_TEXT_MAX];
 };
 
 static const char *const s_signal_names[TOUCH_HISTORY_SIGNAL_COUNT] = {
@@ -677,13 +679,42 @@ static void history_ui_graph_touch(lv_event_t *event)
     if (code == LV_EVENT_PRESSED) {
         ui->graph_last_x = point.x;
         ui->graph_dragged = false;
-        ui->cursor_ms = history_ui_graph_time_at_x(ui, point.x);
-        ui->graph_press_timestamp_ms = ui->cursor_ms;
-        ui->cursor_valid = true;
+        ui->graph_press_timestamp_ms = history_ui_graph_time_at_x(
+            ui, point.x);
+        return;
+    }
+    if (code == LV_EVENT_SHORT_CLICKED) {
+        if (ui->graph_dragged)
+            return;
+        bool clear_cursor = false;
+        if (ui->cursor_valid &&
+            ui->overview.axis_end_ms > ui->overview.axis_start_ms) {
+            lv_area_t area;
+            lv_obj_get_content_coords(ui->graph, &area);
+            lv_coord_t left = area.x1 + HISTORY_UI_GRAPH_PAD_L;
+            lv_coord_t right = area.x2 - HISTORY_UI_GRAPH_PAD_R;
+            lv_coord_t cursor_x = left + (lv_coord_t)(
+                ((ui->cursor_ms - ui->overview.axis_start_ms) *
+                 (right - left)) /
+                (ui->overview.axis_end_ms - ui->overview.axis_start_ms));
+            lv_coord_t distance = point.x - cursor_x;
+            if (distance < 0) distance = -distance;
+            clear_cursor = distance <= 18;
+        }
+        if (clear_cursor) {
+            ui->cursor_valid = false;
+            ui->cursor_ms = 0;
+            history_ui_emit(ui, TOUCH_HISTORY_UI_INTENT_CLEAR_CURSOR, 0, 0,
+                            ui->selected_row, ui->signal,
+                            ui->has_night ? ui->night.day : NULL);
+        } else {
+            ui->cursor_ms = history_ui_graph_time_at_x(ui, point.x);
+            ui->cursor_valid = true;
+            history_ui_emit(ui, TOUCH_HISTORY_UI_INTENT_SET_CURSOR, 0,
+                            ui->cursor_ms, ui->selected_row, ui->signal,
+                            ui->has_night ? ui->night.day : NULL);
+        }
         lv_obj_invalidate(ui->graph);
-        history_ui_emit(ui, TOUCH_HISTORY_UI_INTENT_SET_CURSOR, 0,
-                        ui->cursor_ms, ui->selected_row, ui->signal,
-                        ui->has_night ? ui->night.day : NULL);
         return;
     }
     if (code != LV_EVENT_PRESSING)
@@ -1642,6 +1673,8 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
                         LV_EVENT_PRESSED, ui);
     lv_obj_add_event_cb(ui->graph, history_ui_graph_touch,
                         LV_EVENT_PRESSING, ui);
+    lv_obj_add_event_cb(ui->graph, history_ui_graph_touch,
+                        LV_EVENT_SHORT_CLICKED, ui);
     ui->graph_title = history_ui_label(
         ui->graph, "Breathing / Flow · L/s",
         &somnotrace_space_grotesk_semibold_15, HISTORY_UI_COLOR_TEXT,
@@ -1662,6 +1695,11 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
             &somnotrace_ibm_plex_mono_semibold_13,
             HISTORY_UI_COLOR_TEXT, x, 24, 64, 19);
     }
+    ui->stats_warning = history_ui_label(
+        ui->graph, "Percentiles unavailable",
+        &somnotrace_ibm_plex_mono_semibold_11,
+        HISTORY_UI_COLOR_AMBER, 150, 12, 268, 24);
+    history_ui_set_hidden(ui->stats_warning, true);
 
     ui->therapy_only_button = history_ui_button(
         ui->graph, 422, 4, 106, HISTORY_UI_HIT, HISTORY_UI_COLOR_CONTROL);
@@ -2059,6 +2097,8 @@ static void history_ui_update_graph_header(touch_history_ui_t *ui)
         lv_obj_set_x(ui->stat_labels[i], stat_x);
         lv_obj_set_x(ui->stat_values[i], stat_x);
     }
+    lv_obj_set_x(ui->stats_warning, breathing_flow ? 218 : 150);
+    lv_obj_set_width(ui->stats_warning, breathing_flow ? 306 : 268);
 
     char source[96];
     if (!ui->has_overview) {
@@ -2103,11 +2143,17 @@ static void history_ui_update_graph_header(touch_history_ui_t *ui)
                           ui->therapy_only ? "Therapy: On"
                                            : "Therapy: Off");
 
+    bool stats_warning = ui->stats_warning_text[0] != '\0';
+    history_ui_set_hidden(ui->stats_warning, !stats_warning);
+    if (stats_warning)
+        lv_label_set_text(ui->stats_warning, ui->stats_warning_text);
     for (size_t i = 0; i < TOUCH_HISTORY_UI_STAT_COUNT; ++i) {
         bool fourth_visible =
             i < 3 || ui->signal == TOUCH_HISTORY_SIGNAL_SPO2;
-        history_ui_set_hidden(ui->stat_labels[i], !fourth_visible);
-        history_ui_set_hidden(ui->stat_values[i], !fourth_visible);
+        history_ui_set_hidden(ui->stat_labels[i],
+                              stats_warning || !fourth_visible);
+        history_ui_set_hidden(ui->stat_values[i],
+                              stats_warning || !fourth_visible);
         lv_label_set_text(ui->stat_labels[i],
                           ui->stats[i].label[0]
                               ? ui->stats[i].label
@@ -2270,10 +2316,6 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     if (result != ESP_OK)
         return result;
 
-    char previous_day[9] = {0};
-    if (ui->has_night)
-        history_ui_copy_text(previous_day, sizeof(previous_day), ui->night.day);
-
     ui->state = snapshot->state;
     ui->day_count = snapshot->day_count;
     memset(ui->days, 0, sizeof(ui->days));
@@ -2339,17 +2381,12 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
                          snapshot->error_text);
     history_ui_copy_text(ui->degraded_text, sizeof(ui->degraded_text),
                          snapshot->degraded_text);
+    history_ui_copy_text(ui->stats_warning_text,
+                         sizeof(ui->stats_warning_text),
+                         snapshot->stats_warning_text);
 
-    bool night_changed = ui->has_night &&
-                         previous_day[0] &&
-                         strcmp(previous_day, ui->night.day) != 0;
-    if (snapshot->cursor_valid) {
-        ui->cursor_valid = true;
-        ui->cursor_ms = snapshot->cursor_ms;
-    } else if (night_changed || !ui->has_night) {
-        ui->cursor_valid = false;
-        ui->cursor_ms = 0;
-    }
+    ui->cursor_valid = snapshot->cursor_valid;
+    ui->cursor_ms = snapshot->cursor_valid ? snapshot->cursor_ms : 0;
 
     if (ui->state == TOUCH_HISTORY_UI_STATE_CALENDAR) {
         result = history_ui_ensure_calendar(ui);

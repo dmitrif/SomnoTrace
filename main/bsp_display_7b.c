@@ -45,7 +45,8 @@
 #include "sd_storage.h"
 #include "somnotrace_fonts.h"
 #include "therapy_alert.h"
-#include "touch_history.h"
+#include "touch_history_controller.h"
+#include "touch_history_ui.h"
 #include "touch_logs_controller.h"
 #include "uploader.h"
 
@@ -54,7 +55,6 @@
 #define FLOW_CATCHUP_THRESHOLD 10
 #define FLOW_RESYNC_THRESHOLD 25
 #define UI_UPDATE_MS 50
-#define HISTORY_MAX_DAYS TOUCH_HISTORY_MAX_DAYS
 #define DEVICE_RESULT_MAX 8
 #define SCREEN_TIMEOUT_OPTION_COUNT 5
 #define POLICY_PEEK_TIMEOUT_S 60
@@ -218,15 +218,6 @@ typedef struct {
 } ui_device_result_t;
 
 typedef struct {
-    touch_history_day_t history[HISTORY_MAX_DAYS];
-    size_t history_count;
-    unsigned history_version;
-    unsigned history_metadata_version;
-    bool history_busy;
-    bool history_trace_busy;
-    char history_trace_day[9];
-    touch_history_trace_t history_trace;
-    esp_err_t history_trace_result;
     ui_device_result_t as11[DEVICE_RESULT_MAX];
     size_t as11_count;
     unsigned as11_version;
@@ -235,7 +226,6 @@ typedef struct {
     size_t ox_count;
     unsigned ox_version;
     bool ox_busy;
-    esp_err_t history_result;
     uint64_t storage_free;
     uint64_t storage_total;
     int upload_pending;
@@ -292,7 +282,6 @@ static uint32_t s_backlight_write_errors;
 static int64_t s_backlight_retry_after_us;
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
 static bool s_qemu_first_frame_published;
-static uint8_t s_qemu_history_frame_pending_channel = UINT8_MAX;
 static bool s_qemu_setup_preview_requested;
 #endif
 static lv_coord_t s_last_touch_x;
@@ -377,78 +366,11 @@ static lv_obj_t *s_pages[3];
 static lv_obj_t *s_nav_buttons[3];
 static lv_obj_t *s_nav_labels[3];
 static int s_active_page = -1;
-static lv_obj_t *s_history_status;
-static lv_obj_t *s_history_rows[HISTORY_MAX_DAYS];
-static lv_obj_t *s_history_row_dates[HISTORY_MAX_DAYS];
-static lv_obj_t *s_history_row_subtitles[HISTORY_MAX_DAYS];
-static lv_obj_t *s_history_row_durations[HISTORY_MAX_DAYS];
-static lv_obj_t *s_history_list_scroll;
-static lv_obj_t *s_history_load_more;
-static lv_obj_t *s_history_refresh;
-static lv_obj_t *s_history_refresh_label;
-static lv_obj_t *s_history_detail_content;
-static lv_obj_t *s_history_detail_title;
-static lv_obj_t *s_history_detail_subtitle;
-static lv_obj_t *s_history_mask_badge;
-static lv_obj_t *s_history_mask_dot;
-static lv_obj_t *s_history_usage_label;
-static lv_obj_t *s_history_ahi_label;
-static lv_obj_t *s_history_pressure_label;
-static lv_obj_t *s_history_leak_label;
-static lv_obj_t *s_history_metric_units[4];
-static lv_obj_t *s_history_event_bars[4];
-static lv_obj_t *s_history_event_values[4];
-static lv_obj_t *s_history_trace_chart;
-static lv_chart_series_t *s_history_trace_series;
-static lv_chart_series_t *s_history_trace_upper_series;
-static lv_coord_t s_history_trace_values[TOUCH_HISTORY_TRACE_POINTS];
-static lv_coord_t s_history_trace_upper_values[TOUCH_HISTORY_TRACE_POINTS];
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-static const int16_t s_qemu_history_traces
-    [TOUCH_HISTORY_CHANNEL_COUNT][TOUCH_HISTORY_TRACE_POINTS] = {
-    [TOUCH_HISTORY_CHANNEL_FLOW] = {
-        -31, -30, -28, -26, -24, -28, -36, -33, -29, -27, -25, -28,
-        -33, -35, -38, -37, -35, -33, -30, -29, -27, -29, -32, -31,
-        -29, -27, -25, -30, -37, -36, -34, -31, -28, -26, -24, -27,
-        -31, -33, -35, -34, -32, -29, -26, -28, -30, -31, -33, -32,
-    },
-    [TOUCH_HISTORY_CHANNEL_SPO2] = {
-        97, 97, 98, 98, 97, 97, 96, 96, 97, 98, 98, 97,
-        97, 96, 95, 96, 97, 97, 98, 98, 97, 97, 96, 96,
-        97, 97, 97, 98, 98, 97, 96, 94, 95, 96, 97, 97,
-        98, 98, 97, 97, 96, 95, 96, 97, 97, 98, 98, 97,
-    },
-    [TOUCH_HISTORY_CHANNEL_LEAK] = {
-        0, 0, 1, 1, 2, 1, 0, 0, 1, 2, 3, 2,
-        1, 0, 0, 1, 3, 5, 4, 2, 1, 0, 0, 1,
-        2, 4, 7, 6, 3, 2, 1, 0, 0, 2, 5, 8,
-        6, 3, 2, 1, 0, 0, 1, 2, 4, 3, 1, 0,
-    },
-};
-static const int16_t
-    s_qemu_history_flow_upper[TOUCH_HISTORY_TRACE_POINTS] = {
-        34, 36, 39, 35, 31, 37, 45, 42, 38, 36, 35, 38,
-        41, 44, 48, 46, 44, 42, 39, 37, 36, 39, 42, 40,
-        38, 36, 34, 40, 47, 46, 43, 40, 37, 35, 33, 37,
-        40, 42, 45, 43, 41, 38, 35, 37, 39, 41, 43, 40,
-    };
-#endif
-static lv_obj_t *s_history_trace_message;
-static lv_obj_t *s_history_trace_start;
-static lv_obj_t *s_history_trace_end;
-static lv_obj_t *s_history_trace_baseline;
-static lv_point_t s_history_trace_baseline_points[2] = {
-    { 0, 56 }, { 305, 56 }
-};
-static lv_obj_t *s_history_channel_buttons[3];
-static touch_history_channel_t s_history_channel = TOUCH_HISTORY_CHANNEL_FLOW;
-static lv_obj_t *s_history_empty;
-static lv_obj_t *s_history_empty_glyph;
-static lv_obj_t *s_history_empty_title;
-static lv_obj_t *s_history_empty_body;
-static lv_obj_t *s_history_empty_action;
-static lv_obj_t *s_history_empty_action_label;
-static size_t s_history_revealed = 7;
+static lv_obj_t *s_history_host;
+static touch_history_ui_t *s_history_ui;
+static touch_history_controller_t *s_history_controller;
+static uint32_t s_history_rendered_revision = UINT32_MAX;
+static bool s_history_apply_scheduled;
 static lv_obj_t *s_as11_row;
 static lv_obj_t *s_ox_row;
 static lv_obj_t *s_as11_title;
@@ -535,25 +457,9 @@ static lv_obj_t *s_keyboard;
 static lv_obj_t *s_keyboard_target;
 static char s_keyboard_initial[NETPROV_PASS_MAXLEN + 1];
 static lv_obj_t *s_wake_overlay;
-static unsigned s_seen_history_version;
-static unsigned s_seen_history_metadata_version;
 static unsigned s_seen_as11_version;
 static unsigned s_seen_ox_version;
-static int s_history_selection = -1;
-static char s_history_selected_day[9];
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-/* Generation 1 is the boot-time cold cache. Page entry only starts a worker
- * when this generation has not completed, so revisiting History is an
- * immediate cached page switch rather than another microSD directory scan. */
-static unsigned s_history_refresh_generation = 1;
-static unsigned s_history_refresh_started_generation;
-static unsigned s_history_refresh_completed_generation;
-static bool s_history_trace_worker_running;
-static char s_history_trace_requested_day[9];
-static touch_history_channel_t s_history_trace_requested_channel;
-static uint32_t s_history_trace_request_generation;
-static TaskHandle_t s_history_worker_task;
-static TaskHandle_t s_history_trace_worker_task;
 static TaskHandle_t s_storage_worker_task;
 #endif
 static bool s_system_settings_synced;
@@ -574,7 +480,6 @@ static void teardown_rendered_manage_destination(void);
 static void reap_retired_logs_destination(void);
 static void update_manage_rail_selection(int section);
 static void close_manage_dialog(void);
-static void refresh_history_widgets(const ui_service_state_t *services);
 static void start_storage_refresh(void);
 static void apply_pending_backlight_locked(void);
 static void style_manage_surface(lv_obj_t *obj);
@@ -688,12 +593,6 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
     if (lv_disp_flush_is_last(drv) && !s_qemu_first_frame_published) {
         s_qemu_first_frame_published = true;
         ESP_LOGI(TAG, "QEMU UI first frame published");
-    }
-    if (lv_disp_flush_is_last(drv) &&
-        s_qemu_history_frame_pending_channel < TOUCH_HISTORY_CHANNEL_COUNT) {
-        ESP_LOGI(TAG, "emulated history channel %u frame published",
-                 (unsigned)s_qemu_history_frame_pending_channel);
-        s_qemu_history_frame_pending_channel = UINT8_MAX;
     }
 #endif
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
@@ -1149,23 +1048,6 @@ static lv_obj_t *make_value_card(lv_obj_t *parent, int x, int y,
     return card;
 }
 
-static lv_obj_t *make_history_metric(lv_obj_t *parent, int x,
-                                     const char *caption, const char *unit,
-                                     lv_obj_t **value, lv_obj_t **unit_label)
-{
-    lv_obj_t *card = make_card(parent, x, 76, 141, 88);
-    lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD), 0);
-    lv_obj_set_style_radius(card, 20, 0);
-    lv_obj_set_style_pad_all(card, 12, 0);
-    *value = make_label(card, "—", 0, 0, 64, FONT_DATA_COMPACT,
-                        COLOR_TEXT);
-    *unit_label = make_label(card, unit, 66, 6, 51, FONT_AXIS,
-                             COLOR_TERTIARY);
-    make_label(card, caption, 0, 43, 117, FONT_METRIC_LABEL,
-               COLOR_TERTIARY);
-    return card;
-}
-
 static void save_settings_task(void *arg)
 {
     (void)arg;
@@ -1293,200 +1175,6 @@ static void manage_dropdown_list_ready_cb(lv_event_t *event)
         lv_obj_set_style_text_font(label, FONT_BODY, LV_PART_MAIN);
         lv_obj_set_style_text_line_space(label, 28, LV_PART_MAIN);
     }
-}
-
-#if !CONFIG_SOMNOTRACE_BOARD_QEMU
-static void history_trace_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        for (;;) {
-            char requested_day[9];
-            touch_history_channel_t requested_channel;
-            uint32_t request_generation;
-            portENTER_CRITICAL(&s_state_lock);
-            strlcpy(requested_day, s_history_trace_requested_day,
-                    sizeof(requested_day));
-            requested_channel = s_history_trace_requested_channel;
-            request_generation = s_history_trace_request_generation;
-            s_history_trace_requested_day[0] = '\0';
-            if (!requested_day[0])
-                s_history_trace_worker_running = false;
-            portEXIT_CRITICAL(&s_state_lock);
-            if (!requested_day[0]) break;
-
-            touch_history_trace_t loaded = {0};
-            esp_err_t result = touch_history_load_trace(
-                requested_day, requested_channel, &loaded);
-
-            portENTER_CRITICAL(&s_state_lock);
-            /* A later row or pill tap supersedes this read. Key completion by
-             * generation as well as day/channel so a slow SD response can
-             * never repaint the newly selected channel with stale data. */
-            if (request_generation == s_history_trace_request_generation) {
-                strlcpy(s_services.history_trace_day, requested_day,
-                        sizeof(s_services.history_trace_day));
-                s_services.history_trace = loaded;
-                s_services.history_trace_result = result;
-                s_services.history_trace_busy = false;
-            }
-            s_services.history_version++;
-            portEXIT_CRITICAL(&s_state_lock);
-        }
-    }
-}
-
-static void queue_history_trace_load(const char *day,
-                                     touch_history_channel_t channel)
-{
-    bool notify_worker = false;
-    bool worker_unavailable = false;
-    if (!day || !day[0] || channel < TOUCH_HISTORY_CHANNEL_FLOW ||
-        channel >= TOUCH_HISTORY_CHANNEL_COUNT) return;
-    portENTER_CRITICAL(&s_state_lock);
-    bool cached = s_services.history_trace.loaded &&
-                  !strcmp(s_services.history_trace_day, day) &&
-                  s_services.history_trace.channel == channel;
-    bool same_request = s_services.history_trace_busy &&
-                        !strcmp(s_services.history_trace_day, day) &&
-                        s_history_trace_requested_channel == channel;
-    if (!cached && !same_request) {
-        strlcpy(s_history_trace_requested_day, day,
-                sizeof(s_history_trace_requested_day));
-        s_history_trace_requested_channel = channel;
-        s_history_trace_request_generation++;
-        strlcpy(s_services.history_trace_day, day,
-                sizeof(s_services.history_trace_day));
-        s_services.history_trace.channel = channel;
-        s_services.history_trace.loaded = false;
-        s_services.history_trace.has_data = false;
-        s_services.history_trace_busy = true;
-        s_services.history_version++;
-        if (!s_history_trace_worker_running) {
-            if (s_history_trace_worker_task) {
-                s_history_trace_worker_running = true;
-                notify_worker = true;
-            } else {
-                s_history_trace_requested_day[0] = '\0';
-                s_services.history_trace_busy = false;
-                s_services.history_trace_result = ESP_ERR_NO_MEM;
-                s_services.history_version++;
-                worker_unavailable = true;
-            }
-        }
-    }
-    portEXIT_CRITICAL(&s_state_lock);
-    if (notify_worker) xTaskNotifyGive(s_history_trace_worker_task);
-    if (worker_unavailable)
-        bsp_display_set_notice("Unable to read recorded channel");
-}
-
-static void history_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        unsigned load_generation;
-        portENTER_CRITICAL(&s_state_lock);
-        load_generation = s_history_refresh_started_generation;
-        portEXIT_CRITICAL(&s_state_lock);
-        touch_history_day_t *local = heap_caps_calloc(
-            HISTORY_MAX_DAYS, sizeof(*local), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!local) local = calloc(HISTORY_MAX_DAYS, sizeof(*local));
-        size_t count = 0;
-        esp_err_t result = local
-                               ? touch_history_load(local, HISTORY_MAX_DAYS, &count)
-                               : ESP_ERR_NO_MEM;
-        portENTER_CRITICAL(&s_state_lock);
-        if (result == ESP_OK) {
-            memcpy(s_services.history, local, sizeof(s_services.history));
-            s_services.history_count = count;
-            s_history_refresh_completed_generation = load_generation;
-            /* Metadata can represent a newly finalised session in an
-             * existing noon-day. Invalidate the one compact trace cache so
-             * the selected channel is never stale after Refresh. */
-            memset(&s_services.history_trace, 0,
-                   sizeof(s_services.history_trace));
-            s_services.history_trace_day[0] = '\0';
-            s_history_trace_requested_day[0] = '\0';
-            s_services.history_trace_busy = false;
-            s_history_trace_request_generation++;
-        } else {
-            /* Never present a cached list as if a failed refresh were
-             * current; in particular, that could hide the night which just
-             * finished recording. */
-            s_services.history_count = 0;
-        }
-        s_services.history_result = result;
-        /* A therapy stop can make metadata stale while this read is still in
-         * flight. Queue exactly one follow-up generation rather than either
-         * losing the new night or spinning retries after an ordinary error. */
-        bool rerun = s_history_refresh_generation != load_generation &&
-                     s_history_refresh_generation !=
-                         s_history_refresh_completed_generation &&
-                     !s_state.therapy && s_history_worker_task;
-        if (rerun) {
-            s_history_refresh_started_generation =
-                s_history_refresh_generation;
-        }
-        s_services.history_busy = rerun;
-        s_services.history_version++;
-        s_services.history_metadata_version++;
-        portEXIT_CRITICAL(&s_state_lock);
-        free(local);
-        if (rerun) xTaskNotifyGive(s_history_worker_task);
-    }
-}
-#endif
-
-static void start_history_load(void)
-{
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-    /* Keep the seeded preview history intact. QEMU does not emulate SDMMC. */
-    return;
-#else
-    bool notify_worker = false;
-    bool worker_unavailable = false;
-    bool recording_active = bsp_display_is_therapy_active();
-    portENTER_CRITICAL(&s_state_lock);
-    bool busy = s_services.history_busy;
-    bool refresh_required = s_history_refresh_generation !=
-                            s_history_refresh_completed_generation;
-    if (!busy && refresh_required && recording_active) {
-        /* Never wait through an active therapy session. Keep an existing
-         * cached list visible; on a first visit publish the truthful busy
-         * state immediately and let the next post-stop entry refresh it. */
-        if (s_services.history_count == 0) {
-            s_services.history_result = ESP_ERR_INVALID_STATE;
-            s_services.history_version++;
-            s_services.history_metadata_version++;
-        }
-    } else if (!busy && refresh_required && s_history_worker_task) {
-        s_services.history_busy = true;
-        s_history_refresh_started_generation = s_history_refresh_generation;
-        notify_worker = true;
-    } else if (!busy && refresh_required) {
-        s_services.history_result = ESP_ERR_NO_MEM;
-        s_services.history_version++;
-        s_services.history_metadata_version++;
-        worker_unavailable = true;
-    }
-    portEXIT_CRITICAL(&s_state_lock);
-    if (notify_worker) xTaskNotifyGive(s_history_worker_task);
-    if (worker_unavailable)
-        bsp_display_set_notice("Unable to start history refresh");
-#endif
-}
-
-static void request_history_refresh(void)
-{
-#if !CONFIG_SOMNOTRACE_BOARD_QEMU
-    portENTER_CRITICAL(&s_state_lock);
-    s_history_refresh_generation++;
-    portEXIT_CRITICAL(&s_state_lock);
-#endif
-    start_history_load();
 }
 
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
@@ -2240,76 +1928,6 @@ static void keyboard_sheet_action_cb(lv_event_t *event)
     close_keyboard_sheet(cancel);
 }
 
-static void history_row_cb(lv_event_t *event)
-{
-    int selection = (int)(intptr_t)lv_event_get_user_data(event);
-    char selected_day[9] = {0};
-    /* Resolve the tap against the snapshot which actually painted this row.
-     * The live worker state may already contain a newly inserted night while
-     * the visible frame is still up to one service tick behind. */
-    if (selection >= 0 &&
-        selection < (int)s_render_services->history_count) {
-        strlcpy(s_history_selected_day,
-                s_render_services->history[selection].day,
-                sizeof(s_history_selected_day));
-        strlcpy(selected_day, s_history_selected_day, sizeof(selected_day));
-    } else {
-        s_history_selected_day[0] = '\0';
-    }
-    s_history_selection = selection;
-#if !CONFIG_SOMNOTRACE_BOARD_QEMU
-    queue_history_trace_load(selected_day, s_history_channel);
-#endif
-}
-
-static void refresh_cb(lv_event_t *event)
-{
-    (void)event;
-    request_history_refresh();
-}
-
-static void history_channel_cb(lv_event_t *event)
-{
-    int channel = (int)(intptr_t)lv_event_get_user_data(event);
-    if (channel < TOUCH_HISTORY_CHANNEL_FLOW ||
-        channel >= TOUCH_HISTORY_CHANNEL_COUNT) return;
-    s_history_channel = (touch_history_channel_t)channel;
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-    /* A previous channel may have queued a frame which has not reached the
-     * virtual panel yet. This selection supersedes its acceptance signal. */
-    s_qemu_history_frame_pending_channel = UINT8_MAX;
-    portENTER_CRITICAL(&s_state_lock);
-    if (s_history_selected_day[0]) {
-        strlcpy(s_services.history_trace_day, s_history_selected_day,
-                sizeof(s_services.history_trace_day));
-        s_services.history_trace.channel = s_history_channel;
-        memcpy(s_services.history_trace.points,
-               s_qemu_history_traces[s_history_channel],
-               sizeof(s_services.history_trace.points));
-        for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i)
-            s_services.history_trace.upper_points[i] =
-                TOUCH_HISTORY_TRACE_MISSING;
-        if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) {
-            memcpy(s_services.history_trace.upper_points,
-                   s_qemu_history_flow_upper,
-                   sizeof(s_services.history_trace.upper_points));
-        }
-        s_services.history_trace.count = TOUCH_HISTORY_TRACE_POINTS;
-        s_services.history_trace.start_ms = 0;
-        s_services.history_trace.end_ms = 0;
-        s_services.history_trace.has_data = true;
-        s_services.history_trace.loaded = true;
-        s_services.history_trace_result = ESP_OK;
-        s_services.history_trace_busy = false;
-        s_services.history_version++;
-    }
-    portEXIT_CRITICAL(&s_state_lock);
-    ESP_LOGI(TAG, "emulated touch selected history channel %d", channel);
-#else
-    queue_history_trace_load(s_history_selected_day, s_history_channel);
-#endif
-}
-
 static void reboot_task(void *arg)
 {
     bool from_wifi_save = (intptr_t)arg == 1;
@@ -2499,6 +2117,9 @@ static void set_active_page(int page)
         close_manage_dialog();
         teardown_rendered_manage_destination();
     }
+    if (previous_page == 1 && s_history_controller)
+        (void)touch_history_controller_set_active(
+            s_history_controller, false);
     for (int i = 0; i < 3; ++i) {
         bool selected = i == page;
         set_hidden(s_pages[i], !selected);
@@ -2526,7 +2147,13 @@ static void set_active_page(int page)
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
     ESP_LOGI(TAG, "emulated touch selected page %u", (unsigned)page);
 #endif
-    if (page == 1) start_history_load();
+    if (page == 1 && s_history_controller) {
+        esp_err_t result = touch_history_controller_set_active(
+            s_history_controller, true);
+        if (result != ESP_OK)
+            ESP_LOGW(TAG, "activate rich History: %s", esp_err_to_name(result));
+        __atomic_store_n(&s_history_apply_scheduled, true, __ATOMIC_RELEASE);
+    }
 }
 
 static void nav_cb(lv_event_t *event)
@@ -2590,12 +2217,36 @@ static void status_tray_route_cb(lv_event_t *event)
     set_active_page(2);
 }
 
-static void history_load_more_cb(lv_event_t *event)
+static void history_controller_changed(void *context)
 {
-    (void)event;
-    if (s_history_revealed < HISTORY_MAX_DAYS) {
-        size_t next = s_history_revealed + 7;
-        s_history_revealed = next < HISTORY_MAX_DAYS ? next : HISTORY_MAX_DAYS;
+    (void)context;
+    /* This callback also runs on the History worker. It only schedules a
+     * future LVGL-thread apply; task notification index 0 is deliberately not
+     * used because the RGB driver owns it for its VSYNC handshake. */
+    __atomic_store_n(&s_history_apply_scheduled, true, __ATOMIC_RELEASE);
+}
+
+static void history_route_card(void *context)
+{
+    (void)context;
+    set_manage_section(MANAGE_STORAGE);
+    set_active_page(2);
+}
+
+static void apply_history_controller_if_needed(void)
+{
+    if (!s_history_controller || !s_history_ui || s_active_page != 1) return;
+    bool scheduled = __atomic_exchange_n(
+        &s_history_apply_scheduled, false, __ATOMIC_ACQ_REL);
+    uint32_t revision = touch_history_controller_revision(s_history_controller);
+    if (!scheduled && revision == s_history_rendered_revision) return;
+    esp_err_t result = touch_history_controller_apply(
+        s_history_controller, s_history_ui);
+    if (result == ESP_OK) {
+        s_history_rendered_revision = revision;
+    } else {
+        __atomic_store_n(&s_history_apply_scheduled, true, __ATOMIC_RELEASE);
+        ESP_LOGW(TAG, "apply rich History UI: %s", esp_err_to_name(result));
     }
 }
 
@@ -2947,61 +2598,6 @@ static void flow_plot_draw_cb(lv_event_t *event)
     }
 }
 
-static void history_trace_draw_cb(lv_event_t *event)
-{
-    lv_obj_draw_part_dsc_t *part = lv_event_get_draw_part_dsc(event);
-    lv_obj_t *chart = lv_event_get_target(event);
-    if (!part || part->part != LV_PART_ITEMS || !part->p1 || !part->p2 ||
-        !part->line_dsc) {
-        return;
-    }
-
-    /* Flow has two independently connected series: the per-time-bin minimum
-     * and maximum. Do not apply the single-trace under-fill to either edge;
-     * doing so would visually merge them back into a fabricated waveform. */
-    if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) return;
-
-    /* Match the handoff's translucent area beneath each trace segment. A line
-     * mask keeps the fill below the waveform and a fade makes it disappear at
-     * the bottom of the overnight card. */
-    lv_draw_mask_line_param_t line_mask;
-    lv_draw_mask_line_points_init(&line_mask,
-                                  part->p1->x, part->p1->y,
-                                  part->p2->x, part->p2->y,
-                                  LV_DRAW_MASK_LINE_SIDE_BOTTOM);
-    int16_t line_mask_id = lv_draw_mask_add(&line_mask, NULL);
-
-    lv_draw_mask_fade_param_t fade_mask;
-    lv_coord_t height = lv_obj_get_height(chart);
-    lv_draw_mask_fade_init(&fade_mask, &chart->coords,
-                           LV_OPA_COVER, chart->coords.y1 + height / 8,
-                           LV_OPA_TRANSP, chart->coords.y2);
-    int16_t fade_mask_id = lv_draw_mask_add(&fade_mask, NULL);
-
-    lv_draw_rect_dsc_t fill;
-    lv_draw_rect_dsc_init(&fill);
-    fill.bg_opa = LV_OPA_30;
-    fill.bg_color = part->line_dsc->color;
-    lv_coord_t x1 = LV_MIN(part->p1->x, part->p2->x);
-    lv_coord_t x2 = LV_MAX(part->p1->x, part->p2->x);
-    /* Adjacent line segments share an endpoint. Keep the fill span half-open
-     * so that boundary pixel is alpha-blended exactly once, avoiding the
-     * bright vertical comb that otherwise appears in RGB565. */
-    if (x2 > x1) x2--;
-    lv_area_t area = {
-        .x1 = x1,
-        .x2 = x2,
-        .y1 = LV_MIN(part->p1->y, part->p2->y),
-        .y2 = chart->coords.y2,
-    };
-    lv_draw_rect(part->draw_ctx, &fill, &area);
-
-    lv_draw_mask_remove_id(line_mask_id);
-    lv_draw_mask_remove_id(fade_mask_id);
-    lv_draw_mask_free_param(&line_mask);
-    lv_draw_mask_free_param(&fade_mask);
-}
-
 static void build_home_page(lv_obj_t *home)
 {
     s_therapy_hero = make_card(home, UI_PANEL_X, UI_PANEL_Y, 680, 132);
@@ -3080,243 +2676,28 @@ static void build_home_page(lv_obj_t *home)
 
 static void build_history_page(lv_obj_t *history)
 {
-    lv_obj_t *list = make_card(history, UI_PANEL_X, UI_PANEL_Y, 330, UI_PANEL_H);
-    lv_obj_set_style_radius(list, 28, 0);
-    lv_obj_set_style_pad_all(list, 0, 0);
-    make_label(list, "Nights", 22, 10, 180,
-               FONT_ROW_TITLE, COLOR_TEXT);
-    s_history_status = make_label(list, "None loaded", 22, 32, 180,
-                                  FONT_BODY_SMALL, COLOR_TERTIARY);
-    s_history_refresh = make_touch_button(list, 214, 8, 104, 44, "Refresh",
-                                          COLOR_CONTROL, refresh_cb, 0);
-    lv_obj_set_style_radius(s_history_refresh, 22, 0);
-    s_history_refresh_label = lv_obj_get_child(s_history_refresh, 0);
-    lv_obj_set_style_text_font(s_history_refresh_label, FONT_BUTTON_COMPACT, 0);
-
-    s_history_list_scroll = make_plain_container(list, 8, 60, 314, 376);
-    lv_obj_add_flag(s_history_list_scroll, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(s_history_list_scroll, LV_OBJ_FLAG_SCROLL_ELASTIC);
-    lv_obj_set_scroll_dir(s_history_list_scroll, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(s_history_list_scroll, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_width(s_history_list_scroll, 5, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_color(s_history_list_scroll, lv_color_hex(COLOR_TERTIARY),
-                              LV_PART_SCROLLBAR);
-    for (int i = 0; i < HISTORY_MAX_DAYS; ++i) {
-        s_history_rows[i] = make_touch_button(s_history_list_scroll, 0, i * 70,
-                                              298, 66, "", COLOR_PANEL,
-                                              history_row_cb, i);
-        lv_obj_set_style_radius(s_history_rows[i], 20, 0);
-        lv_obj_set_style_pad_all(s_history_rows[i], 0, 0);
-        s_history_row_dates[i] = lv_obj_get_child(s_history_rows[i], 0);
-        /* make_touch_button() centers its label.  Clear that retained align
-         * before setting the two-line night-row geometry, otherwise each
-         * date-text update re-centres the label over the subtitle. */
-        lv_obj_set_align(s_history_row_dates[i], LV_ALIGN_TOP_LEFT);
-        lv_obj_set_pos(s_history_row_dates[i], 16, 9);
-        lv_obj_set_width(s_history_row_dates[i], 205);
-        lv_obj_set_style_text_font(s_history_row_dates[i], FONT_ROW_TITLE, 0);
-        lv_obj_set_style_text_align(s_history_row_dates[i], LV_TEXT_ALIGN_LEFT, 0);
-        s_history_row_subtitles[i] = make_label(s_history_rows[i], "", 16, 36, 205,
-                                                FONT_BODY_SMALL,
-                                                COLOR_TERTIARY);
-        s_history_row_durations[i] = make_label(s_history_rows[i], "—", 218, 20, 64,
-                                                FONT_BODY_LARGE,
-                                                COLOR_SECONDARY);
-        lv_obj_set_style_text_align(s_history_row_durations[i], LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_add_flag(s_history_rows[i], LV_OBJ_FLAG_HIDDEN);
+    s_history_host = make_plain_container(
+        history, UI_PANEL_X, UI_PANEL_Y,
+        TOUCH_HISTORY_UI_WIDTH, TOUCH_HISTORY_UI_HEIGHT);
+    if (!s_history_controller) {
+        make_label(s_history_host, "History is unavailable", 24, 24, 500,
+                   FONT_SCREEN_TITLE, COLOR_FAULT);
+        return;
     }
-    s_history_load_more = make_touch_button(s_history_list_scroll, 0,
-                                             (int)s_history_revealed * 70,
-                                             298, 60, "Load 7 more",
-                                             COLOR_CONTROL,
-                                             history_load_more_cb, 0);
-    lv_obj_set_style_radius(s_history_load_more, 20, 0);
-    lv_obj_add_flag(s_history_load_more, LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_t *detail = make_card(history, 358, UI_PANEL_Y, 650, UI_PANEL_H);
-    lv_obj_set_style_radius(detail, 28, 0);
-    lv_obj_set_style_pad_all(detail, 0, 0);
-    s_history_detail_content = make_plain_container(detail, 0, 0, 650,
-                                                     UI_PANEL_H);
-    s_history_detail_title = make_label(s_history_detail_content, "Choose a night", 24, 17, 390,
-                                        FONT_SCREEN_TITLE, COLOR_TEXT);
-    s_history_detail_subtitle = make_label(s_history_detail_content,
-                                           "Select a date to review its summary",
-                                           24, 45, 410,
-                                           FONT_BODY,
-                                           COLOR_SECONDARY);
-    lv_obj_t *badge = make_card(s_history_detail_content, 444, 17, 176, 38);
-    lv_obj_set_style_radius(badge, 19, 0);
-    lv_obj_set_style_pad_all(badge, 0, 0);
-    s_history_mask_dot = make_status_dot(badge, 14, 15, 8);
-    set_dot_tone(s_history_mask_dot, COLOR_DISABLED, false);
-    s_history_mask_badge = make_label(badge, "Mask on/off · —", 32, 9, 132,
-                                      FONT_BODY_SMALL, COLOR_SECONDARY);
-    lv_obj_set_style_text_align(s_history_mask_badge, LV_TEXT_ALIGN_LEFT, 0);
-
-    make_history_metric(s_history_detail_content, 24, "USAGE", "h",
-                        &s_history_usage_label, &s_history_metric_units[0]);
-    /* This value is the machine's index, not an independently scored result. */
-    make_history_metric(s_history_detail_content, 175, "AHI", "/h",
-                        &s_history_ahi_label, &s_history_metric_units[1]);
-    make_history_metric(s_history_detail_content, 326, "PRESSURE 95%", "cmH₂O",
-                        &s_history_pressure_label, &s_history_metric_units[2]);
-    make_history_metric(s_history_detail_content, 477, "LEAK 95%", "L/min",
-                        &s_history_leak_label, &s_history_metric_units[3]);
-
-    lv_obj_t *events = make_card(s_history_detail_content, 24, 176, 250, 198);
-    lv_obj_set_style_bg_color(events, lv_color_hex(COLOR_CARD), 0);
-    lv_obj_set_style_radius(events, 22, 0);
-    lv_obj_set_style_pad_all(events, 14, 0);
-    make_label(events, "EVENTS PER HOUR", 0, 0, 222,
-               FONT_METRIC_LABEL, COLOR_TERTIARY);
-    static const char *event_names[] = { "Obstructive", "Central", "Hypopnea", "RERA" };
-    for (int i = 0; i < 4; ++i) {
-        make_label(events, event_names[i], 0, 30 + i * 27, 86,
-                   FONT_BODY_SMALL, COLOR_SECONDARY);
-        s_history_event_bars[i] = lv_bar_create(events);
-        lv_obj_set_pos(s_history_event_bars[i], 90, 36 + i * 27);
-        lv_obj_set_size(s_history_event_bars[i], 84, 8);
-        lv_bar_set_range(s_history_event_bars[i], 0, 100);
-        lv_bar_set_value(s_history_event_bars[i], 0, LV_ANIM_OFF);
-        lv_obj_set_style_radius(s_history_event_bars[i], 4, LV_PART_MAIN);
-        lv_obj_set_style_radius(s_history_event_bars[i], 4, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(s_history_event_bars[i], lv_color_hex(COLOR_CONTROL),
-                                  LV_PART_MAIN);
-        lv_obj_set_style_bg_color(s_history_event_bars[i], lv_color_hex(COLOR_LIVE),
-                                  LV_PART_INDICATOR);
-        s_history_event_values[i] = make_label(events, "--", 180, 29 + i * 27, 42,
-                                               FONT_DATA_BODY, COLOR_TEXT);
-        lv_obj_set_style_text_align(s_history_event_values[i], LV_TEXT_ALIGN_RIGHT, 0);
+    const touch_history_ui_config_t config = {
+        .on_intent = touch_history_controller_handle_intent,
+        .intent_context = s_history_controller,
+    };
+    esp_err_t result = touch_history_ui_create(
+        s_history_host, &config, &s_history_ui);
+    if (result != ESP_OK) {
+        make_label(s_history_host, "History could not allocate its view",
+                   24, 24, 620, FONT_SCREEN_TITLE, COLOR_FAULT);
+        ESP_LOGE(TAG, "create rich History UI: %s", esp_err_to_name(result));
+        return;
     }
-
-    lv_obj_t *trace = make_card(s_history_detail_content, 286, 176, 334, 198);
-    lv_obj_set_style_bg_color(trace, lv_color_hex(COLOR_CARD), 0);
-    lv_obj_set_style_radius(trace, 22, 0);
-    lv_obj_set_style_pad_all(trace, 14, 0);
-    make_label(trace, "OVERNIGHT", 0, 0, 100,
-               FONT_METRIC_LABEL, COLOR_TERTIARY);
-    static const char *channels[] = { "Flow", "SpO₂", "Leak" };
-    static const int channel_x[] = { 112, 174, 242 };
-    static const int channel_w[] = { 56, 62, 50 };
-    for (int i = 0; i < 3; ++i) {
-        s_history_channel_buttons[i] = make_destination_button(
-            trace, channel_x[i], -6, channel_w[i], 32, channels[i],
-            i == 0 ? COLOR_INVERSE : COLOR_CONTROL,
-            history_channel_cb, i);
-        set_destination_surface(s_history_channel_buttons[i],
-                                i == 0 ? COLOR_INVERSE : COLOR_CONTROL,
-                                LV_OPA_COVER);
-        lv_obj_set_style_radius(s_history_channel_buttons[i], 16, 0);
-        lv_obj_set_style_text_font(lv_obj_get_child(s_history_channel_buttons[i], 0),
-                                   FONT_BUTTON_SMALL, 0);
-        if (i == 0) {
-            lv_obj_set_style_text_color(lv_obj_get_child(s_history_channel_buttons[i], 0),
-                                        lv_color_hex(COLOR_BASE), 0);
-        }
-    }
-    s_history_trace_chart = lv_chart_create(trace);
-    lv_obj_set_pos(s_history_trace_chart, 0, 38);
-    lv_obj_set_size(s_history_trace_chart, 306, 112);
-    lv_chart_set_type(s_history_trace_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_div_line_count(s_history_trace_chart, 0, 0);
-    lv_chart_set_point_count(s_history_trace_chart,
-                             TOUCH_HISTORY_TRACE_POINTS);
-    lv_chart_set_range(s_history_trace_chart, LV_CHART_AXIS_PRIMARY_Y, -60, 60);
-    lv_obj_set_style_bg_opa(s_history_trace_chart, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_history_trace_chart, 0, 0);
-    lv_obj_clear_flag(s_history_trace_chart, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_history_trace_chart, history_trace_draw_cb,
-                        LV_EVENT_DRAW_PART_BEGIN, NULL);
-    /* QEMU history is explicitly simulated at boot, so its acceptance frame
-     * may demonstrate the handoff's recorded-trace treatment without implying
-     * that summary-only data on real cards contains a waveform. */
-    for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i) {
-        s_history_trace_values[i] = LV_CHART_POINT_NONE;
-        s_history_trace_upper_values[i] = LV_CHART_POINT_NONE;
-    }
-    s_history_trace_series = lv_chart_add_series(
-        s_history_trace_chart, lv_color_hex(0x54f7f5),
-        LV_CHART_AXIS_PRIMARY_Y);
-    s_history_trace_upper_series = lv_chart_add_series(
-        s_history_trace_chart, lv_color_hex(0x54f7f5),
-        LV_CHART_AXIS_PRIMARY_Y);
-    lv_chart_set_ext_y_array(s_history_trace_chart, s_history_trace_series,
-                             s_history_trace_values);
-    lv_chart_set_ext_y_array(s_history_trace_chart,
-                             s_history_trace_upper_series,
-                             s_history_trace_upper_values);
-    lv_chart_set_x_start_point(s_history_trace_chart, s_history_trace_series, 0);
-    lv_chart_set_x_start_point(s_history_trace_chart,
-                               s_history_trace_upper_series, 0);
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-    for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i) {
-        s_history_trace_values[i] =
-            s_qemu_history_traces[TOUCH_HISTORY_CHANNEL_FLOW][i];
-        s_history_trace_upper_values[i] = s_qemu_history_flow_upper[i];
-    }
-#endif
-    lv_obj_set_style_line_width(s_history_trace_chart, 2, LV_PART_ITEMS);
-    lv_obj_set_style_size(s_history_trace_chart, 0, LV_PART_INDICATOR);
-    s_history_trace_baseline = lv_line_create(s_history_trace_chart);
-    lv_line_set_points(s_history_trace_baseline,
-                       s_history_trace_baseline_points, 2);
-    lv_obj_set_style_line_color(s_history_trace_baseline,
-                                lv_color_hex(COLOR_CONTROL), 0);
-    lv_obj_set_style_line_width(s_history_trace_baseline, 1, 0);
-    lv_obj_set_style_line_dash_width(s_history_trace_baseline, 3, 0);
-    lv_obj_set_style_line_dash_gap(s_history_trace_baseline, 9, 0);
-    lv_obj_clear_flag(s_history_trace_baseline,
-                      LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    s_history_trace_message = make_label(trace,
-                                         "No on-device flow trace for this night",
-                                         20, 78, 266, FONT_BODY_SMALL,
-                                         COLOR_SECONDARY);
-    lv_obj_set_style_text_align(s_history_trace_message, LV_TEXT_ALIGN_CENTER, 0);
-    s_history_trace_start = make_label(trace, "--:--", 0, 136, 60,
-                                       FONT_AXIS, COLOR_DISABLED);
-    s_history_trace_end = make_label(trace, "--:--", 246, 136, 60,
-                                     FONT_AXIS, COLOR_DISABLED);
-    lv_obj_set_style_text_align(s_history_trace_end, LV_TEXT_ALIGN_RIGHT, 0);
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-    lv_obj_add_flag(s_history_trace_message, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(s_history_trace_start, "23:04");
-    lv_label_set_text(s_history_trace_end, "06:16");
-#endif
-    make_label(s_history_detail_content,
-               "For trend review. Not a diagnosis or a prescription.",
-               24, 403, 596, FONT_BODY_SMALL, COLOR_TERTIARY);
-
-    s_history_empty = make_plain_container(detail, 0, 0, 650, UI_PANEL_H);
-    s_history_empty_glyph = lv_obj_create(s_history_empty);
-    lv_obj_set_pos(s_history_empty_glyph, 294, 92);
-    lv_obj_set_size(s_history_empty_glyph, 56, 56);
-    lv_obj_set_style_radius(s_history_empty_glyph, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(s_history_empty_glyph, 0, 0);
-    lv_obj_set_style_pad_all(s_history_empty_glyph, 0, 0);
-    lv_obj_clear_flag(s_history_empty_glyph, LV_OBJ_FLAG_SCROLLABLE);
-    make_label(s_history_empty_glyph, "!", 0, 12, 56,
-               FONT_SCREEN_TITLE, COLOR_SECONDARY);
-    lv_obj_set_style_text_align(lv_obj_get_child(s_history_empty_glyph, 0),
-                                LV_TEXT_ALIGN_CENTER, 0);
-    s_history_empty_title = make_label(s_history_empty, "Select a night", 72, 166, 500,
-                                       FONT_SCREEN_TITLE, COLOR_TEXT);
-    lv_obj_set_style_text_align(s_history_empty_title, LV_TEXT_ALIGN_CENTER, 0);
-    s_history_empty_body = make_label(s_history_empty,
-                                      "Choose a night on the left to see its summary and overnight trace.",
-                                      82, 204, 480, FONT_BODY,
-                                      COLOR_SECONDARY);
-    lv_obj_set_style_text_align(s_history_empty_body, LV_TEXT_ALIGN_CENTER, 0);
-    s_history_empty_action = make_touch_button(s_history_empty, 222, 282, 200, 60,
-                                               "Refresh history", COLOR_INVERSE,
-                                               refresh_cb, 0);
-    lv_obj_set_style_radius(s_history_empty_action, 30, 0);
-    s_history_empty_action_label = lv_obj_get_child(s_history_empty_action, 0);
-    lv_obj_set_style_text_color(s_history_empty_action_label,
-                                lv_color_hex(COLOR_BASE), 0);
-    lv_obj_add_flag(s_history_empty_action, LV_OBJ_FLAG_HIDDEN);
+    s_history_apply_scheduled = true;
 }
-
 static lv_obj_t *make_manage_section(lv_obj_t *section, int index,
                                      const char *title, const char *subtitle)
 {
@@ -4588,542 +3969,6 @@ static void build_ui(void)
     lv_obj_invalidate(screen);
 }
 
-static bool history_format_day(const char *day, bool long_form,
-                               char *text, size_t text_size)
-{
-    int year = 0, month = 0, date = 0;
-    if (!day || strlen(day) != 8 ||
-        sscanf(day, "%4d%2d%2d", &year, &month, &date) != 3 ||
-        month < 1 || month > 12 || date < 1 || date > 31) {
-        snprintf(text, text_size, "%s", day && day[0] ? day : "Unknown date");
-        return false;
-    }
-    static const char *weekday_short[] = {
-        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-    };
-    static const char *weekday_long[] = {
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
-    };
-    static const char *month_short[] = {
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    };
-    static const char *month_long[] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    };
-    struct tm parsed = {
-        .tm_year = year - 1900,
-        .tm_mon = month - 1,
-        .tm_mday = date,
-        .tm_hour = 12,
-        .tm_isdst = -1,
-    };
-    if (mktime(&parsed) == (time_t)-1) {
-        snprintf(text, text_size, "%04d-%02d-%02d", year, month, date);
-        return false;
-    }
-    if (long_form) {
-        snprintf(text, text_size, "%s %d %s %d", weekday_long[parsed.tm_wday],
-                 date, month_long[month - 1], year);
-    } else {
-        snprintf(text, text_size, "%s %d %s", weekday_short[parsed.tm_wday],
-                 date, month_short[month - 1]);
-    }
-    return true;
-}
-
-static void history_show_empty(const char *glyph, const char *title,
-                               const char *body, const char *action,
-                               uint32_t tone)
-{
-    set_hidden(s_history_detail_content, true);
-    set_hidden(s_history_empty, false);
-    set_label_text_if_changed(lv_obj_get_child(s_history_empty_glyph, 0), glyph);
-    set_label_text_if_changed(s_history_empty_title, title);
-    set_label_text_if_changed(s_history_empty_body, body);
-    set_style_color_if_changed(s_history_empty_glyph, LV_STYLE_BG_COLOR,
-                               tone, 0);
-    if (action) {
-        set_label_text_if_changed(s_history_empty_action_label, action);
-        set_hidden(s_history_empty_action, false);
-    } else {
-        set_hidden(s_history_empty_action, true);
-    }
-}
-
-static void history_set_metric(lv_obj_t *value, lv_obj_t *unit,
-                               bool available, const char *formatted)
-{
-    set_label_text_if_changed(value, available ? formatted : "n/a");
-    set_style_color_if_changed(value, LV_STYLE_TEXT_COLOR,
-                               available ? COLOR_TEXT : COLOR_DISABLED, 0);
-    set_hidden(unit, !available);
-}
-
-static void refresh_history_widgets(const ui_service_state_t *services)
-{
-    static bool render_valid;
-    static bool rendered_busy;
-    static int rendered_selection = -2;
-    static size_t rendered_revealed;
-    static touch_history_channel_t rendered_channel = TOUCH_HISTORY_CHANNEL_COUNT;
-    bool version_changed = services->history_version != s_seen_history_version;
-    bool metadata_changed = services->history_metadata_version !=
-                            s_seen_history_metadata_version;
-    if (version_changed) {
-        s_seen_history_version = services->history_version;
-        s_seen_history_metadata_version = services->history_metadata_version;
-        s_history_selection = -1;
-        if (!metadata_changed && s_history_selected_day[0]) {
-            for (size_t i = 0; i < services->history_count; ++i) {
-                if (!strcmp(s_history_selected_day, services->history[i].day)) {
-                    s_history_selection = (int)i;
-                    break;
-                }
-            }
-            if (s_history_selection < 0) s_history_selected_day[0] = '\0';
-        }
-        if (services->history_count == 0) {
-            s_history_selection = -1;
-            s_history_selected_day[0] = '\0';
-        } else if (metadata_changed || s_history_selection < 0) {
-            /* Every completed metadata refresh represents a newly opened or
-             * newly finalised History view, so show its newest-first row.
-             * Trace-only updates still preserve an explicit older choice. */
-            s_history_selection = 0;
-            strlcpy(s_history_selected_day, services->history[0].day,
-                    sizeof(s_history_selected_day));
-        }
-#if !CONFIG_SOMNOTRACE_BOARD_QEMU
-        if (metadata_changed && s_history_selection >= 0)
-            queue_history_trace_load(s_history_selected_day, s_history_channel);
-#endif
-    }
-    bool initial_render = !render_valid;
-    bool busy_changed = initial_render ||
-                        rendered_busy != services->history_busy;
-    bool selection_changed = initial_render ||
-                             rendered_selection != s_history_selection;
-    bool revealed_changed = initial_render ||
-                            rendered_revealed != s_history_revealed;
-    bool channel_changed = initial_render ||
-                           rendered_channel != s_history_channel;
-    if (!version_changed && !busy_changed && !selection_changed &&
-        !revealed_changed && !channel_changed) return;
-
-    bool list_changed = initial_render || metadata_changed ||
-                        selection_changed || revealed_changed;
-    bool view_state_changed = initial_render || metadata_changed ||
-                              busy_changed || selection_changed;
-    bool summary_changed = initial_render || metadata_changed ||
-                           selection_changed || channel_changed;
-    bool trace_changed = initial_render || version_changed ||
-                         selection_changed || channel_changed;
-    render_valid = true;
-    rendered_busy = services->history_busy;
-    rendered_selection = s_history_selection;
-    rendered_revealed = s_history_revealed;
-    rendered_channel = s_history_channel;
-
-    if (channel_changed) {
-        for (int i = 0; i < TOUCH_HISTORY_CHANNEL_COUNT; ++i) {
-            bool active = i == s_history_channel;
-            set_destination_surface(s_history_channel_buttons[i],
-                                    active ? COLOR_INVERSE : COLOR_CONTROL,
-                                    LV_OPA_COVER);
-            set_style_color_if_changed(
-                lv_obj_get_child(s_history_channel_buttons[i], 0),
-                LV_STYLE_TEXT_COLOR,
-                active ? COLOR_BASE : COLOR_SECONDARY, 0);
-        }
-    }
-
-    bool not_loaded = services->history_version == 0 && !services->history_busy;
-    bool card_busy = !services->history_busy && services->history_count == 0 &&
-                     (services->history_result == ESP_ERR_INVALID_STATE ||
-                      services->history_result == ESP_ERR_TIMEOUT);
-    bool read_error = !services->history_busy && services->history_version > 0 &&
-                      services->history_count == 0 &&
-                      services->history_result != ESP_OK && !card_busy;
-    bool memory_error = read_error &&
-                        services->history_result == ESP_ERR_NO_MEM;
-    size_t shown = services->history_count < s_history_revealed
-                       ? services->history_count : s_history_revealed;
-
-    if (busy_changed || metadata_changed || revealed_changed) {
-        if (services->history_busy) {
-            set_label_text_if_changed(s_history_status, "Reading...");
-            set_label_text_if_changed(s_history_refresh_label, "Reading...");
-            set_control_disabled(s_history_refresh, true);
-        } else {
-            if (services->history_count > s_history_revealed) {
-                set_label_text_fmt_if_changed(
-                    s_history_status, "Latest %u · showing %u",
-                    (unsigned)HISTORY_MAX_DAYS, (unsigned)shown);
-            } else if (services->history_count > 0) {
-                set_label_text_fmt_if_changed(
-                    s_history_status, "%u recent night%s",
-                    (unsigned)services->history_count,
-                    services->history_count == 1 ? "" : "s");
-            } else {
-                set_label_text_if_changed(s_history_status, "None loaded");
-            }
-            set_label_text_if_changed(s_history_refresh_label,
-                                      read_error ? "Retry" : "Refresh");
-            set_control_disabled(s_history_refresh, false);
-        }
-    }
-
-    if (list_changed) {
-        for (int i = 0; i < HISTORY_MAX_DAYS; ++i) {
-            if (i < (int)shown) {
-                const touch_history_day_t *day = &services->history[i];
-                char date_text[32];
-                history_format_day(day->day, false, date_text,
-                                   sizeof(date_text));
-                set_label_text_if_changed(s_history_row_dates[i], date_text);
-                set_label_text_fmt_if_changed(
-                    s_history_row_subtitles[i], "%d session%s",
-                    day->sessions, day->sessions == 1 ? "" : "s");
-                if (day->has_usage) {
-                    set_label_text_fmt_if_changed(
-                        s_history_row_durations[i], "%d:%02d",
-                        day->usage_min / 60, day->usage_min % 60);
-                } else {
-                    set_label_text_if_changed(s_history_row_durations[i], "—");
-                }
-                set_hidden(s_history_rows[i], false);
-            } else {
-                set_hidden(s_history_rows[i], true);
-            }
-            bool row_selected = i == s_history_selection;
-            set_button_surface(s_history_rows[i],
-                               row_selected ? COLOR_INVERSE : COLOR_ROW,
-                               LV_OPA_COVER);
-            set_style_num_if_changed(
-                s_history_rows[i], LV_STYLE_SHADOW_WIDTH,
-                UI_DECORATIVE_SHADOW_WIDTH(row_selected ? 18 : 0), 0);
-            set_style_num_if_changed(s_history_rows[i], LV_STYLE_SHADOW_OFS_Y,
-                                     row_selected ? 6 : 0, 0);
-            set_style_color_if_changed(s_history_rows[i], LV_STYLE_SHADOW_COLOR,
-                                       COLOR_BASE, 0);
-            set_style_num_if_changed(
-                s_history_rows[i], LV_STYLE_SHADOW_OPA,
-                UI_DECORATIVE_SHADOW_OPA(
-                    row_selected ? LV_OPA_60 : LV_OPA_TRANSP),
-                0);
-            set_style_color_if_changed(
-                s_history_row_dates[i], LV_STYLE_TEXT_COLOR,
-                row_selected ? COLOR_BASE : COLOR_TEXT, 0);
-            set_style_color_if_changed(
-                s_history_row_subtitles[i], LV_STYLE_TEXT_COLOR,
-                row_selected ? COLOR_CONTROL : COLOR_TERTIARY, 0);
-            set_style_color_if_changed(
-                s_history_row_durations[i], LV_STYLE_TEXT_COLOR,
-                row_selected ? COLOR_CONTROL : COLOR_SECONDARY, 0);
-        }
-        lv_coord_t load_more_y = (lv_coord_t)((int)shown * 70);
-        if (lv_obj_get_y(s_history_load_more) != load_more_y)
-            lv_obj_set_y(s_history_load_more, load_more_y);
-        if (shown < services->history_count) {
-            set_label_text_if_changed(lv_obj_get_child(s_history_load_more, 0),
-                                      "Load 7 more");
-            set_hidden(s_history_load_more, false);
-        } else {
-            set_hidden(s_history_load_more, true);
-        }
-    }
-
-    /* A background refresh does not blank a valid cached night. Only the
-     * small status/Refresh chrome changes until new metadata is published. */
-    bool selected = s_history_selection >= 0 &&
-                    s_history_selection < (int)services->history_count;
-    if (!selected) {
-        if (view_state_changed) {
-            if (services->history_busy) {
-                history_show_empty("...", "Reading history...",
-                                   "Loading nights from the microSD card.", NULL,
-                                   COLOR_CONTROL);
-            } else if (not_loaded) {
-                history_show_empty("^", "History not loaded",
-                                   "Refresh to read recorded nights from the microSD card.",
-                                   "Refresh history", COLOR_CONTROL);
-            } else if (card_busy) {
-                history_show_empty("!", "microSD is busy",
-                                   "The card is recording right now. History is available again once the session ends.",
-                                   NULL, COLOR_AMBER);
-            } else if (memory_error) {
-                history_show_empty("!", "History temporarily unavailable",
-                                   "Not enough working memory to start the history reader. Live therapy is unaffected.",
-                                   "Retry", COLOR_AMBER);
-            } else if (read_error) {
-                history_show_empty("!", "Could not read the card",
-                                   "The microSD card did not respond. Live therapy is unaffected.",
-                                   "Retry", COLOR_FAULT);
-            } else if (services->history_count == 0) {
-                history_show_empty("o", "No completed sessions yet",
-                                   "Nights appear here once therapy has run and the session has been written to the card.",
-                                   NULL, COLOR_CONTROL);
-            } else {
-                history_show_empty("o", "Select a night",
-                                   "Choose a night on the left to see its summary and overnight trace.",
-                                   NULL, COLOR_CONTROL);
-            }
-        }
-        return;
-    }
-
-    if (view_state_changed) {
-        set_hidden(s_history_empty, true);
-        set_hidden(s_history_detail_content, false);
-    }
-    const touch_history_day_t *day = &services->history[s_history_selection];
-    if (summary_changed) {
-        char long_date[64];
-        history_format_day(day->day, true, long_date, sizeof(long_date));
-        set_label_text_if_changed(s_history_detail_title, long_date);
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-        set_label_text_fmt_if_changed(s_history_detail_subtitle,
-                                      "%d session%s · 23:04 – 06:16",
-                                      day->sessions,
-                                      day->sessions == 1 ? "" : "s");
-#else
-        if (day->sessions > 1) {
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
-                set_label_text_fmt_if_changed(
-                    s_history_detail_subtitle,
-                    "%d sessions · O₂ Ring overnight track", day->sessions);
-            else
-                set_label_text_fmt_if_changed(
-                    s_history_detail_subtitle,
-                    "%d sessions · longest session shown", day->sessions);
-        } else {
-            set_label_text_fmt_if_changed(
-                s_history_detail_subtitle, "%d session%s", day->sessions,
-                day->sessions == 1 ? "" : "s");
-        }
-#endif
-
-        char formatted[24];
-        if (day->has_mask_off_count) {
-            set_label_text_fmt_if_changed(s_history_mask_badge,
-                                          "Mask on/off · %d",
-                                          day->mask_off_count);
-            set_dot_tone(s_history_mask_dot, COLOR_LIVE, true);
-        } else {
-            set_label_text_if_changed(s_history_mask_badge,
-                                      "Mask on/off · —");
-            set_dot_tone(s_history_mask_dot, COLOR_DISABLED, false);
-        }
-        if (day->has_usage) {
-            snprintf(formatted, sizeof(formatted), "%.1f",
-                     day->usage_min / 60.0f);
-        } else {
-            strlcpy(formatted, "n/a", sizeof(formatted));
-        }
-        history_set_metric(s_history_usage_label, s_history_metric_units[0],
-                           day->has_usage, formatted);
-        if (day->has_ahi)
-            snprintf(formatted, sizeof(formatted), "%.1f", day->ahi);
-        history_set_metric(s_history_ahi_label, s_history_metric_units[1],
-                           day->has_ahi, formatted);
-        if (day->has_pressure_p95)
-            snprintf(formatted, sizeof(formatted), "%.1f", day->pressure_p95);
-        history_set_metric(s_history_pressure_label,
-                           s_history_metric_units[2],
-                           day->has_pressure_p95, formatted);
-        if (day->has_leak_p95)
-            snprintf(formatted, sizeof(formatted), "%.1f", day->leak_p95);
-        history_set_metric(s_history_leak_label, s_history_metric_units[3],
-                           day->has_leak_p95, formatted);
-
-        const float event_values[] = {
-            day->oai, day->cai, day->hi, day->rera
-        };
-        const bool event_available[] = {
-            day->has_oai, day->has_cai, day->has_hi, day->has_rera
-        };
-        float event_max = 0.0f;
-        for (int i = 0; i < 4; ++i) {
-            if (event_available[i] && event_values[i] > event_max)
-                event_max = event_values[i];
-        }
-        for (int i = 0; i < 4; ++i) {
-            int pct = 0;
-            if (event_available[i]) {
-                set_label_text_fmt_if_changed(s_history_event_values[i],
-                                              "%.1f", event_values[i]);
-                pct = event_max > 0.0f
-                          ? (int)lroundf(event_values[i] * 100.0f / event_max)
-                          : 0;
-                set_style_color_if_changed(s_history_event_values[i],
-                                           LV_STYLE_TEXT_COLOR, COLOR_TEXT, 0);
-            } else {
-                set_label_text_if_changed(s_history_event_values[i], "—");
-                set_style_color_if_changed(s_history_event_values[i],
-                                           LV_STYLE_TEXT_COLOR,
-                                           COLOR_DISABLED, 0);
-            }
-            if (lv_bar_get_value(s_history_event_bars[i]) != pct)
-                lv_bar_set_value(s_history_event_bars[i], pct, LV_ANIM_OFF);
-        }
-    }
-
-    if (!trace_changed) return;
-
-    /* Populate external series arrays directly. The previous set-all followed
-     * by up to 96 set-next calls invalidated the same chart on every point. */
-    for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i) {
-        s_history_trace_values[i] = LV_CHART_POINT_NONE;
-        s_history_trace_upper_values[i] = LV_CHART_POINT_NONE;
-    }
-    const touch_history_trace_t *trace = &services->history_trace;
-    size_t trace_count = trace->count < TOUCH_HISTORY_TRACE_POINTS
-                             ? trace->count : TOUCH_HISTORY_TRACE_POINTS;
-    bool trace_request_matches =
-        !strcmp(services->history_trace_day, day->day) &&
-        trace->channel == s_history_channel;
-    bool trace_available = trace_request_matches && trace->loaded &&
-                           trace->has_data && trace_count > 1;
-    if (trace_available) {
-        int range_min = 0;
-        int range_max = 0;
-        if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) {
-            int range = 30;
-            for (size_t i = 0; i < trace_count; ++i) {
-                const int values[] = {
-                    trace->points[i], trace->upper_points[i]
-                };
-                for (size_t edge = 0; edge < 2; ++edge) {
-                    int value = values[edge];
-                    if (value == TOUCH_HISTORY_TRACE_MISSING) continue;
-                    int magnitude = value < 0 ? -value : value;
-                    if (magnitude > range) range = magnitude;
-                }
-            }
-            range = ((range + 19) / 20) * 20;
-            if (range > 300) range = 300;
-            range_min = -range;
-            range_max = range;
-            s_history_trace_baseline_points[0].y = 56;
-            s_history_trace_baseline_points[1].y = 56;
-        } else {
-            int minimum = INT_MAX;
-            int maximum = INT_MIN;
-            for (size_t i = 0; i < trace_count; ++i) {
-                int value = trace->points[i];
-                if (value == TOUCH_HISTORY_TRACE_MISSING) continue;
-                if (value < minimum) minimum = value;
-                if (value > maximum) maximum = value;
-            }
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2) {
-                range_min = minimum > 52 ? minimum - 2 : 50;
-                range_max = maximum < 99 ? 100 : maximum + 1;
-            } else {
-                range_min = 0;
-                range_max = maximum < 10 ? 10 : ((maximum + 9) / 10) * 10;
-                if (range_max > 300) range_max = 300;
-            }
-            s_history_trace_baseline_points[0].y = 110;
-            s_history_trace_baseline_points[1].y = 110;
-        }
-        lv_line_set_points(s_history_trace_baseline,
-                           s_history_trace_baseline_points, 2);
-        lv_chart_set_range(s_history_trace_chart, LV_CHART_AXIS_PRIMARY_Y,
-                           range_min, range_max);
-        for (size_t i = 0; i < trace_count; ++i) {
-            int value = trace->points[i];
-            s_history_trace_values[i] =
-                value == TOUCH_HISTORY_TRACE_MISSING
-                    ? LV_CHART_POINT_NONE : value;
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) {
-                int upper = trace->upper_points[i];
-                s_history_trace_upper_values[i] =
-                    upper == TOUCH_HISTORY_TRACE_MISSING
-                        ? LV_CHART_POINT_NONE : upper;
-            }
-        }
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-        set_label_text_if_changed(s_history_trace_start, "23:04");
-        set_label_text_if_changed(s_history_trace_end, "06:16");
-#else
-        time_t start = (time_t)(trace->start_ms / 1000);
-        time_t end = (time_t)(trace->end_ms / 1000);
-        struct tm start_tm, end_tm;
-        char start_text[8] = "--:--", end_text[8] = "--:--";
-        if (localtime_r(&start, &start_tm))
-            strftime(start_text, sizeof(start_text), "%H:%M", &start_tm);
-        if (localtime_r(&end, &end_tm))
-            strftime(end_text, sizeof(end_text), "%H:%M", &end_tm);
-        set_label_text_if_changed(s_history_trace_start, start_text);
-        set_label_text_if_changed(s_history_trace_end, end_text);
-#endif
-        set_hidden(s_history_trace_message, true);
-    } else {
-        lv_chart_set_range(s_history_trace_chart, LV_CHART_AXIS_PRIMARY_Y, -60, 60);
-        set_label_text_if_changed(s_history_trace_start, "--:--");
-        set_label_text_if_changed(s_history_trace_end, "--:--");
-#if !CONFIG_SOMNOTRACE_BOARD_QEMU
-        bool trace_failed = trace_request_matches &&
-                            !services->history_trace_busy &&
-                            !trace->loaded &&
-                            services->history_trace_result != ESP_OK;
-        static const char *channel_names[] = { "flow", "SpO₂", "leak" };
-        const char *channel_name = channel_names[s_history_channel];
-        char trace_message[96];
-        if (trace_request_matches && trace->loaded && !trace->has_data) {
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
-                strlcpy(trace_message, "No O₂ Ring data for this night",
-                        sizeof(trace_message));
-            else
-                snprintf(trace_message, sizeof(trace_message),
-                         "No recorded %s samples for this session", channel_name);
-        } else if (trace_request_matches && services->history_trace_busy) {
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
-                strlcpy(trace_message, "Reading O₂ Ring data...",
-                        sizeof(trace_message));
-            else
-                snprintf(trace_message, sizeof(trace_message),
-                         "Reading recorded %s...", channel_name);
-        } else if (trace_failed) {
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
-                strlcpy(trace_message,
-                        "O₂ Ring data unavailable - tap SpO₂ to retry",
-                        sizeof(trace_message));
-            else
-                snprintf(trace_message, sizeof(trace_message),
-                         "%s temporarily unavailable - tap %s to retry",
-                         channel_name, channel_name);
-        } else if (sd_storage_recording_active()) {
-            strlcpy(trace_message, "Available after recording stops",
-                    sizeof(trace_message));
-        } else if (!sd_storage_is_ready()) {
-            strlcpy(trace_message, "microSD card unavailable",
-                    sizeof(trace_message));
-        } else {
-            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
-                strlcpy(trace_message, "Reading O₂ Ring data...",
-                        sizeof(trace_message));
-            else
-                snprintf(trace_message, sizeof(trace_message),
-                         "Reading recorded %s...", channel_name);
-        }
-        set_label_text_if_changed(s_history_trace_message, trace_message);
-#endif
-        set_hidden(s_history_trace_message, false);
-    }
-    lv_chart_refresh(s_history_trace_chart);
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-    /* A channel selection can repaint once with an older 250 ms service
-     * snapshot before its matching simulated data reaches the renderer. Only
-     * arm acceptance signalling for a populated, matching trace. flush_cb()
-     * reports when that exact LVGL frame has reached QEMU's virtual panel. */
-    if (trace_available)
-        s_qemu_history_frame_pending_channel = (uint8_t)s_history_channel;
-#endif
-}
-
 static void refresh_device_dropdown(bool oxygen, const ui_service_state_t *services)
 {
     unsigned version = oxygen ? services->ox_version : services->as11_version;
@@ -6217,7 +5062,7 @@ static void update_ui(void)
         plotted_flow_live = flow_live;
         if (chart_dirty) lv_obj_invalidate(s_chart);
     }
-    if (active_tab == 1) refresh_history_widgets(s_render_services);
+    if (active_tab == 1) apply_history_controller_if_needed();
 
     if (now_ticks - last_text_update < pdMS_TO_TICKS(500)) return;
     last_text_update = now_ticks;
@@ -6371,14 +5216,9 @@ static void update_ui(void)
 #else
     recording = sd_storage_recording_active();
 #endif
+    /* The rich History model owns card-derived night summaries. Home does not
+     * mirror that large model into its periodic service snapshot. */
     char stopped_runtime[20] = "—";
-    for (size_t i = 0; i < s_render_services->history_count; ++i) {
-        const touch_history_day_t *night = &s_render_services->history[i];
-        if (!night->has_usage) continue;
-        snprintf(stopped_runtime, sizeof(stopped_runtime), "%d:%02d",
-                 night->usage_min / 60, night->usage_min % 60);
-        break;
-    }
     const char *therapy_label = therapy_command_busy
                                     ? (therapy_command_target
                                            ? "Starting therapy"
@@ -6883,6 +5723,18 @@ esp_err_t bsp_display_init(void)
 
     s_lvgl_lock = xSemaphoreCreateRecursiveMutex();
     ESP_RETURN_ON_FALSE(s_lvgl_lock, ESP_ERR_NO_MEM, TAG, "create LVGL mutex");
+    const touch_history_controller_config_t history_config = {
+        .changed = history_controller_changed,
+        .route_card = history_route_card,
+        .context = NULL,
+        .usage_target_minutes = 240,
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+        .deterministic_preview = true,
+#endif
+    };
+    ESP_RETURN_ON_ERROR(
+        touch_history_controller_create(&history_config, &s_history_controller),
+        TAG, "create rich History controller");
     size_t internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     UBaseType_t build_stack_before = uxTaskGetStackHighWaterMark(NULL);
@@ -6915,22 +5767,11 @@ esp_err_t bsp_display_init(void)
                         ESP_ERR_NO_MEM, TAG, "create display task");
 
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-    /* Create the on-demand readers while boot still has ample internal RAM.
-     * Their stacks live in PSRAM and the tasks sleep between requests. The old
-     * per-refresh xTaskCreate() path needed contiguous internal stack memory
-     * precisely when post-therapy processing had made it scarcest. */
-    s_history_worker_task = psram_task_create(
-        history_task, "ui_history", 8192, NULL, 2, tskNO_AFFINITY, NULL, NULL);
-    s_history_trace_worker_task = psram_task_create(
-        history_trace_task, "ui_hist_trace", 6144, NULL, 2,
-        tskNO_AFFINITY, NULL, NULL);
+    /* Storage details retain one dormant PSRAM-backed worker. Rich History
+     * owns its own single serialized PSRAM worker and queue. */
     s_storage_worker_task = psram_task_create(
         storage_status_task, "ui_storage", 8192, NULL, 2,
         tskNO_AFFINITY, NULL, NULL);
-    if (!s_history_worker_task)
-        ESP_LOGE(TAG, "history metadata worker unavailable");
-    if (!s_history_trace_worker_task)
-        ESP_LOGE(TAG, "history trace worker unavailable");
     if (!s_storage_worker_task)
         ESP_LOGE(TAG, "storage status worker unavailable");
 #endif
@@ -7122,17 +5963,18 @@ void bsp_display_set_therapy_active(bool active)
         s_state.flow_sample_us = 0;
     }
     bool therapy_finished = changed && !active;
-#if !CONFIG_SOMNOTRACE_BOARD_QEMU
-    if (therapy_finished) s_history_refresh_generation++;
-#endif
-    bool refresh_history = therapy_finished && s_active_page == 1;
     portEXIT_CRITICAL(&s_state_lock);
     if (changed) bsp_display_restart_idle_timeout();
     bsp_display_apply_backlight_policy(false);
-    /* If the user watched the busy History state during therapy, complete
-     * their original request automatically once finalisation starts.  The
-     * History worker waits on the recording claim without blocking LVGL. */
-    if (refresh_history) start_history_load();
+    /* Finalisation changes the all-days index. Inactive History is marked
+     * stale for its next entry; visible History reloads asynchronously now. */
+    if (therapy_finished && s_history_controller) {
+        esp_err_t result = touch_history_controller_refresh(
+            s_history_controller);
+        if (result != ESP_OK)
+            ESP_LOGW(TAG, "refresh History after therapy: %s",
+                     esp_err_to_name(result));
+    }
 }
 
 void bsp_display_push_flow(float flow_lpm)
@@ -7358,87 +6200,7 @@ void bsp_display_qemu_seed_demo(void)
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
     uploader_progress_snapshot_t upload_progress;
     qemu_upload_progress(&upload_progress);
-    static const touch_history_day_t demo_history[] = {
-        {
-            .day = "20260901", .sessions = 1, .mask_off_count = 1,
-            .usage_min = 438,
-            .ahi = 1.7f, .oai = 0.6f, .cai = 0.2f, .hi = 0.9f,
-            .rera = 0.4f, .pressure_p95 = 10.4f, .leak_p95 = 7.8f,
-            .has_summary = true, .has_mask_off_count = true,
-            .has_usage = true, .has_ahi = true,
-            .has_oai = true, .has_cai = true, .has_hi = true, .has_rera = true,
-            .has_pressure_p95 = true, .has_leak_p95 = true,
-        },
-        {
-            .day = "20260831", .sessions = 2, .mask_off_count = 2,
-            .usage_min = 401,
-            .ahi = 2.2f, .pressure_p95 = 10.8f,
-            .has_summary = true, .has_mask_off_count = true,
-            .has_usage = true, .has_ahi = true,
-            .has_pressure_p95 = true, .has_leak_p95 = false,
-        },
-        {
-            .day = "20260830", .sessions = 1, .mask_off_count = 1,
-            .usage_min = 462,
-            .ahi = 1.3f, .pressure_p95 = 9.9f, .leak_p95 = 5.1f,
-            .has_summary = true, .has_mask_off_count = true,
-            .has_usage = true, .has_ahi = true,
-            .has_pressure_p95 = true, .has_leak_p95 = true,
-        },
-        {
-            .day = "20260829", .sessions = 1, .mask_off_count = 12,
-            .usage_min = 302,
-            .ahi = 2.8f, .oai = 1.2f, .cai = 0.3f, .hi = 1.3f,
-            .rera = 0.5f, .pressure_p95 = 11.2f, .leak_p95 = 9.4f,
-            .has_summary = true, .has_mask_off_count = true,
-            .has_usage = true, .has_ahi = true,
-            .has_oai = true, .has_cai = true, .has_hi = true, .has_rera = true,
-            .has_pressure_p95 = true, .has_leak_p95 = true,
-        },
-        {
-            .day = "20260828", .sessions = 1, .usage_min = 450,
-            .ahi = 1.9f, .pressure_p95 = 10.1f, .leak_p95 = 6.2f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
-            .has_pressure_p95 = true, .has_leak_p95 = true,
-        },
-        {
-            .day = "20260827", .sessions = 2, .usage_min = 389,
-            .ahi = 2.4f, .pressure_p95 = 10.7f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
-            .has_pressure_p95 = true,
-        },
-        {
-            .day = "20260826", .sessions = 1, .usage_min = 427,
-            .ahi = 1.5f, .pressure_p95 = 9.7f, .leak_p95 = 4.8f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
-            .has_pressure_p95 = true, .has_leak_p95 = true,
-        },
-        {
-            .day = "20260825", .sessions = 1, .usage_min = 416,
-            .ahi = 2.0f, .pressure_p95 = 10.3f, .leak_p95 = 7.0f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
-            .has_pressure_p95 = true, .has_leak_p95 = true,
-        },
-    };
     portENTER_CRITICAL(&s_state_lock);
-    memcpy(s_services.history, demo_history, sizeof(demo_history));
-    strlcpy(s_services.history_trace_day, demo_history[0].day,
-            sizeof(s_services.history_trace_day));
-    memcpy(s_services.history_trace.points,
-           s_qemu_history_traces[TOUCH_HISTORY_CHANNEL_FLOW],
-           sizeof(s_services.history_trace.points));
-    memcpy(s_services.history_trace.upper_points,
-           s_qemu_history_flow_upper,
-           sizeof(s_services.history_trace.upper_points));
-    s_services.history_trace.count = TOUCH_HISTORY_TRACE_POINTS;
-    s_services.history_trace.channel = TOUCH_HISTORY_CHANNEL_FLOW;
-    s_services.history_trace.has_data = true;
-    s_services.history_trace.loaded = true;
-    s_services.history_trace_result = ESP_OK;
-    s_services.history_count = sizeof(demo_history) / sizeof(demo_history[0]);
-    s_services.history_result = ESP_OK;
-    s_services.history_version++;
-    s_services.history_metadata_version++;
     s_services.as11_count = 1;
     strlcpy(s_services.as11[0].addr, "AA:11:00:00:00:01",
             sizeof(s_services.as11[0].addr));
@@ -7476,6 +6238,8 @@ void bsp_display_qemu_seed_demo(void)
     s_state.flow_version++;
     s_state.flow_sample_us = esp_timer_get_time();
     portEXIT_CRITICAL(&s_state_lock);
+    if (s_history_controller)
+        (void)touch_history_controller_refresh(s_history_controller);
 #endif
 }
 

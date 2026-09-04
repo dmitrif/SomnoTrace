@@ -22,6 +22,7 @@ for api in (
     "touch_history_controller_create",
     "touch_history_controller_destroy",
     "touch_history_controller_set_active",
+    "touch_history_controller_refresh",
     "touch_history_controller_handle_intent",
     "touch_history_controller_apply",
     "touch_history_controller_revision",
@@ -32,7 +33,7 @@ for api in (
 # One long-lived serialized mailbox and one external-stack worker. Rapid
 # intents replace pending work, while the in-flight generation is immutable.
 require(SOURCE, r"HISTORY_CONTROLLER_QUEUE_LENGTH\s+1U", "one-slot mailbox")
-require(SOURCE, r"xQueueCreateStatic", "static serialized queue")
+require(SOURCE, r"xQueueCreate\(", "internal serialized queue")
 require(SOURCE, r"xQueueOverwrite", "newest pending job wins")
 require(SOURCE, r"psram_task_create\(.*?history_controller_worker",
         "PSRAM worker stack")
@@ -41,6 +42,10 @@ require(SOURCE, r"heap_caps_calloc\(.*?sizeof\(\*controller\).*?"
                 r"MALLOC_CAP_SPIRAM", "PSRAM controller/model")
 require(SOURCE, r"heap_caps_malloc\(.*?sizeof\(\*result\).*?"
                 r"MALLOC_CAP_SPIRAM", "PSRAM inactive publication model")
+require(SOURCE, r"vQueueDelete\(controller->queue\).*?"
+                r"vSemaphoreDelete\(controller->mutex\).*?"
+                r"heap_caps_free\(controller\)",
+        "kernel object teardown before PSRAM context free")
 assert SOURCE.count("history_model_t model;") == 1, (
     "only the PSRAM controller field may own the 480-bin publication model"
 )
@@ -112,6 +117,19 @@ require(SERVICE, r"maximum_drift_ms.*?INT64_MAX\s*-\s*drift_ms.*?"
 require(SERVICE, r"clock_drift_usable\s*&&\s*"
                  r"touch_history_apply_clock_drift\(",
         "checked drift helper used by event publication")
+require(SERVICE, r"event_dropped.*?touch_history_deduplicate_events.*?"
+                 r"totals->complete\s*=\s*false.*?"
+                 r"totals->has_indices\s*=\s*false",
+        "dropped/replayed event truthfulness")
+require(SERVICE_H, r"has_session_errors.*?has_oximetry_error.*?has_summary_error.*?has_event_loss",
+        "night degradation provenance")
+require(SOURCE, r"has_event_loss.*?ST AHI is unavailable",
+        "event-loss degraded UI copy")
+require(SOURCE, r"TOUCH_HISTORY_UI_INTENT_CLEAR_CURSOR.*?cursor_valid\s*=\s*false",
+        "dismissible opt-in graph cursor")
+require(SOURCE, r"stats_warning.*?Percentiles unavailable.*?"
+                r"model->state\s*=\s*TOUCH_HISTORY_UI_STATE_READY",
+        "statistics warning does not replace the usable graph")
 require(SERVICE, r"retain_overlap_owners.*?has_selected_data.*?"
                  r"qsort\(candidates", "missing-aware O2 overlap ownership")
 

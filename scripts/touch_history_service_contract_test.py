@@ -88,6 +88,9 @@ require(HEADER, r"float\s+device_ahi;.*?float\s+st_ahi;.*?"
 require(SOURCE, r"history_fill_day_summary.*?has_device_ahi.*?"
                 r"history_collect_events_leased.*?night->st_ahi",
         "night detail AHI population")
+require(SOURCE, r"device summary unavailable.*?has_summary_error\s*=\s*true.*?"
+                r"history_collect_events_leased",
+        "nonfatal optional Summary metadata failure")
 
 # Every public SD reader takes one upload/read lease. Cancellable APIs delegate
 # through their _ex implementation so the wait itself can observe cancellation.
@@ -152,5 +155,11 @@ require(SOURCE, r"heap_caps_calloc.*?MALLOC_CAP_SPIRAM.*?"
                 r"heap_caps_malloc.*?MALLOC_CAP_SPIRAM",
         "PSRAM-first transient allocations")
 require(SOURCE, r"HISTORY_READ_VALUES\s+512U", "bounded read slab")
+assert "HISTORY_TRACE_MAX_RECORDS" not in SOURCE, (
+    "trace validation must bound elapsed duration, not sample count"
+)
+require(SOURCE, r"touch_history_sample_span_within\(.*?10000000U.*?"
+                r"header\.sample_hz_x10.*?HISTORY_AXIS_MAX_MS",
+        "rate-aware raw Flow duration validation")
 
 print("touch history service contract passed")

@@ -137,6 +137,7 @@ for intent in (
     "ZOOM_RELATIVE",
     "PAN_RELATIVE",
     "SET_CURSOR",
+    "CLEAR_CURSOR",
     "TOGGLE_THERAPY_ONLY",
 ):
     assert f"TOUCH_HISTORY_UI_INTENT_{intent}" in HEADER, f"missing intent {intent}"
@@ -146,6 +147,17 @@ require(
     r"history_ui_cancel_pressed.*?"
     r"ui->state != TOUCH_HISTORY_UI_STATE_AUTO_LOADING",
     "cancel is restricted to initial night load",
+)
+require(
+    SOURCE,
+    r"LV_EVENT_SHORT_CLICKED.*?TOUCH_HISTORY_UI_INTENT_CLEAR_CURSOR",
+    "repeat short tap dismisses the graph cursor without stealing pan",
+)
+require(
+    SOURCE,
+    r"stats_warning_text.*?stats_warning.*?"
+    r"history_ui_set_hidden\(ui->stat_labels",
+    "stats-only warning is compact in the header rather than graph overlay",
 )
 require(
     SOURCE,

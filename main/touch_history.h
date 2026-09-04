@@ -108,6 +108,9 @@ typedef struct {
     bool has_data;
     bool has_companion;
     bool has_therapy_coverage;
+    /* One or more session sources were present but malformed/unreadable. The
+     * remaining bins are safe to display, but the view is incomplete. */
+    uint16_t unreadable_sessions;
     /* Ranged Flow only: true means the 25 Hz waveform supplied every
      * contributing session. `source_fallback` means raw was requested but a
      * session had only the 1 Hz min/max sidecar, so the whole result honestly
@@ -182,6 +185,15 @@ typedef struct {
     bool has_st_ahi;
     bool has_o2_coverage;
     bool sessions_truncated;
+    uint16_t skipped_sessions;
+    uint16_t probe_failed_sessions;
+    bool has_session_errors;
+    bool has_oximetry_error;
+    /* Raw session traces remain usable when optional Device Summary metadata
+     * is missing/corrupt.  The controller surfaces this as degraded rather
+     * than replacing the entire night with a card-read failure. */
+    bool has_summary_error;
+    bool has_event_loss;
     esp_err_t events_result;
     touch_history_event_totals_t event_totals;
 } touch_history_night_t;
@@ -290,6 +302,8 @@ typedef struct {
     bool has_st_ahi;
     bool has_therapy;
     bool has_oximetry;
+    uint16_t skipped_sessions;
+    bool has_incomplete_sessions;
 } touch_history_day_t;
 
 /* Compatibility first-page loader.  Returns newest days first and fills up to
@@ -393,6 +407,10 @@ esp_err_t touch_history_load_events_ex(
 /* Small pure helpers are public so host tests and future zoom/range readers
  * share the exact event taxonomy and combined-duration arithmetic. */
 touch_history_event_type_t touch_history_event_type_from_name(const char *name);
+/* BLE spool replay can repeat an event. Compact equal whole-second report
+ * time + event type identities in place and return the retained count. */
+size_t touch_history_deduplicate_events(touch_history_event_t *events,
+                                        size_t count);
 bool touch_history_compute_event_indices(
     const uint32_t counts[TOUCH_HISTORY_EVENT_TYPE_COUNT],
     uint64_t eligible_therapy_ms,
@@ -403,6 +421,13 @@ uint16_t touch_history_range_point_count(touch_history_signal_t signal,
                                          uint64_t duration_ms);
 bool touch_history_flow_range_prefers_raw(uint64_t duration_ms,
                                           uint64_t night_duration_ms);
+/* Overflow-safe source-duration bound. `period_num_us / period_den` is the
+ * exact sample period; unlike a record-count cap this accepts useful 25 Hz
+ * Flow tracks without permitting an implausibly long corrupt trace. */
+bool touch_history_sample_span_within(uint32_t sample_count,
+                                      uint32_t period_num_us,
+                                      uint32_t period_den,
+                                      uint64_t maximum_ms);
 /* Pure rich-History source-unit conversion used by overview, ranged reads,
  * exact stats, and host regressions. Legacy touch_history_load_trace keeps its
  * existing raw compatibility semantics. */

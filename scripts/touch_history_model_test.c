@@ -48,6 +48,14 @@ static void test_shared_axis_bins(void)
         90ULL * 60ULL * 1000ULL, eight_hours));
     assert(!touch_history_flow_range_prefers_raw(
         3ULL * 60ULL * 60ULL * 1000ULL, eight_hours));
+
+    /* Regression: 102,730 raw samples at 25 Hz are only about 68.5 minutes.
+     * A count cap of 86,400 used to reject this valid physical-card track. */
+    assert(touch_history_sample_span_within(
+        102730U, 10000000U, 250U, 36ULL * 60ULL * 60ULL * 1000ULL));
+    assert(!touch_history_sample_span_within(
+        UINT32_MAX, 10000000U, 1U, 36ULL * 60ULL * 60ULL * 1000ULL));
+    assert(!touch_history_sample_span_within(1U, 0U, 1U, 1000U));
 }
 
 static void test_event_taxonomy_and_combined_ahi(void)
@@ -64,6 +72,24 @@ static void test_event_taxonomy_and_combined_ahi(void)
            TOUCH_HISTORY_EVENT_RERA);
     assert(touch_history_event_type_from_name("MaskOff") ==
            TOUCH_HISTORY_EVENT_UNKNOWN);
+
+    touch_history_event_t replayed[] = {
+        {.type = TOUCH_HISTORY_EVENT_OBSTRUCTIVE_APNEA,
+         .start_ms = 90000, .end_ms = 100000},
+        {.type = TOUCH_HISTORY_EVENT_OBSTRUCTIVE_APNEA,
+         .start_ms = 88000, .end_ms = 100250},
+        {.type = TOUCH_HISTORY_EVENT_CENTRAL_APNEA,
+         .start_ms = 90000, .end_ms = 100000},
+        {.type = TOUCH_HISTORY_EVENT_OBSTRUCTIVE_APNEA,
+         .start_ms = 91000, .end_ms = 101000},
+        {.type = TOUCH_HISTORY_EVENT_OBSTRUCTIVE_APNEA,
+         .start_ms = 91000, .end_ms = 101000},
+    };
+    size_t retained = touch_history_deduplicate_events(
+        replayed, sizeof(replayed) / sizeof(replayed[0]));
+    assert(retained == 3);
+    assert(replayed[0].start_ms <= replayed[1].start_ms);
+    assert(replayed[1].start_ms <= replayed[2].start_ms);
 
     /* Two combined sessions totalling 2h. This must not be an average of
      * per-session indices: all eligible event counts share one denominator. */

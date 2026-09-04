@@ -60,6 +60,7 @@ python3 scripts/history_trace_channels_contract_test.py
 python3 scripts/touch_history_service_contract_test.py
 python3 scripts/touch_history_ui_contract_test.py
 python3 scripts/touch_history_controller_contract_test.py
+python3 scripts/touch_history_integration_contract_test.py
 python3 scripts/rapid_session_lifecycle_contract_test.py
 python3 scripts/sd_recording_arbitration_contract_test.py
 python3 scripts/clock_snapshot_contract_test.py
