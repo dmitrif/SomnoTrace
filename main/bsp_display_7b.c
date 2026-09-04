@@ -90,6 +90,18 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define COLOR_AMBER      0xf8bd40
 #define COLOR_FAULT      0xf45249
 
+/* Live scalar channels arrive independently.  Never keep painting an old
+ * value as current just because the therapy flag is still latched after a BLE
+ * interruption.  The slowest of these channels normally updates at 0.5 Hz;
+ * eight seconds allows several packets without masking a real disconnect. */
+#define METRIC_STALE_US 8000000LL
+
+/* Capacity copy is intentionally expressed in something useful at bedside.
+ * This conservative blended allowance includes native streams, generated EDF
+ * files, metadata, and normal filesystem overhead.  Oximetry is called out as
+ * reducing the estimate instead of pretending every night has one fixed size. */
+#define AIRSENSE_NIGHT_ESTIMATE_BYTES (80ULL * 1024ULL * 1024ULL)
+
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
 #define UI_DECORATIVE_SHADOW_WIDTH(pixels) (pixels)
 #define UI_DECORATIVE_SHADOW_OPA(opacity)  (opacity)
@@ -148,6 +160,10 @@ typedef struct {
     float pressure;
     float respiratory_rate;
     float flow_limitation;
+    int64_t leak_sample_us;
+    int64_t pressure_sample_us;
+    int64_t respiratory_rate_sample_us;
+    int64_t flow_limitation_sample_us;
     int64_t therapy_start_us;
     int16_t flow[FLOW_POINTS];
     unsigned flow_head;
@@ -1528,6 +1544,29 @@ static void start_storage_refresh(void)
         s_services.storage_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
         bsp_display_set_notice("Unable to read storage status");
+    }
+}
+
+static unsigned estimated_airsense_nights(uint64_t free_bytes)
+{
+    uint64_t raw = free_bytes / AIRSENSE_NIGHT_ESTIMATE_BYTES;
+    if (raw > UINT_MAX) raw = UINT_MAX;
+    if (raw >= 100) return (unsigned)(((raw + 5) / 10) * 10);
+    if (raw >= 20) return (unsigned)(((raw + 2) / 5) * 5);
+    return (unsigned)raw;
+}
+
+static void set_storage_night_estimate(lv_obj_t *label, uint64_t free_bytes)
+{
+    if (!label) return;
+    unsigned nights = estimated_airsense_nights(free_bytes);
+    if (nights == 0) {
+        lv_label_set_text(label,
+                          "Less than one AirSense-only night · O2 uses more");
+    } else {
+        lv_label_set_text_fmt(label,
+                              "About %u AirSense-only nights · fewer with O2",
+                              nights);
     }
 }
 
@@ -3585,7 +3624,7 @@ static void build_display_section(lv_obj_t *section)
     make_label(therapy, "During therapy", 0, 0, 260,
                FONT_ROW_TITLE, COLOR_TEXT);
     static const char *modes[] = {
-        "Live dashboard", "Information only", "Screen off", "Always off"
+        "Live dashboard", "Information only", "Screen off", "Off except alerts"
     };
     static const int widths[] = { 160, 160, 140, 140 };
     int x = 0;
@@ -3647,7 +3686,7 @@ static void build_alerts_section(lv_obj_t *section)
     s_alert_status = make_label(status, "Reading alert settings...", 200, 0, 472,
                                 FONT_BODY_SMALL, COLOR_SECONDARY);
     make_label(status,
-               "This 7-inch board has no onboard speaker; persistent on-screen alarms still wake the display.",
+               "This 7-inch board has no onboard speaker; persistent on-screen alerts still wake the display.",
                0, 48, 650, FONT_BODY_SMALL, COLOR_SECONDARY);
 
     lv_obj_t *test = make_manage_row(scroll, 122, 82);
@@ -3681,7 +3720,7 @@ static void build_storage_section(lv_obj_t *section)
     s_storage_status = make_label(card, "microSD capacity and upload queue", 200, 0, 300,
                                   FONT_BODY_SMALL, COLOR_SECONDARY);
     s_storage_estimate = make_label(
-        card, "Night estimate unavailable until enough recordings exist",
+        card, "Capacity estimate will appear after the card responds",
         0, 29, 490, FONT_BODY_SMALL, COLOR_TERTIARY);
     s_storage_meter = lv_bar_create(card);
     lv_obj_set_pos(s_storage_meter, 0, 64);
@@ -3752,7 +3791,7 @@ static void build_system_section(lv_obj_t *section)
                FONT_ROW_TITLE, COLOR_TEXT);
     s_system_firmware = make_label(firmware, "Version unavailable", 0, 27, 500,
                                    FONT_BODY_SMALL, COLOR_SECONDARY);
-    lv_obj_t *firmware_state = make_label(firmware, "Up to date", 520, 10, 152,
+    lv_obj_t *firmware_state = make_label(firmware, "Not checked", 520, 10, 152,
                                            FONT_BODY_LARGE, COLOR_TERTIARY);
     lv_obj_set_style_text_align(firmware_state, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -4735,13 +4774,13 @@ static int pairing_step(const char *status, bool scanning)
 static const char *friendly_alert_state(alert_state_t state)
 {
     switch (state) {
-        case ALERT_ARMED: return "Armed";
+        case ALERT_ARMED: return "Push ready";
         case ALERT_PENDING: return "Therapy stop detected";
         case ALERT_PUSH_SENT: return "Push sent";
-        case ALERT_BUZZING: return "Alarm active";
+        case ALERT_BUZZING: return "Escalated screen alert";
         case ALERT_ACKED: return "Acknowledged";
         case ALERT_DISARMED:
-        default: return "Not armed";
+        default: return "Push unavailable";
     }
 }
 
@@ -5323,7 +5362,7 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     if (services->storage_busy) {
         lv_label_set_text(s_storage_status, "Reading microSD capacity...");
         lv_label_set_text(s_storage_estimate,
-                          "Night estimate unavailable until enough recordings exist");
+                          "Capacity estimate will appear after the card responds");
         lv_bar_set_value(s_storage_meter, 0, LV_ANIM_OFF);
         lv_obj_add_state(s_storage_refresh_button, LV_STATE_DISABLED);
     } else if (services->storage_result == ESP_OK && services->storage_total > 0) {
@@ -5331,8 +5370,8 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         double total_gib = (double)services->storage_total / (1024.0 * 1024.0 * 1024.0);
         lv_label_set_text_fmt(s_storage_status,
                               "%.1f GiB free of %.1f GiB", free_gib, total_gib);
-        lv_label_set_text(s_storage_estimate,
-                          "Night estimate unavailable until enough recordings exist");
+        set_storage_night_estimate(s_storage_estimate,
+                                   services->storage_free);
         uint64_t used = services->storage_total > services->storage_free
                             ? services->storage_total - services->storage_free : 0;
         int used_pct = (int)((used * 100ULL) / services->storage_total);
@@ -5353,7 +5392,7 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     } else {
         lv_label_set_text(s_storage_status, "Storage status has not been read yet");
         lv_label_set_text(s_storage_estimate,
-                          "Night estimate unavailable until enough recordings exist");
+                          "Capacity estimate unavailable · check the card again");
         lv_bar_set_value(s_storage_meter, 0, LV_ANIM_OFF);
         lv_obj_clear_state(s_storage_refresh_button, LV_STATE_DISABLED);
     }
@@ -5665,8 +5704,10 @@ static void update_ui(void)
     bool storage_fault = state.notice_critical && strstr(state.notice, "microSD");
     bool storage_degraded = !state.sd_ready || state.storage_near_full;
     bool has_flow_window = state.flow_count >= FLOW_READY_POINTS;
-    bool airsense_stale = state.paired && state.therapy && has_flow_window &&
-                          !flow_live;
+    bool therapy_past_startup = state.therapy_start_us > 0 &&
+                                now_us - state.therapy_start_us > 10000000LL;
+    bool airsense_stale = state.paired && state.therapy && !flow_live &&
+                          (state.flow_sample_us > 0 || therapy_past_startup);
     uint32_t sd_tone = storage_fault ? COLOR_FAULT :
                        storage_degraded ? COLOR_AMBER : COLOR_LIVE;
     uint32_t as_tone = airsense_stale ? COLOR_FAULT :
@@ -5744,24 +5785,23 @@ static void update_ui(void)
     else if (!state.sd_ready)
         set_label_text_if_changed(s_status_tray_sd,
                                   "No card fitted - nothing is recorded");
-    else if (state.storage_near_full)
-        if (s_render_services->storage_total > 0)
+    else if (state.storage_near_full) {
+        if (s_render_services->storage_total > 0) {
             set_label_text_fmt_if_changed(
-                s_status_tray_sd, "Nearly full · %.1f GiB free",
-                (double)s_render_services->storage_free /
-                    (1024.0 * 1024.0 * 1024.0));
-        else
+                s_status_tray_sd, "Nearly full · about %u nights",
+                estimated_airsense_nights(
+                    s_render_services->storage_free));
+        } else {
             set_label_text_if_changed(s_status_tray_sd,
                                       "Nearly full · free space soon");
-    else if (s_render_services->storage_total > 0)
+        }
+    } else if (s_render_services->storage_total > 0) {
         set_label_text_fmt_if_changed(
-            s_status_tray_sd, "%.1f GiB free of %.1f GiB",
-            (double)s_render_services->storage_free /
-                (1024.0 * 1024.0 * 1024.0),
-            (double)s_render_services->storage_total /
-                (1024.0 * 1024.0 * 1024.0));
-    else
+            s_status_tray_sd, "About %u AirSense-only nights",
+            estimated_airsense_nights(s_render_services->storage_free));
+    } else {
         set_label_text_if_changed(s_status_tray_sd, "Ready for recording");
+    }
     set_label_text_if_changed(s_status_tray_wifi,
                               state.wifi
                                   ? "Connected - local dashboard available"
@@ -5822,6 +5862,8 @@ static void update_ui(void)
                                     ? (therapy_command_target
                                            ? "Starting therapy"
                                            : "Stopping therapy")
+                                    : airsense_stale
+                                          ? "Therapy status unknown"
                                     : state.therapy ? "Therapy active"
                                                     : state.paired
                                                           ? "Therapy stopped"
@@ -5835,8 +5877,11 @@ static void update_ui(void)
             ? (therapy_command_target ? "Sending start command..."
                                       : "Sending stop command...")
         : !state.paired ? "Pair your AirSense in Manage › Devices"
+        : airsense_stale ? "AirSense data is stale - reconnecting"
         : state.therapy && recording ? "Recording to card"
-        : state.therapy ? "Not recording — microSD unavailable"
+        : state.therapy && (!state.sd_ready || storage_fault)
+              ? "microSD unavailable - therapy continues"
+        : state.therapy ? "Preparing recording"
                         : "Ready when you are");
     set_style_color_if_changed(s_therapy_hero, LV_STYLE_BG_COLOR,
                                state.therapy ? 0x0b2d32 : COLOR_PANEL, 0);
@@ -5888,7 +5933,7 @@ static void update_ui(void)
             ? (therapy_command_target ? "Starting..." : "Stopping...")
         : !state.paired ? "Pair a device"
                         : (state.therapy ? "Stop therapy" : "Start therapy"));
-    bool therapy_button_disabled = therapy_command_busy || !state.paired;
+    bool therapy_button_disabled = therapy_command_busy;
     if (therapy_button_disabled)
         lv_obj_add_state(s_therapy_button, LV_STATE_DISABLED);
     else
@@ -5925,34 +5970,50 @@ static void update_ui(void)
             s_therapy_button_label, LV_STYLE_TEXT_COLOR,
             therapy_button_disabled ? COLOR_DISABLED : COLOR_TEXT, 0);
     }
-    bool show_current_metrics = state.therapy;
-    if (show_current_metrics && isfinite(state.leak))
+    bool leak_live = state.therapy && state.leak_sample_us > 0 &&
+                     now_us - state.leak_sample_us < METRIC_STALE_US &&
+                     isfinite(state.leak);
+    bool pressure_live = state.therapy && state.pressure_sample_us > 0 &&
+                         now_us - state.pressure_sample_us < METRIC_STALE_US &&
+                         isfinite(state.pressure);
+    bool respiratory_rate_live =
+        state.therapy && state.respiratory_rate_sample_us > 0 &&
+        now_us - state.respiratory_rate_sample_us < METRIC_STALE_US &&
+        isfinite(state.respiratory_rate);
+    bool flow_limitation_live =
+        state.therapy && state.flow_limitation_sample_us > 0 &&
+        now_us - state.flow_limitation_sample_us < METRIC_STALE_US &&
+        isfinite(state.flow_limitation);
+    if (leak_live)
         set_label_text_fmt_if_changed(s_leak_label, "%.1f", state.leak);
     else
         set_label_text_if_changed(s_leak_label, "—");
-    if (show_current_metrics && isfinite(state.pressure))
+    if (pressure_live)
         set_label_text_fmt_if_changed(s_pressure_label, "%.1f", state.pressure);
     else
         set_label_text_if_changed(s_pressure_label, "—");
-    if (show_current_metrics && isfinite(state.respiratory_rate))
+    if (respiratory_rate_live)
         set_label_text_fmt_if_changed(s_resp_label, "%.0f",
                                       state.respiratory_rate);
     else
         set_label_text_if_changed(s_resp_label, "—");
-    if (show_current_metrics && isfinite(state.flow_limitation))
+    if (flow_limitation_live)
         set_label_text_fmt_if_changed(s_flow_lim_label, "%.2f",
                                       state.flow_limitation);
     else
         set_label_text_if_changed(s_flow_lim_label, "—");
 
     int bar_values[4] = {
-        show_current_metrics && isfinite(state.pressure)
+        pressure_live
             ? (int)((state.pressure - 4.0f) * 100.0f / 16.0f) : 0,
-        show_current_metrics && isfinite(state.leak)
+        leak_live
             ? (int)(state.leak * 100.0f / 24.0f) : 0,
-        show_current_metrics && isfinite(state.respiratory_rate)
+        respiratory_rate_live
             ? (int)((state.respiratory_rate - 8.0f) * 100.0f / 16.0f) : 0,
-        show_current_metrics && isfinite(state.flow_limitation) ? (int)(state.flow_limitation * 100.0f) : 0,
+        flow_limitation_live ? (int)(state.flow_limitation * 100.0f) : 0,
+    };
+    const bool metric_live[] = {
+        pressure_live, leak_live, respiratory_rate_live, flow_limitation_live
     };
     for (int i = 0; i < 4; ++i) {
         if (bar_values[i] < 0) bar_values[i] = 0;
@@ -5960,21 +6021,22 @@ static void update_ui(void)
         if (lv_bar_get_value(s_metric_bars[i]) != bar_values[i])
             lv_bar_set_value(s_metric_bars[i], bar_values[i], LV_ANIM_OFF);
         set_style_color_if_changed(s_metric_bars[i], LV_STYLE_BG_COLOR,
-                                   flow_live ? COLOR_LIVE : COLOR_DISABLED,
+                                   metric_live[i] ? COLOR_LIVE : COLOR_DISABLED,
                                    LV_PART_INDICATOR);
     }
     set_style_color_if_changed(
         s_metric_bars[1], LV_STYLE_BG_COLOR,
-        flow_live && isfinite(state.leak) && state.leak > 24.0f
+        leak_live && state.leak > 24.0f
             ? COLOR_AMBER
-            : flow_live ? COLOR_LIVE : COLOR_DISABLED,
+            : leak_live ? COLOR_LIVE : COLOR_DISABLED,
         LV_PART_INDICATOR);
     lv_obj_t *metric_labels[] = {
         s_pressure_label, s_leak_label, s_resp_label, s_flow_lim_label
     };
     for (int i = 0; i < 4; ++i)
         set_style_color_if_changed(metric_labels[i], LV_STYLE_TEXT_COLOR,
-                                   flow_live ? COLOR_TEXT : COLOR_DISABLED, 0);
+                                   metric_live[i] ? COLOR_TEXT : COLOR_DISABLED,
+                                   0);
 
     int64_t elapsed = 0;
     if (state.therapy && state.therapy_start_us != 0) {
@@ -6021,7 +6083,7 @@ static void update_ui(void)
             s_chart_message,
             !state.paired ? "No AirSense paired"
             : !state.therapy ? "Graph paused"
-            : has_flow_window ? "Live data delayed"
+            : airsense_stale ? "Therapy status unknown"
                               : "Waiting for breathing data…");
         set_label_text_if_changed(
             s_chart_message_sub,
@@ -6070,9 +6132,9 @@ static void update_ui(void)
             set_label_text_if_changed(
                 s_alert_subtitle,
                 alert_state == ALERT_BUZZING
-                    ? "Alarm active - review the mask and machine"
+                    ? "Escalated screen alert - review the mask and machine"
                 : alert_state == ALERT_PUSH_SENT
-                    ? "Push notification sent - alarm is next"
+                    ? "Push sent - the on-screen alert remains active"
                     : "Review the mask and machine, then acknowledge");
             set_hidden(s_alert_ack_button, false);
             set_label_text_if_changed(
@@ -6090,7 +6152,7 @@ static void update_ui(void)
             set_label_text_if_changed(
                 s_alert_subtitle,
                 card_full
-                    ? "New recording refused - free space on the card to resume"
+                    ? "Therapy continues; a new recording cannot begin until card space is freed."
                     : "Therapy can continue. Tonight's recording may be incomplete.");
             set_hidden(s_alert_ack_button, true);
         }
@@ -6468,7 +6530,20 @@ void bsp_display_set_therapy_active(bool active)
     portENTER_CRITICAL(&s_state_lock);
     bool changed = s_state.therapy != active;
     s_state.therapy = active;
-    if (!active) s_state.leak = NAN;
+    if (changed) {
+        s_state.leak = NAN;
+        s_state.pressure = NAN;
+        s_state.respiratory_rate = NAN;
+        s_state.flow_limitation = NAN;
+        s_state.leak_sample_us = 0;
+        s_state.pressure_sample_us = 0;
+        s_state.respiratory_rate_sample_us = 0;
+        s_state.flow_limitation_sample_us = 0;
+        s_state.flow_head = 0;
+        s_state.flow_count = 0;
+        s_state.flow_version++;
+        s_state.flow_sample_us = 0;
+    }
     bool therapy_finished = changed && !active;
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
     if (therapy_finished) s_history_refresh_generation++;
@@ -6501,16 +6576,21 @@ void bsp_display_push_leak(float leak_lpm)
 {
     portENTER_CRITICAL(&s_state_lock);
     s_state.leak = leak_lpm;
+    s_state.leak_sample_us = esp_timer_get_time();
     portEXIT_CRITICAL(&s_state_lock);
 }
 
 void bsp_display_push_metrics(float pressure_cmh2o, float respiratory_rate,
                               float flow_limitation)
 {
+    int64_t sample_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_state_lock);
     s_state.pressure = pressure_cmh2o;
     s_state.respiratory_rate = respiratory_rate;
     s_state.flow_limitation = flow_limitation;
+    s_state.pressure_sample_us = sample_us;
+    s_state.respiratory_rate_sample_us = sample_us;
+    s_state.flow_limitation_sample_us = sample_us;
     portEXIT_CRITICAL(&s_state_lock);
 }
 

@@ -518,7 +518,7 @@ require(display, r'"Waiting for (?:therapy|breathing) data(?:\.\.\.|…)?"',
         "first-sample loading state")
 require(display, r"flow_count\s*>=\s*FLOW_READY_POINTS",
         "valid sample threshold before chart becomes live")
-require(display, r'"(?:No recent flow sample|Live data delayed)"', "stale flow state")
+require(display, r'"Therapy status unknown"', "stale AirSense state")
 for metric in ("AHI", "PRESSURE 95%", "LEAK 95%", "EVENTS PER HOUR"):
     assert metric in display, f"missing History component: {metric}"
 
@@ -572,6 +572,18 @@ require(display, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD,\s*250\)",
         "leased UI free-space query")
 require(display, r"flow_sample_us\s*=\s*esp_timer_get_time\(\)",
         "flow freshness uses source arrival time")
+for timestamp in (
+    "leak_sample_us",
+    "pressure_sample_us",
+    "respiratory_rate_sample_us",
+    "flow_limitation_sample_us",
+):
+    require(display, rf"{timestamp}\s*=\s*(?:sample_us|esp_timer_get_time\(\))",
+            f"{timestamp} tracks independent metric freshness")
+require(display,
+        r"!paired.*?s_therapy_command_busy\s*=\s*false;.*?"
+        r"set_active_page\(2\);.*?set_manage_section\(0\);",
+        "unpaired Home action routes to AirSense setup")
 require(display, r"sd_storage_recording_active\(\)",
         "Home recording copy follows writer state")
 require(display, r"sd_storage_deinit\(\);\s*esp_restart\(\)",

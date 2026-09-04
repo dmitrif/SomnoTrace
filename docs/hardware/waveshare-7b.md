@@ -51,9 +51,9 @@ Therapy, an active alert, and the setup hotspot keep the screen awake. If the
 GT911 touch controller is unavailable, automatic and manual screen-off controls
 are disabled so this touch-only board cannot lock itself dark.
 
-The therapy modes named **Screen off** and **Always off** still allow a touch to
-wake the controls when needed. If their configured policy still calls for a
-dark screen, the panel returns to sleep after a one-minute control window.
+The therapy modes named **Screen off** and **Off except alerts** still allow a
+touch to wake the controls when needed. If their configured policy still calls
+for a dark screen, the panel returns to sleep after a one-minute control window.
 
 ## Build
 

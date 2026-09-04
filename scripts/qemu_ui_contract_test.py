@@ -191,14 +191,14 @@ for literal, description in (
     ("microSD capacity and upload queue", "storage summary"),
     ("Advanced diagnostics", "system disclosure row"),
     ("Diagnostics", "system header action"),
-    ("Up to date", "firmware status value"),
+    ("Not checked", "truthful firmware status value"),
 ):
     assert literal in display, f"missing bedside state: {description}"
 require(display, r'"Waiting for (?:therapy|breathing) data(?:\.\.\.|…)?"',
         "first-sample loading state")
 require(display, r"flow_count\s*>=\s*FLOW_READY_POINTS",
         "valid sample threshold before chart becomes live")
-require(display, r'"(?:No recent flow sample|Live data delayed)"', "stale flow state")
+require(display, r'"Therapy status unknown"', "stale AirSense state")
 for metric in ("AHI", "PRESSURE 95%", "LEAK 95%", "EVENTS PER HOUR"):
     assert metric in display, f"missing History component: {metric}"
 require(display, r"history_trace_draw_cb.*?LV_DRAW_MASK_LINE_SIDE_BOTTOM.*?lv_draw_mask_fade_init",

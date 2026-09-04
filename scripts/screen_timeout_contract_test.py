@@ -248,7 +248,7 @@ require(TOUCH_BSP, r"#define\s+POLICY_PEEK_TIMEOUT_S\s+60",
 require(TOUCH_BSP,
         r"policy_prefers_off.*?LCD_THERAPY_ALWAYS_OFF.*?LCD_THERAPY_OFF.*?"
         r"POLICY_PEEK_TIMEOUT_S",
-        "Screen off and Always off re-sleep after their wake window")
+        "Screen off and Off except alerts re-sleep after their wake window")
 require(TOUCH_BSP,
         r"visual_alarm.*?bsp_display_set_backlight\(true\).*?"
         r"device_settings_snapshot\(&display_settings\).*?"
