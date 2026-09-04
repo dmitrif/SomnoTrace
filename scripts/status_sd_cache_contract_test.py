@@ -36,6 +36,7 @@ def function_body(source: str, name: str) -> str:
 status = function_body(NET, "netprov_build_status_json")
 cached = function_body(SD, "sd_storage_get_cached_free")
 queried = function_body(SD, "sd_storage_get_free")
+reserve = function_body(SD, "sd_storage_reserve_for_recording")
 
 # Status is polled every few seconds. It may serialize cached values, but must
 # not open directories/files or call any API that can reach the card.
@@ -55,6 +56,10 @@ for forbidden in ("f_getfree", "opendir(", "fopen("):
     assert forbidden not in cached, f"cache reader performs I/O: {forbidden}"
 assert "capacity_cache_store(free, total)" in queried
 assert "portENTER_CRITICAL(&s_capacity_lock)" in cached
+assert "sd_storage_get_cached_free(&free_bytes, &total)" in reserve
+assert "sd_storage_get_free(" not in reserve, (
+    "therapy START performs a synchronous SD capacity query"
+)
 assert "sd_storage_get_cached_free" in SD_HEADER
 assert "status_sd_cache_contract_test.py" in HOST_TEST
 

@@ -273,9 +273,11 @@ bool sd_storage_reserve_for_recording(void)
     if (!s_mounted) return false;
 
     uint64_t free_bytes = 0, total = 0;
-    if (sd_storage_get_free(&free_bytes, &total) != ESP_OK) {
-        /* Cannot tell — do not block therapy recording on a failed query. */
-        ESP_LOGW(TAG, "free-space query failed; allowing recording");
+    if (!sd_storage_get_cached_free(&free_bytes, &total)) {
+        /* START is latency- and memory-sensitive: never allocate an SDMMC DMA
+         * buffer here.  Mount and explicit capacity refreshes prime this
+         * cache; an unavailable value must not block raw therapy capture. */
+        ESP_LOGW(TAG, "free-space cache unavailable; allowing recording");
         return true;
     }
 
