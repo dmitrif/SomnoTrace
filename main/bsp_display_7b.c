@@ -46,6 +46,7 @@
 #include "somnotrace_fonts.h"
 #include "therapy_alert.h"
 #include "touch_history.h"
+#include "touch_logs_controller.h"
 #include "uploader.h"
 
 #define FLOW_POINTS 300
@@ -60,8 +61,6 @@
 #define TOUCH_FAILURE_THRESHOLD 3
 #define BACKLIGHT_RETRY_US 250000
 #define MANAGE_SECTION_COUNT 8
-#define LOG_VISIBLE_ROWS 10
-#define LOG_QUERY_MAX 48
 
 typedef enum {
     MANAGE_DEVICES = 0,
@@ -522,45 +521,6 @@ static lv_obj_t *s_manage_buttons[MANAGE_SECTION_COUNT];
 static lv_obj_t *s_manage_labels[MANAGE_SECTION_COUNT];
 static lv_obj_t *s_manage_dots[MANAGE_SECTION_COUNT];
 static int s_active_manage_section = -1;
-static lv_obj_t *s_logs_status_dot;
-static lv_obj_t *s_logs_status;
-static lv_obj_t *s_logs_pause_button;
-static lv_obj_t *s_logs_pause_label;
-static lv_obj_t *s_logs_clear_button;
-static lv_obj_t *s_logs_save_button;
-static lv_obj_t *s_logs_save_label;
-static lv_obj_t *s_logs_query;
-static lv_obj_t *s_logs_level_buttons[4];
-static lv_obj_t *s_logs_level_labels[4];
-static lv_obj_t *s_logs_rows[LOG_VISIBLE_ROWS];
-static lv_obj_t *s_logs_accents[LOG_VISIBLE_ROWS];
-static lv_obj_t *s_logs_times[LOG_VISIBLE_ROWS];
-static lv_obj_t *s_logs_levels[LOG_VISIBLE_ROWS];
-static lv_obj_t *s_logs_tags[LOG_VISIBLE_ROWS];
-static lv_obj_t *s_logs_messages[LOG_VISIBLE_ROWS];
-static lv_obj_t *s_logs_empty;
-static lv_obj_t *s_logs_empty_title;
-static lv_obj_t *s_logs_empty_body;
-static lv_obj_t *s_logs_empty_action;
-static lv_obj_t *s_logs_empty_action_label;
-static lv_obj_t *s_logs_footer_left;
-static lv_obj_t *s_logs_footer_right;
-static lv_obj_t *s_logs_jump_button;
-static lv_obj_t *s_logs_jump_label;
-static log_stream_retained_line_t *s_logs_visible_lines;
-static size_t s_logs_visible_count;
-static log_stream_retained_info_t s_logs_visible_info;
-static uint32_t s_logs_level_mask = LOG_STREAM_RETAINED_LEVEL_ERROR |
-                                    LOG_STREAM_RETAINED_LEVEL_WARN |
-                                    LOG_STREAM_RETAINED_LEVEL_INFO;
-static uint64_t s_logs_seen_generation = UINT64_MAX;
-static uint64_t s_logs_pause_total;
-static bool s_logs_paused;
-static bool s_logs_filter_dirty = true;
-static bool s_logs_save_busy;
-static uint8_t s_logs_save_progress;
-static esp_err_t s_logs_save_result = ESP_ERR_INVALID_STATE;
-static size_t s_logs_saved_count;
 static lv_obj_t *s_keyboard_sheet;
 static lv_obj_t *s_keyboard_title;
 static lv_obj_t *s_keyboard;
@@ -2510,6 +2470,18 @@ static void set_active_page(int page)
                                      selected ? LV_OPA_50 : LV_OPA_TRANSP),
                                  0);
     }
+    if (page == 2 && s_active_manage_section == MANAGE_LOGS) {
+        esp_err_t logs_result = touch_logs_controller_show(
+            s_manage_sections[MANAGE_LOGS]);
+        if (logs_result != ESP_OK)
+            bsp_display_set_notice("Unable to open retained logs");
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+        else
+            ESP_LOGI(TAG, "QEMU native Logs pane ready");
+#endif
+    } else {
+        touch_logs_controller_hide();
+    }
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
     ESP_LOGI(TAG, "emulated touch selected page %u", (unsigned)page);
 #endif
@@ -2526,6 +2498,8 @@ static void set_manage_section(int section)
 {
     if (section < 0 || section >= MANAGE_SECTION_COUNT) return;
     if (section == s_active_manage_section) return;
+    if (s_active_manage_section == MANAGE_LOGS)
+        touch_logs_controller_hide();
     s_active_manage_section = section;
     for (int i = 0; i < MANAGE_SECTION_COUNT; ++i) {
         bool selected = i == section;
@@ -2552,7 +2526,16 @@ static void set_manage_section(int section)
     if (section == MANAGE_ALERTS) start_alert_config_refresh();
     if (section == MANAGE_STORAGE || section == MANAGE_UPLOADS)
         start_storage_refresh();
-    if (section == MANAGE_LOGS) s_logs_filter_dirty = true;
+    if (section == MANAGE_LOGS && s_active_page == 2) {
+        esp_err_t logs_result = touch_logs_controller_show(
+            s_manage_sections[MANAGE_LOGS]);
+        if (logs_result != ESP_OK)
+            bsp_display_set_notice("Unable to open retained logs");
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+        else
+            ESP_LOGI(TAG, "QEMU native Logs pane ready");
+#endif
+    }
     close_keyboard_sheet(true);
 }
 
@@ -3869,280 +3852,6 @@ static void build_storage_section(lv_obj_t *section)
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
 
-typedef struct {
-    log_stream_retained_filter_t filter;
-    char query[LOG_QUERY_MAX + 1];
-} logs_save_job_t;
-
-static void logs_set_paused(bool paused)
-{
-    if (s_logs_paused == paused) return;
-    s_logs_paused = paused;
-    if (paused) {
-        log_stream_retained_info_t info;
-        if (log_stream_retained_get_info(&info) == ESP_OK)
-            s_logs_pause_total = info.total_count;
-    } else {
-        s_logs_filter_dirty = true;
-    }
-}
-
-static void logs_pause_cb(lv_event_t *event)
-{
-    (void)event;
-    logs_set_paused(!s_logs_paused);
-}
-
-static void logs_query_focus_cb(lv_event_t *event)
-{
-    if (lv_event_get_code(event) != LV_EVENT_FOCUSED) return;
-    /* Search never silently resumes a moving viewport. The user can resume
-     * explicitly after dismissing the keyboard and checking the result. */
-    logs_set_paused(true);
-    open_keyboard_sheet(lv_event_get_target(event),
-                        LV_KEYBOARD_MODE_TEXT_LOWER, "Filter logs", 314);
-}
-
-static void logs_query_changed_cb(lv_event_t *event)
-{
-    if (lv_event_get_code(event) == LV_EVENT_VALUE_CHANGED)
-        s_logs_filter_dirty = true;
-}
-
-static void logs_level_cb(lv_event_t *event)
-{
-    static const uint32_t masks[] = {
-        LOG_STREAM_RETAINED_LEVEL_ERROR,
-        LOG_STREAM_RETAINED_LEVEL_WARN,
-        LOG_STREAM_RETAINED_LEVEL_INFO,
-        LOG_STREAM_RETAINED_LEVEL_DEBUG |
-            LOG_STREAM_RETAINED_LEVEL_VERBOSE,
-    };
-    int index = (int)(intptr_t)lv_event_get_user_data(event);
-    if (index < 0 || index >= (int)(sizeof(masks) / sizeof(masks[0]))) return;
-    s_logs_level_mask ^= masks[index];
-    s_logs_filter_dirty = true;
-}
-
-static void logs_empty_action_cb(lv_event_t *event)
-{
-    (void)event;
-    log_stream_retained_info_t info;
-    if (log_stream_retained_get_info(&info) != ESP_OK || !info.available) {
-        (void)log_stream_retained_retry();
-    } else {
-        lv_textarea_set_text(s_logs_query, "");
-        if (s_logs_level_mask == 0) {
-            s_logs_level_mask = LOG_STREAM_RETAINED_LEVEL_ERROR |
-                                LOG_STREAM_RETAINED_LEVEL_WARN |
-                                LOG_STREAM_RETAINED_LEVEL_INFO;
-        }
-    }
-    s_logs_seen_generation = UINT64_MAX;
-    s_logs_filter_dirty = true;
-}
-
-static void logs_clear_cb(lv_event_t *event)
-{
-    (void)event;
-    portENTER_CRITICAL(&s_state_lock);
-    bool save_busy = s_logs_save_busy;
-    portEXIT_CRITICAL(&s_state_lock);
-    if (save_busy) return;
-    esp_err_t result = log_stream_retained_clear();
-    s_logs_visible_count = 0;
-    s_logs_seen_generation = UINT64_MAX;
-    s_logs_filter_dirty = true;
-    if (result == ESP_OK) {
-        portENTER_CRITICAL(&s_state_lock);
-        s_logs_save_result = ESP_ERR_INVALID_STATE;
-        s_logs_saved_count = 0;
-        portEXIT_CRITICAL(&s_state_lock);
-    }
-}
-
-static void logs_jump_cb(lv_event_t *event)
-{
-    (void)event;
-    /* Refresh once at the tail but remain paused, preserving the primary
-     * readability affordance and avoiding a surprise return to motion. */
-    s_logs_filter_dirty = true;
-}
-
-static void logs_save_progress(size_t processed, size_t total, void *ctx)
-{
-    (void)ctx;
-    uint8_t percent = total == 0 ? 100 :
-        (uint8_t)LV_MIN((processed * 100U) / total, 100U);
-    portENTER_CRITICAL(&s_state_lock);
-    s_logs_save_progress = percent;
-    portEXIT_CRITICAL(&s_state_lock);
-}
-
-static void logs_save_task(void *arg)
-{
-    logs_save_job_t *job = arg;
-    size_t saved_count = 0;
-    esp_err_t result = log_stream_retained_save_to_sd(
-        &job->filter, NULL, 0, &saved_count, logs_save_progress, NULL);
-    free(job);
-    portENTER_CRITICAL(&s_state_lock);
-    s_logs_save_busy = false;
-    s_logs_save_result = result;
-    s_logs_saved_count = saved_count;
-    if (result == ESP_OK) s_logs_save_progress = 100;
-    portEXIT_CRITICAL(&s_state_lock);
-    psram_task_delete(NULL);
-}
-
-static void logs_save_cb(lv_event_t *event)
-{
-    (void)event;
-    portENTER_CRITICAL(&s_state_lock);
-    bool busy = s_logs_save_busy;
-    if (!busy) {
-        s_logs_save_busy = true;
-        s_logs_save_progress = 0;
-    }
-    portEXIT_CRITICAL(&s_state_lock);
-    if (busy) return;
-
-    logs_save_job_t *job = calloc(1, sizeof(*job));
-    if (!job) {
-        portENTER_CRITICAL(&s_state_lock);
-        s_logs_save_busy = false;
-        s_logs_save_result = ESP_ERR_NO_MEM;
-        portEXIT_CRITICAL(&s_state_lock);
-        return;
-    }
-    const char *query = s_logs_query ? lv_textarea_get_text(s_logs_query) : "";
-    strlcpy(job->query, query ? query : "", sizeof(job->query));
-    job->filter.level_mask = s_logs_level_mask ? s_logs_level_mask
-                                                : (1u << 31);
-    job->filter.query = job->query;
-    job->filter.order = LOG_STREAM_RETAINED_OLDEST_FIRST;
-    if (!psram_task_create(logs_save_task, "ui_log_save", 6144, job, 3, 0,
-                           NULL, NULL)) {
-        free(job);
-        portENTER_CRITICAL(&s_state_lock);
-        s_logs_save_busy = false;
-        s_logs_save_result = ESP_ERR_NO_MEM;
-        portEXIT_CRITICAL(&s_state_lock);
-    }
-}
-
-static void build_logs_section(lv_obj_t *section)
-{
-    make_label(section, "Logs", 18, 12, 100, FONT_SCREEN_TITLE, COLOR_TEXT);
-    s_logs_status_dot = make_status_dot(section, 18, 49, 8);
-    s_logs_status = make_label(section, "Starting retained log feed", 34, 43,
-                               330, FONT_AXIS, COLOR_SECONDARY);
-
-    s_logs_pause_button = make_touch_button(section, 490, 9, 76, 44, "Pause",
-                                             COLOR_CONTROL, logs_pause_cb, 0);
-    s_logs_pause_label = lv_obj_get_child(s_logs_pause_button, 0);
-    lv_obj_set_style_text_font(s_logs_pause_label, FONT_BUTTON_SMALL, 0);
-    s_logs_clear_button = make_touch_button(section, 574, 9, 72, 44, "Clear",
-                                             COLOR_CONTROL, logs_clear_cb, 0);
-    lv_obj_set_style_text_font(lv_obj_get_child(s_logs_clear_button, 0),
-                               FONT_BUTTON_SMALL, 0);
-    s_logs_save_button = make_touch_button(section, 654, 9, 100, 44,
-                                            "Save to card", COLOR_CONTROL,
-                                            logs_save_cb, 0);
-    s_logs_save_label = lv_obj_get_child(s_logs_save_button, 0);
-    lv_obj_set_style_text_font(s_logs_save_label, FONT_BUTTON_SMALL, 0);
-
-    s_logs_query = lv_textarea_create(section);
-    lv_textarea_set_one_line(s_logs_query, true);
-    lv_textarea_set_max_length(s_logs_query, LOG_QUERY_MAX);
-    lv_textarea_set_placeholder_text(s_logs_query, "Filter by tag or message");
-    lv_obj_set_pos(s_logs_query, 14, 68);
-    lv_obj_set_size(s_logs_query, 330, 44);
-    lv_obj_set_style_text_font(s_logs_query, FONT_AXIS, 0);
-    style_manage_textarea(s_logs_query);
-    lv_obj_add_event_cb(s_logs_query, logs_query_focus_cb, LV_EVENT_FOCUSED,
-                        NULL);
-    lv_obj_add_event_cb(s_logs_query, logs_query_changed_cb,
-                        LV_EVENT_VALUE_CHANGED, NULL);
-
-    static const char *level_names[] = { "Error", "Warn", "Info", "Debug" };
-    for (int i = 0; i < 4; ++i) {
-        s_logs_level_buttons[i] = make_touch_button(
-            section, 352 + i * 95, 68, 87, 44, level_names[i], COLOR_CONTROL,
-            logs_level_cb, i);
-        lv_obj_set_style_radius(s_logs_level_buttons[i], 22, 0);
-        s_logs_level_labels[i] = lv_obj_get_child(s_logs_level_buttons[i], 0);
-        lv_obj_set_style_text_font(s_logs_level_labels[i], FONT_AXIS, 0);
-    }
-
-    lv_obj_t *viewport = make_inner_card(
-        section, 14, 120, UI_MANAGE_SCROLL_W, 258, 18);
-    lv_obj_set_style_bg_color(viewport, lv_color_hex(0x090c13), 0);
-    lv_obj_set_style_border_width(viewport, 1, 0);
-    lv_obj_set_style_border_color(viewport, lv_color_hex(0x252b36), 0);
-    s_manage_scrolls[MANAGE_LOGS] = viewport;
-    for (int i = 0; i < LOG_VISIBLE_ROWS; ++i) {
-        lv_obj_t *row = make_inner_card(
-            viewport, 7, 4 + i * 25, UI_MANAGE_ROW_W, 24, 4);
-        s_logs_rows[i] = row;
-        s_logs_accents[i] = make_inner_card(row, 0, 0, 3, 24, 1);
-        s_logs_times[i] = make_label(row, "--:--:--.---", 10, 6, 91,
-                                     FONT_AXIS, COLOR_TERTIARY);
-        s_logs_levels[i] = make_label(row, "INFO", 105, 6, 38,
-                                      FONT_AXIS, COLOR_LIVE);
-        s_logs_tags[i] = make_label(row, "system", 148, 6, 112,
-                                    FONT_AXIS, COLOR_SECONDARY);
-        s_logs_messages[i] = make_label(row, "", 264, 6, 452,
-                                        FONT_AXIS, COLOR_TEXT);
-        lv_label_set_long_mode(s_logs_times[i], LV_LABEL_LONG_CLIP);
-        lv_label_set_long_mode(s_logs_levels[i], LV_LABEL_LONG_CLIP);
-        lv_label_set_long_mode(s_logs_tags[i], LV_LABEL_LONG_CLIP);
-        lv_label_set_long_mode(s_logs_messages[i], LV_LABEL_LONG_CLIP);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    s_logs_empty = make_plain_container(
-        viewport, 0, 0, UI_MANAGE_SCROLL_W, 258);
-    make_label(s_logs_empty, "?", 346, 54, 48, FONT_SCREEN_TITLE,
-               COLOR_SECONDARY);
-    s_logs_empty_title = make_label(s_logs_empty, "No log lines yet", 100, 105,
-                                    540, FONT_ROW_TITLE, COLOR_TEXT);
-    lv_obj_set_style_text_align(s_logs_empty_title, LV_TEXT_ALIGN_CENTER, 0);
-    s_logs_empty_body = make_label(
-        s_logs_empty, "The retained feed will appear here as services report.",
-        90, 136, 560, FONT_BODY_SMALL, COLOR_SECONDARY);
-    lv_obj_set_style_text_align(s_logs_empty_body, LV_TEXT_ALIGN_CENTER, 0);
-    s_logs_empty_action = make_touch_button(
-        s_logs_empty, 285, 182, 170, 48, "Clear filter", COLOR_INVERSE,
-        logs_empty_action_cb, 0);
-    lv_obj_set_style_radius(s_logs_empty_action, 24, 0);
-    s_logs_empty_action_label = lv_obj_get_child(s_logs_empty_action, 0);
-    lv_obj_set_style_text_font(s_logs_empty_action_label, FONT_BUTTON_SMALL, 0);
-    lv_obj_set_style_text_color(s_logs_empty_action_label,
-                                lv_color_hex(COLOR_BASE), 0);
-    lv_obj_add_flag(s_logs_empty_action, LV_OBJ_FLAG_HIDDEN);
-
-    s_logs_jump_button = make_touch_button(section, 269, 326, 226, 44,
-                                            "Jump to newest", COLOR_INVERSE,
-                                            logs_jump_cb, 0);
-    lv_obj_set_style_radius(s_logs_jump_button, 22, 0);
-    s_logs_jump_label = lv_obj_get_child(s_logs_jump_button, 0);
-    lv_obj_set_style_text_font(s_logs_jump_label, FONT_BUTTON_SMALL, 0);
-    lv_obj_set_style_text_color(s_logs_jump_label, lv_color_hex(COLOR_BASE), 0);
-    lv_obj_add_flag(s_logs_jump_button, LV_OBJ_FLAG_HIDDEN);
-
-    s_logs_footer_left = make_label(section, "Waiting for log feed", 14, 404,
-                                    330, FONT_AXIS, COLOR_TERTIARY);
-    s_logs_footer_right = make_label(
-        section, "Older lines roll off the buffer. Save to card to keep them.",
-        372, 404, 382, FONT_AXIS, COLOR_TERTIARY);
-    lv_obj_set_style_text_align(s_logs_footer_right, LV_TEXT_ALIGN_RIGHT, 0);
-
-    s_logs_visible_lines = heap_caps_calloc(
-        LOG_VISIBLE_ROWS, sizeof(*s_logs_visible_lines),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-}
-
 static void build_system_section(lv_obj_t *section)
 {
     lv_obj_t *scroll = make_manage_section(section, MANAGE_SYSTEM, "System",
@@ -4251,7 +3960,8 @@ static void build_manage_page(lv_obj_t *manage)
     build_uploads_section(s_manage_sections[MANAGE_UPLOADS]);
     build_storage_section(s_manage_sections[MANAGE_STORAGE]);
     build_system_section(s_manage_sections[MANAGE_SYSTEM]);
-    build_logs_section(s_manage_sections[MANAGE_LOGS]);
+    /* The rich Logs tree is PSRAM-backed and created only when selected. */
+    s_manage_scrolls[MANAGE_LOGS] = s_manage_sections[MANAGE_LOGS];
     build_advanced_section(s_manage_sections[MANAGE_ADVANCED]);
 }
 
@@ -5444,308 +5154,6 @@ static void refresh_wifi_scan_controls(void)
     }
 }
 
-static const char *logs_level_name(uint8_t level)
-{
-    switch (level) {
-        case LOG_STREAM_RETAINED_LEVEL_ERROR: return "ERROR";
-        case LOG_STREAM_RETAINED_LEVEL_WARN: return "WARN";
-        case LOG_STREAM_RETAINED_LEVEL_INFO: return "INFO";
-        case LOG_STREAM_RETAINED_LEVEL_DEBUG:
-        case LOG_STREAM_RETAINED_LEVEL_VERBOSE: return "DEBUG";
-        default: return "OTHER";
-    }
-}
-
-static uint32_t logs_level_tone(uint8_t level)
-{
-    switch (level) {
-        case LOG_STREAM_RETAINED_LEVEL_ERROR: return COLOR_FAULT;
-        case LOG_STREAM_RETAINED_LEVEL_WARN: return COLOR_AMBER;
-        case LOG_STREAM_RETAINED_LEVEL_INFO: return COLOR_LIVE;
-        default: return COLOR_TERTIARY;
-    }
-}
-
-static void logs_parse_line(const log_stream_retained_line_t *line,
-                            char *time_text, size_t time_size,
-                            char *tag, size_t tag_size,
-                            char *message, size_t message_size)
-{
-    if (!line || !time_text || !tag || !message) return;
-    strlcpy(time_text, "--:--:--.---", time_size);
-    strlcpy(tag, "system", tag_size);
-    strlcpy(message, line->text, message_size);
-
-    const char *open = strchr(line->text, '(');
-    const char *close = open ? strchr(open + 1, ')') : NULL;
-    if (!open || !close) return;
-
-    size_t stamp_length = (size_t)(close - (open + 1));
-    if (memchr(open + 1, ':', stamp_length) && stamp_length < time_size) {
-        memcpy(time_text, open + 1, stamp_length);
-        time_text[stamp_length] = '\0';
-    } else {
-        char *stamp_end = NULL;
-        unsigned long long stamp_ms = strtoull(open + 1, &stamp_end, 10);
-        if (stamp_end != close) goto parse_payload;
-        time_t wall_now = time(NULL);
-        int64_t boot_ms = esp_timer_get_time() / 1000;
-        if (wall_now > 1600000000 && (int64_t)stamp_ms <= boot_ms + 60000) {
-            int64_t epoch_ms = (int64_t)wall_now * 1000 - boot_ms +
-                               (int64_t)stamp_ms;
-            time_t seconds = (time_t)(epoch_ms / 1000);
-            struct tm local;
-            localtime_r(&seconds, &local);
-            snprintf(time_text, time_size, "%02d:%02d:%02d.%03u",
-                     local.tm_hour, local.tm_min, local.tm_sec,
-                     (unsigned)(epoch_ms % 1000));
-        } else {
-            unsigned long long seconds = stamp_ms / 1000;
-            unsigned hours = seconds / 3600 > 999 ? 999
-                                                   : (unsigned)(seconds / 3600);
-            snprintf(time_text, time_size, "+%03u:%02u:%02u", hours,
-                     (unsigned)((seconds / 60) % 60),
-                     (unsigned)(seconds % 60));
-        }
-    }
-
-parse_payload:
-    const char *tag_start = close + 1;
-    while (*tag_start == ' ') tag_start++;
-    const char *colon = strchr(tag_start, ':');
-    if (!colon) return;
-    size_t tag_length = (size_t)(colon - tag_start);
-    if (tag_length >= tag_size) tag_length = tag_size - 1;
-    memcpy(tag, tag_start, tag_length);
-    tag[tag_length] = '\0';
-    const char *message_start = colon + 1;
-    while (*message_start == ' ') message_start++;
-    strlcpy(message, message_start, message_size);
-    if (line->truncated && strlen(message) + 3 < message_size)
-        strlcat(message, "...", message_size);
-}
-
-static void refresh_log_level_controls(void)
-{
-    static const uint32_t masks[] = {
-        LOG_STREAM_RETAINED_LEVEL_ERROR,
-        LOG_STREAM_RETAINED_LEVEL_WARN,
-        LOG_STREAM_RETAINED_LEVEL_INFO,
-        LOG_STREAM_RETAINED_LEVEL_DEBUG |
-            LOG_STREAM_RETAINED_LEVEL_VERBOSE,
-    };
-    static const uint32_t tones[] = {
-        COLOR_FAULT, COLOR_AMBER, COLOR_LIVE, COLOR_TERTIARY,
-    };
-    for (int i = 0; i < 4; ++i) {
-        bool enabled = (s_logs_level_mask & masks[i]) != 0;
-        set_button_surface(s_logs_level_buttons[i],
-                           enabled ? tones[i] : COLOR_CONTROL,
-                           enabled ? LV_OPA_30 : LV_OPA_COVER);
-        set_style_color_if_changed(s_logs_level_buttons[i],
-                                   LV_STYLE_BORDER_COLOR, tones[i], 0);
-        set_style_num_if_changed(s_logs_level_buttons[i],
-                                 LV_STYLE_BORDER_WIDTH, enabled ? 1 : 0, 0);
-        set_style_color_if_changed(s_logs_level_labels[i], LV_STYLE_TEXT_COLOR,
-                                   enabled ? COLOR_TEXT : COLOR_DISABLED, 0);
-    }
-}
-
-static void refresh_logs_widgets(const ui_state_t *state)
-{
-    log_stream_retained_info_t info = {0};
-    esp_err_t result = log_stream_retained_get_info(&info);
-    bool available = result == ESP_OK && info.available &&
-                     s_logs_visible_lines != NULL;
-    uint64_t new_lines = s_logs_paused && info.total_count > s_logs_pause_total
-                             ? info.total_count - s_logs_pause_total : 0;
-
-    bool should_snapshot = available &&
-        (s_logs_filter_dirty ||
-         (!s_logs_paused && info.generation != s_logs_seen_generation));
-    if (should_snapshot) {
-        log_stream_retained_filter_t filter = {
-            .level_mask = s_logs_level_mask ? s_logs_level_mask
-                                             : (1u << 31),
-            .query = lv_textarea_get_text(s_logs_query),
-            .after_sequence = 0,
-            .order = LOG_STREAM_RETAINED_NEWEST_FIRST,
-        };
-        size_t count = 0;
-        result = log_stream_retained_snapshot(
-            s_logs_visible_lines, LOG_VISIBLE_ROWS, &filter, &count, &info);
-        if (result == ESP_OK) {
-            s_logs_visible_count = count;
-            s_logs_visible_info = info;
-            s_logs_seen_generation = info.generation;
-            s_logs_pause_total = info.total_count;
-            s_logs_filter_dirty = false;
-            new_lines = 0;
-        } else {
-            available = false;
-        }
-    }
-
-    refresh_log_level_controls();
-    set_label_text_if_changed(s_logs_pause_label,
-                              s_logs_paused ? "Resume" : "Pause");
-    set_control_disabled(s_logs_pause_button, !available);
-    bool save_busy;
-    uint8_t save_progress;
-    esp_err_t save_result;
-    size_t saved_count;
-    portENTER_CRITICAL(&s_state_lock);
-    save_busy = s_logs_save_busy;
-    save_progress = s_logs_save_progress;
-    save_result = s_logs_save_result;
-    saved_count = s_logs_saved_count;
-    portEXIT_CRITICAL(&s_state_lock);
-    set_control_disabled(s_logs_clear_button,
-                         save_busy || !available || info.retained_count == 0);
-    if (save_busy) {
-        set_label_text_fmt_if_changed(s_logs_save_label, "%u%%",
-                                      (unsigned)save_progress);
-    } else {
-        set_label_text_if_changed(s_logs_save_label, "Save to card");
-    }
-    set_control_disabled(s_logs_save_button,
-                         save_busy || !available || !state->sd_ready ||
-                         info.retained_count == 0);
-
-    if (!available) {
-        set_dot_tone(s_logs_status_dot, COLOR_FAULT, true);
-        set_dot_tone(s_manage_dots[MANAGE_LOGS], COLOR_FAULT, true);
-        set_label_text_if_changed(s_logs_status,
-                                  "Stream disconnected - therapy and recording continue");
-    } else if (s_logs_paused) {
-        set_dot_tone(s_logs_status_dot, COLOR_AMBER, true);
-        set_dot_tone(s_manage_dots[MANAGE_LOGS], COLOR_AMBER, true);
-        set_label_text_fmt_if_changed(
-            s_logs_status, "Paused - %llu new line%s buffered",
-            (unsigned long long)new_lines, new_lines == 1 ? "" : "s");
-    } else {
-        set_dot_tone(s_logs_status_dot, COLOR_LIVE, true);
-        set_dot_tone(s_manage_dots[MANAGE_LOGS], COLOR_LIVE, true);
-        set_label_text_fmt_if_changed(
-            s_logs_status, "Live - %u-line ring buffer%s",
-            (unsigned)info.capacity,
-            info.dropped_count ? " - some lines dropped" : "");
-    }
-
-    if (!available) {
-        set_label_text_if_changed(s_logs_empty_title, "Log stream disconnected");
-        set_label_text_if_changed(
-            s_logs_empty_body,
-            "The logging feed stopped reporting. Therapy and card recording are unaffected; saved card logs remain available.");
-        set_label_text_if_changed(s_logs_empty_action_label, "Reconnect");
-    } else if (s_logs_visible_count == 0) {
-        const char *query = lv_textarea_get_text(s_logs_query);
-        if (query && query[0]) {
-            set_label_text_fmt_if_changed(s_logs_empty_title,
-                                          "No lines match \"%s\"", query);
-            set_label_text_if_changed(
-                s_logs_empty_body,
-                (s_logs_level_mask & LOG_STREAM_RETAINED_LEVEL_DEBUG)
-                    ? "Clear the filter or enable another level."
-                    : "Clear the filter or enable Debug to widen the search.");
-            set_label_text_if_changed(s_logs_empty_action_label,
-                                      "Clear filter");
-        } else if (s_logs_level_mask == 0) {
-            set_label_text_if_changed(s_logs_empty_title, "No levels selected");
-            set_label_text_if_changed(s_logs_empty_body,
-                                      "Enable at least one level above.");
-            set_label_text_if_changed(s_logs_empty_action_label,
-                                      "Reset levels");
-        } else {
-            set_label_text_if_changed(s_logs_empty_title, "No log lines yet");
-            set_label_text_if_changed(
-                s_logs_empty_body,
-                "The retained feed will appear here as services report.");
-        }
-    }
-    set_hidden(s_logs_empty, available && s_logs_visible_count > 0);
-    const char *active_query = lv_textarea_get_text(s_logs_query);
-    bool empty_action = !available ||
-        (s_logs_visible_count == 0 &&
-         ((active_query && active_query[0]) || s_logs_level_mask == 0));
-    set_hidden(s_logs_empty_action, !empty_action);
-
-    for (int row = 0; row < LOG_VISIBLE_ROWS; ++row) {
-        bool shown = available && row < (int)s_logs_visible_count;
-        set_hidden(s_logs_rows[row], !shown);
-        if (!shown) continue;
-        /* The service returns newest-first so reverse only the ten visible
-         * rows; the screen then reads naturally from older to newer. */
-        const log_stream_retained_line_t *line =
-            &s_logs_visible_lines[s_logs_visible_count - 1 - row];
-        char time_text[20];
-        char tag[24];
-        char message[LOG_STREAM_RETAINED_TEXT_MAX];
-        logs_parse_line(line, time_text, sizeof(time_text), tag, sizeof(tag),
-                        message, sizeof(message));
-        uint32_t tone = logs_level_tone(line->level);
-        uint32_t row_color = line->level == LOG_STREAM_RETAINED_LEVEL_ERROR
-                                 ? 0x2b1218
-                             : line->level == LOG_STREAM_RETAINED_LEVEL_WARN
-                                 ? 0x272112
-                                 : 0x0c1018;
-        set_style_color_if_changed(s_logs_rows[row], LV_STYLE_BG_COLOR,
-                                   row_color, 0);
-        set_style_color_if_changed(s_logs_accents[row], LV_STYLE_BG_COLOR,
-                                   tone, 0);
-        set_label_text_if_changed(s_logs_times[row], time_text);
-        set_label_text_if_changed(s_logs_levels[row],
-                                  logs_level_name(line->level));
-        set_label_text_if_changed(s_logs_tags[row], tag);
-        set_label_text_if_changed(s_logs_messages[row], message);
-        set_style_color_if_changed(s_logs_levels[row], LV_STYLE_TEXT_COLOR,
-                                   tone, 0);
-        set_style_color_if_changed(
-            s_logs_messages[row], LV_STYLE_TEXT_COLOR,
-            line->level == LOG_STREAM_RETAINED_LEVEL_DEBUG ||
-                    line->level == LOG_STREAM_RETAINED_LEVEL_VERBOSE
-                ? COLOR_SECONDARY : COLOR_TEXT,
-            0);
-    }
-
-    set_hidden(s_logs_jump_button, !available || !s_logs_paused || new_lines == 0);
-    if (new_lines > 0)
-        set_label_text_fmt_if_changed(s_logs_jump_label,
-                                      "Jump to newest - %llu new",
-                                      (unsigned long long)new_lines);
-
-    if (!available) {
-        set_label_text_if_changed(s_logs_footer_left, "Retained feed unavailable");
-    } else if (save_busy) {
-        set_label_text_fmt_if_changed(
-            s_logs_footer_left, "Saving log snapshot to card - %u%%",
-            (unsigned)save_progress);
-    } else if (save_result == ESP_OK) {
-        set_label_text_fmt_if_changed(s_logs_footer_left,
-                                      "Saved %u lines to card",
-                                      (unsigned)saved_count);
-    } else if (save_result != ESP_ERR_INVALID_STATE) {
-        set_label_text_if_changed(s_logs_footer_left,
-                                  "Could not save snapshot - check the card");
-    } else {
-        uint32_t retained_minutes =
-            s_logs_visible_info.retained_span_ms / 60000U;
-        if (retained_minutes > 0) {
-            set_label_text_fmt_if_changed(
-                s_logs_footer_left,
-                "Showing %u of %u lines - %u min retained",
-                (unsigned)s_logs_visible_count,
-                (unsigned)s_logs_visible_info.retained_count,
-                (unsigned)retained_minutes);
-        } else {
-            set_label_text_fmt_if_changed(
-                s_logs_footer_left, "Showing %u of %u lines - under 1 min",
-                (unsigned)s_logs_visible_count,
-                (unsigned)s_logs_visible_info.retained_count);
-        }
-    }
-}
-
 static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
 {
     const ui_service_state_t *services = s_render_services;
@@ -5806,7 +5214,7 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     }
 
     if (s_active_manage_section == MANAGE_LOGS) {
-        refresh_logs_widgets(state);
+        touch_logs_controller_refresh(state->sd_ready);
         return;
     }
     if (s_active_manage_section == MANAGE_CONNECTIVITY)
@@ -6191,7 +5599,8 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     log_stream_retained_info_t log_info;
     uint32_t log_color = log_stream_retained_get_info(&log_info) == ESP_OK &&
                                  log_info.available
-                             ? (s_logs_paused ? COLOR_AMBER : COLOR_LIVE)
+                             ? (touch_logs_controller_is_paused()
+                                    ? COLOR_AMBER : COLOR_LIVE)
                              : COLOR_FAULT;
     const uint32_t dots[MANAGE_SECTION_COUNT] = {
         [MANAGE_DEVICES] = device_color,

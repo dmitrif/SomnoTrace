@@ -189,7 +189,7 @@ def interaction_sequence(name):
     if name == "logs":
         return (
             ((694, 563), 0.35, "emulated touch selected page 2"),
-            ((130, 420), 0.6, None),
+            ((130, 420), 0.6, "QEMU native Logs pane ready"),
         )
     if name.startswith("connectivity-password-"):
         sequence = [
@@ -289,6 +289,13 @@ def validate_persistent_shell(name, payload, representative, interaction):
             y1 = 84 + index * 52
             if bright_samples(payload, (35, y1, 225, y1 + 48)) < 20:
                 raise AssertionError(f"Manage rail entry {label} is absent")
+
+    if name == "logs":
+        # The retained pane is lazy. Requiring detail content proves the Logs
+        # rail touch constructed and rendered it rather than capturing the
+        # intentionally empty placeholder section.
+        if bright_samples(payload, (255, 72, 995, 510)) < 180:
+            raise AssertionError("lazy native Logs detail pane is absent")
 
     if name.startswith("connectivity-password-"):
         # The literal editing frame exposes only the Password row above the

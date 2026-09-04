@@ -26,6 +26,7 @@ kconfig = source("main/Kconfig.projbuild")
 component = source("main/idf_component.yml")
 board = source("main/board_qemu.c")
 display = source("main/bsp_display_7b.c")
+logs_ui = source("main/touch_logs_ui.c")
 demo = source("main/main_qemu.c")
 defaults = source("sdkconfig.qemu.defaults")
 setup = source("scripts/setup-qemu-macos.sh")
@@ -202,6 +203,7 @@ require(display,
 # Protect the concrete bedside state vocabulary, not just the shell. These
 # literals correspond to visible controls or explicit loading/degraded states
 # in the handoff and must remain present in the firmware exercised by QEMU.
+bedside_ui = display + "\n" + logs_ui
 for literal, description in (
     ("Therapy active", "active therapy state"),
     ("Therapy stopped", "stopped therapy state"),
@@ -237,7 +239,7 @@ for literal, description in (
     ("Diagnostics", "system header action"),
     ("Not checked", "truthful firmware status value"),
 ):
-    assert literal in display, f"missing bedside state: {description}"
+    assert literal in bedside_ui, f"missing bedside state: {description}"
 require(display, r'"Waiting for (?:therapy|breathing) data(?:\.\.\.|…)?"',
         "first-sample loading state")
 require(display, r"flow_count\s*>=\s*FLOW_READY_POINTS",
@@ -321,7 +323,8 @@ for contract, description in (
     ('"connectivity-password-revealed"', "revealed password capture"),
     ('"connectivity-password-remasked"', "remasked password capture"),
     ('((130, 160), 0.5, None)', "Connectivity rail interaction coordinate"),
-    ('((130, 420), 0.6, None)', "Logs rail interaction coordinate"),
+    ('((130, 420), 0.6, "QEMU native Logs pane ready")',
+     "Logs rail interaction and lazy-render synchronization"),
     ('"__drag__"', "System display-controls scroll gesture"),
     ('((620, 396), 0.5, None)', "password-field interaction coordinate"),
     ('start_offset=log_offset', "new touch/page log synchronization"),
