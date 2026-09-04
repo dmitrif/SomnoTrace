@@ -35,6 +35,7 @@ initialise = function_body(SOURCE, "retained_init")
 copy_slot = function_body(SOURCE, "retained_copy_slot")
 matching = function_body(SOURCE, "retained_filter_matches")
 snapshot = function_body(SOURCE, "log_stream_retained_snapshot")
+snapshot_page = function_body(SOURCE, "log_stream_retained_snapshot_page")
 snapshot_core = function_body(SOURCE, "retained_snapshot_from_bounds")
 clear = function_body(SOURCE, "log_stream_retained_clear")
 retry = function_body(SOURCE, "log_stream_retained_retry")
@@ -45,6 +46,7 @@ save = function_body(SOURCE, "log_stream_retained_save_to_sd")
 for symbol in (
     "log_stream_retained_get_info",
     "log_stream_retained_snapshot",
+    "log_stream_retained_snapshot_page",
     "log_stream_retained_retry",
     "log_stream_retained_clear",
     "log_stream_retained_save_to_sd",
@@ -57,6 +59,9 @@ for symbol in (
     "in_psram",
     "log_stream_retained_progress_fn",
     "after_sequence",
+    "before_sequence",
+    "matching_count",
+    "match_offset",
     "level_mask",
     "query",
 ):
@@ -106,13 +111,25 @@ assert "slot->version" not in SOURCE
 assert "RETAINED_SNAPSHOT_RETRIES" not in SOURCE
 assert "filter->level_mask" in matching
 assert "line->sequence <= filter->after_sequence" in matching
+assert "line->sequence >= filter->before_sequence" in matching
 assert "retained_contains_case_insensitive" in matching
 assert "LOG_STREAM_RETAINED_OLDEST_FIRST" in snapshot_core
-for body in (snapshot, snapshot_core, copy_slot, matching):
+for body in (snapshot, snapshot_page, snapshot_core, copy_slot, matching):
     for forbidden in ("xRingbufferReceive", "vRingbufferReturnItem"):
         assert forbidden not in body, f"native snapshot consumes {forbidden}"
 for forbidden in ("malloc(", "calloc(", "heap_caps_", "free("):
     assert forbidden not in snapshot, f"snapshot allocates via {forbidden}"
+    assert forbidden not in snapshot_page, f"paged snapshot allocates via {forbidden}"
+
+# Explicit paging scans the bounded retained window for an exact match count,
+# while copying no more than the caller's reusable visible-row buffer. A
+# before-sequence anchor prevents new capture from shifting a paused page.
+assert "offset < bounds.count" in snapshot_page
+assert "page->returned < line_capacity" in snapshot_page
+assert "page->matching_count = matched" in snapshot_page
+assert "page->has_previous_page" in snapshot_page
+assert "page->has_next_page" in snapshot_page
+assert "retained_filter_matches" in snapshot_page
 
 # Clear is scoped strictly to the visible RAM view. Lifetime counters, the
 # browser ring, persistent write queue, and already-written files all survive.

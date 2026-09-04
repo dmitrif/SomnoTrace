@@ -88,8 +88,23 @@ typedef struct {
     const char *query;
     /* Only return lines with sequence strictly greater than this value. */
     uint64_t after_sequence;
+    /* When non-zero, only return lines with sequence strictly below this
+     * value.  A paused UI can anchor this to newest_sequence + 1 so incoming
+     * lines do not move the page being read. */
+    uint64_t before_sequence;
     log_stream_retained_order_t order;
 } log_stream_retained_filter_t;
+
+typedef struct {
+    /* Zero-based offset among lines matching the filter, in filter order. */
+    size_t match_offset;
+    size_t returned;
+    size_t matching_count;
+    bool has_previous_page;
+    bool has_next_page;
+    uint64_t first_sequence;
+    uint64_t last_sequence;
+} log_stream_retained_page_t;
 
 typedef struct {
     bool available;
@@ -137,6 +152,22 @@ esp_err_t log_stream_retained_snapshot(
     size_t line_capacity,
     const log_stream_retained_filter_t *filter,
     size_t *line_count,
+    log_stream_retained_info_t *info);
+
+/**
+ * Copy one bounded page without creating an LVGL row per retained line.
+ * Unlike the fast live-tail snapshot above, this scans the current retained
+ * bounds to report an exact filtered count.  It is intended for explicit
+ * pause/search/scroll actions, not every live refresh tick.  Page offsets are
+ * interpreted in `filter->order`; a non-zero before_sequence keeps paused
+ * pages stable while capture continues.
+ */
+esp_err_t log_stream_retained_snapshot_page(
+    log_stream_retained_line_t *lines,
+    size_t line_capacity,
+    const log_stream_retained_filter_t *filter,
+    size_t match_offset,
+    log_stream_retained_page_t *page,
     log_stream_retained_info_t *info);
 
 /**

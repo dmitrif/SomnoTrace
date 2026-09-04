@@ -278,6 +278,8 @@ static bool retained_filter_matches(const log_stream_retained_line_t *line,
         ? LOG_STREAM_RETAINED_LEVEL_ALL : filter->level_mask;
     if ((mask & line->level) == 0) return false;
     if (line->sequence <= filter->after_sequence) return false;
+    if (filter->before_sequence != 0 &&
+        line->sequence >= filter->before_sequence) return false;
 
     size_t search_length;
     const char *search = retained_search_start(line, &search_length);
@@ -503,6 +505,62 @@ esp_err_t log_stream_retained_snapshot(
      * request again. */
     *line_count = retained_snapshot_from_bounds(&bounds, lines, line_capacity,
                                                 filter, NULL);
+    return ESP_OK;
+}
+
+esp_err_t log_stream_retained_snapshot_page(
+    log_stream_retained_line_t *lines,
+    size_t line_capacity,
+    const log_stream_retained_filter_t *filter,
+    size_t match_offset,
+    log_stream_retained_page_t *page,
+    log_stream_retained_info_t *info)
+{
+    if (!page || (line_capacity > 0 && !lines) ||
+        (filter && filter->order != LOG_STREAM_RETAINED_NEWEST_FIRST &&
+         filter->order != LOG_STREAM_RETAINED_OLDEST_FIRST)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *page = (log_stream_retained_page_t) {
+        .match_offset = match_offset,
+    };
+
+    retained_bounds_t bounds;
+    esp_err_t error = retained_read_bounds(&bounds, info);
+    if (error != ESP_OK || bounds.count == 0) return error;
+
+    bool oldest_first = filter &&
+        filter->order == LOG_STREAM_RETAINED_OLDEST_FIRST;
+    size_t matched = 0;
+    for (size_t offset = 0; offset < bounds.count; offset++) {
+        size_t index;
+        if (oldest_first) {
+            index = (bounds.head + bounds.capacity - bounds.count + offset)
+                % bounds.capacity;
+        } else {
+            index = (bounds.head + bounds.capacity - 1 - offset)
+                % bounds.capacity;
+        }
+
+        log_stream_retained_line_t candidate;
+        if (!retained_copy_slot(index, &candidate) ||
+            !retained_line_is_in_bounds(&candidate, &bounds) ||
+            !retained_filter_matches(&candidate, filter)) {
+            continue;
+        }
+
+        if (matched >= match_offset && page->returned < line_capacity) {
+            lines[page->returned++] = candidate;
+            if (page->returned == 1) page->first_sequence = candidate.sequence;
+            page->last_sequence = candidate.sequence;
+        }
+        matched++;
+    }
+
+    page->matching_count = matched;
+    page->has_previous_page = match_offset > 0 && matched > 0;
+    page->has_next_page = match_offset < matched &&
+        page->returned < matched - match_offset;
     return ESP_OK;
 }
 
