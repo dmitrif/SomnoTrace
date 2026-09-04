@@ -250,9 +250,12 @@ for channel in ("Breathing / Flow", "Pressure", "Leak", "Flow limit",
                 "Snore", "SpO₂", "Pulse", "Motion"):
     assert channel in history_ui, f"missing rich History channel: {channel}"
 require(history_ui, r"history_ui_graph_draw.*?aggregation\s*==\s*"
-                    r"TOUCH_HISTORY_AGGREGATION_ENVELOPE.*?"
-                    r"history_ui_event_color\(marker->type\).*?cursor_x",
-        "one custom-draw rich graph with envelope, event lane, and cursor")
+                    r"TOUCH_HISTORY_AGGREGATION_ENVELOPE.*?cursor_x",
+        "one custom-draw rich graph with envelope and cursor")
+require(history_ui, r"history_ui_draw_event_lane.*?"
+                    r"history_ui_event_color\(marker->type\).*?"
+                    r"history_ui_draw_rect",
+        "source-colored square event lane")
 require(demo, r"QEMU preview.*simulated data", "honest simulated-data labeling")
 require(display, r"simulated preview", "honest simulated device status")
 require(demo, r"bsp_display_qemu_seed_demo\(\)", "deterministic histories and devices")

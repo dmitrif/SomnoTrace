@@ -67,6 +67,7 @@ typedef struct {
     touch_history_overview_t overview;
     touch_history_event_t events[TOUCH_HISTORY_UI_MAX_VISIBLE_EVENTS];
     size_t event_count;
+    size_t event_total_count;
     touch_history_stats_t stats;
     touch_history_month_t month;
 
@@ -84,6 +85,7 @@ typedef struct {
     bool usage_target_known;
     bool usage_on_target;
     bool events_truncated;
+    touch_history_ui_event_state_t event_state;
     char status[TOUCH_HISTORY_UI_TEXT_MAX];
     char error[TOUCH_HISTORY_UI_TEXT_MAX];
     char degraded[TOUCH_HISTORY_UI_TEXT_MAX];
@@ -329,7 +331,9 @@ static esp_err_t history_controller_load_events(
     const touch_history_operation_t *operation)
 {
     model->event_count = 0;
+    model->event_total_count = 0;
     model->events_truncated = false;
+    model->event_state = TOUCH_HISTORY_UI_EVENT_STATE_UNAVAILABLE;
     size_t offset = 0;
     for (;;) {
         touch_history_event_t page_events[HISTORY_CONTROLLER_EVENT_PAGE];
@@ -337,8 +341,17 @@ static esp_err_t history_controller_load_events(
         esp_err_t result = touch_history_load_events_ex(
             job->day, offset, page_events, HISTORY_CONTROLLER_EVENT_PAGE,
             &page, operation);
-        if (result == ESP_ERR_NOT_FOUND) return ESP_OK;
         if (result != ESP_OK) return result;
+        if (offset == 0) {
+            model->event_total_count = page.total_count;
+            model->event_state = page.totals.complete
+                ? TOUCH_HISTORY_UI_EVENT_STATE_COMPLETE
+                : TOUCH_HISTORY_UI_EVENT_STATE_INCOMPLETE;
+        } else if (page.total_count != model->event_total_count) {
+            /* Each page is a fresh bounded service call. If the card changes
+             * between calls, do not publish a mixed event snapshot. */
+            return ESP_FAIL;
+        }
         for (size_t i = 0; i < page.returned; ++i) {
             const touch_history_event_t *event = &page_events[i];
             if (event->end_ms < model->window_start_ms ||
@@ -460,7 +473,9 @@ static esp_err_t history_controller_load_view(
     bool events_unavailable = events_result != ESP_OK;
     if (events_unavailable) {
         model->event_count = 0;
+        model->event_total_count = 0;
         model->events_truncated = false;
+        model->event_state = TOUCH_HISTORY_UI_EVENT_STATE_UNAVAILABLE;
         ESP_LOGW(TAG, "events day=%s unavailable: %s (0x%x)", job->day,
                  esp_err_to_name(events_result), (unsigned)events_result);
     }
@@ -504,16 +519,6 @@ static esp_err_t history_controller_load_view(
         model->state = TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN;
         history_controller_text(model->degraded, sizeof(model->degraded),
                                 "Some session captions could not be shown.");
-    } else if (model->events_truncated) {
-        model->state = TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN;
-        history_controller_text(model->degraded, sizeof(model->degraded),
-                                "Additional event markers are outside this display limit.");
-    } else if (events_unavailable ||
-               (model->night.session_count > 0 &&
-                model->night.events_result != ESP_OK)) {
-        model->state = TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN;
-        history_controller_text(model->degraded, sizeof(model->degraded),
-                                "Event markers are unavailable for this night.");
     }
 
     const touch_history_day_t *selected = model->selected_row < model->page.returned
@@ -785,6 +790,9 @@ static void history_controller_preview_events(history_model_t *model)
         TOUCH_HISTORY_EVENT_RERA,
     };
     model->event_count = 0;
+    model->event_total_count = sizeof(types) / sizeof(types[0]);
+    model->events_truncated = false;
+    model->event_state = TOUCH_HISTORY_UI_EVENT_STATE_COMPLETE;
     int64_t span = model->night.axis_end_ms - model->night.axis_start_ms;
     for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i) {
         int64_t end = model->night.axis_start_ms +
@@ -1642,6 +1650,9 @@ esp_err_t touch_history_controller_apply(
         .overview = model->has_overview ? &model->overview : NULL,
         .events = model->events,
         .event_count = model->event_count,
+        .event_total_count = model->event_total_count,
+        .event_state = model->event_state,
+        .events_truncated = model->events_truncated,
         .month = model->has_month ? &model->month : NULL,
         .can_previous_month = model->has_month && model->month.year > 2000,
         .can_next_month = model->has_month && model->month.year < 2200,

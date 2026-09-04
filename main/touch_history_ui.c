@@ -55,6 +55,7 @@
 #define HISTORY_UI_GRAPH_PAD_T 54
 #define HISTORY_UI_GRAPH_PAD_B 38
 #define HISTORY_UI_EVENT_LANE_H 18
+#define HISTORY_UI_EVENT_MARKER_SIZE 9
 
 typedef struct {
     struct touch_history_ui *ui;
@@ -162,6 +163,9 @@ struct touch_history_ui {
     bool has_overview;
     touch_history_event_t events[TOUCH_HISTORY_UI_MAX_VISIBLE_EVENTS];
     size_t event_count;
+    size_t event_total_count;
+    touch_history_ui_event_state_t event_state;
+    bool events_truncated;
     touch_history_month_t month;
     bool has_month;
     bool can_previous_month;
@@ -380,6 +384,27 @@ static void history_ui_format_day_short(const char day[9], char *output,
         ((unsigned)history_ui_first_weekday(year, month) + date - 1U) % 7U;
     snprintf(output, capacity, "%s %u %s",
              weekdays[weekday], date, months[month - 1]);
+}
+
+static void history_ui_format_day_compact(const char day[9], char *output,
+                                          size_t capacity)
+{
+    static const char *const months[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+    static const char *const weekdays[] = {
+        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
+    };
+    unsigned year = 0, month = 0, date = 0;
+    if (!history_ui_parse_day(day, &year, &month, &date)) {
+        history_ui_copy_text(output, capacity, HISTORY_UI_EM_DASH);
+        return;
+    }
+    unsigned weekday =
+        ((unsigned)history_ui_first_weekday(year, month) + date - 1U) % 7U;
+    snprintf(output, capacity, "%s %u %s %u",
+             weekdays[weekday], date, months[month - 1], year);
 }
 
 static void history_ui_format_clock_minutes(int minutes, bool available,
@@ -872,6 +897,47 @@ static uint32_t history_ui_event_color(touch_history_event_type_t type)
     }
 }
 
+static void history_ui_draw_event_lane(const touch_history_ui_t *ui,
+                                       lv_draw_ctx_t *draw_ctx,
+                                       lv_coord_t left, lv_coord_t right,
+                                       lv_coord_t lane_y)
+{
+    history_ui_draw_line(draw_ctx, HISTORY_UI_COLOR_GRID, LV_OPA_70, 1,
+                         left, lane_y, right, lane_y);
+    if (!ui || ui->event_state == TOUCH_HISTORY_UI_EVENT_STATE_UNAVAILABLE ||
+        !ui->has_overview ||
+        ui->overview.axis_end_ms <= ui->overview.axis_start_ms)
+        return;
+
+    const lv_coord_t half = HISTORY_UI_EVENT_MARKER_SIZE / 2;
+    for (size_t i = 0; i < ui->event_count; ++i) {
+        const touch_history_event_t *marker = &ui->events[i];
+        if ((int)marker->type < 0 ||
+            marker->type >= TOUCH_HISTORY_EVENT_TYPE_COUNT ||
+            marker->end_ms < ui->overview.axis_start_ms ||
+            marker->end_ms >= ui->overview.axis_end_ms)
+            continue;
+
+        /* The source notification is an event-end report, so its end time is
+         * the actual lane timestamp. A filled square survives the lower
+         * contrast and viewing distance of the physical bedside panel. */
+        lv_coord_t x = left + (lv_coord_t)(
+            ((marker->end_ms - ui->overview.axis_start_ms) *
+             (right - left)) /
+            (ui->overview.axis_end_ms - ui->overview.axis_start_ms));
+        if (x < left + half)
+            x = left + half;
+        if (x > right - half)
+            x = right - half;
+        lv_area_t marker_area = {
+            x - half, lane_y - half, x + half, lane_y + half,
+        };
+        uint32_t color = history_ui_event_color(marker->type);
+        history_ui_draw_rect(draw_ctx, &marker_area, color, LV_OPA_COVER,
+                             2, color, 0);
+    }
+}
+
 static const touch_history_event_t *history_ui_cursor_event(
     const touch_history_ui_t *ui)
 {
@@ -971,6 +1037,11 @@ static void history_ui_graph_draw(lv_event_t *event)
         history_ui_draw_line(draw_ctx, HISTORY_UI_COLOR_GRID, LV_OPA_40, 1,
                              x, top, x, bottom);
     }
+
+    /* The event lane is independent of the selected signal. Keep it visible
+     * even when that signal has no readable samples. */
+    lv_coord_t lane_y = top - 7;
+    history_ui_draw_event_lane(ui, draw_ctx, left, right, lane_y);
 
     if (!ui->has_overview || !ui->overview.loaded ||
         !ui->overview.has_data || ui->overview.point_count == 0) {
@@ -1189,22 +1260,6 @@ static void history_ui_graph_draw(lv_event_t *event)
                                  LV_OPA_COVER, 3, x1, availability_y,
                                  x2, availability_y);
         }
-    }
-
-    lv_coord_t lane_y = top - 7;
-    history_ui_draw_line(draw_ctx, HISTORY_UI_COLOR_GRID, LV_OPA_70, 1,
-                         left, lane_y, right, lane_y);
-    for (size_t i = 0; i < ui->event_count; ++i) {
-        const touch_history_event_t *marker = &ui->events[i];
-        if (marker->start_ms < ui->overview.axis_start_ms ||
-            marker->start_ms >= ui->overview.axis_end_ms)
-            continue;
-        lv_coord_t x = left + (lv_coord_t)(
-            ((marker->start_ms - ui->overview.axis_start_ms) *
-             (right - left)) /
-            (ui->overview.axis_end_ms - ui->overview.axis_start_ms));
-        history_ui_draw_line(draw_ctx, history_ui_event_color(marker->type),
-                             LV_OPA_COVER, 2, x, lane_y - 5, x, lane_y + 5);
     }
 
     for (size_t i = 0; i < ui->session_count; ++i) {
@@ -1579,6 +1634,7 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
         ui->detail, "Select a recorded night",
         &somnotrace_space_grotesk_semibold_19, HISTORY_UI_COLOR_TEXT,
         58, 2, 244, 26);
+    lv_label_set_long_mode(ui->night_title, LV_LABEL_LONG_CLIP);
     ui->night_subtitle = history_ui_label(
         ui->detail, "Newest completed night opens automatically",
         &somnotrace_ibm_plex_mono_medium_11, HISTORY_UI_COLOR_TERTIARY,
@@ -1948,12 +2004,21 @@ static void history_ui_update_header(touch_history_ui_t *ui)
 {
     const touch_history_day_t *day = history_ui_selected_day(ui);
     char title[40];
-    if (ui->has_night)
-        history_ui_format_day(ui->night.day, title, sizeof(title));
-    else if (day)
-        history_ui_format_day(day->day, title, sizeof(title));
-    else
+    const char *selected_day = ui->has_night
+                                   ? ui->night.day
+                                   : (day ? day->day : NULL);
+    if (selected_day) {
+        history_ui_format_day(selected_day, title, sizeof(title));
+        lv_point_t title_size = {0};
+        lv_txt_get_size(&title_size, title,
+                        &somnotrace_space_grotesk_semibold_19,
+                        0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (title_size.x > lv_obj_get_content_width(ui->night_title))
+            history_ui_format_day_compact(selected_day, title,
+                                          sizeof(title));
+    } else {
         history_ui_copy_text(title, sizeof(title), "Select a recorded night");
+    }
     lv_label_set_text(ui->night_title, title);
 
     char subtitle[96];
@@ -2179,6 +2244,34 @@ static void history_ui_update_graph_header(touch_history_ui_t *ui)
     history_ui_set_enabled(ui->zoom_in_button, graph_ready);
 }
 
+static void history_ui_update_event_status(touch_history_ui_t *ui)
+{
+    const char *text = "Event data unavailable";
+    uint32_t color = HISTORY_UI_COLOR_AMBER;
+
+    if (ui->event_state == TOUCH_HISTORY_UI_EVENT_STATE_INCOMPLETE) {
+        text = ui->events_truncated
+            ? "Event data incomplete · view truncated"
+            : "Event data incomplete · markers missing";
+    } else if (ui->event_state == TOUCH_HISTORY_UI_EVENT_STATE_COMPLETE) {
+        color = HISTORY_UI_COLOR_TERTIARY;
+        if (ui->events_truncated) {
+            text = "Event markers truncated · zoom in";
+            color = HISTORY_UI_COLOR_AMBER;
+        } else if (ui->event_total_count == 0) {
+            text = "No OA/CA/H/RERA events recorded";
+        } else if (ui->event_count == 0) {
+            text = "No respiratory events in this window";
+        } else {
+            text = "Markers: OA · CA · H · A · RERA";
+        }
+    }
+
+    lv_label_set_text(ui->marker_legend, text);
+    lv_obj_set_style_text_color(ui->marker_legend,
+                                history_ui_color(color), 0);
+}
+
 static void history_ui_update_state(touch_history_ui_t *ui)
 {
     bool full_overlay = ui->state == TOUCH_HISTORY_UI_STATE_EMPTY ||
@@ -2283,12 +2376,17 @@ static esp_err_t history_ui_validate_snapshot(
         snapshot->day_count > TOUCH_HISTORY_UI_LIST_ROWS ||
         snapshot->session_count > TOUCH_HISTORY_UI_MAX_SESSIONS ||
         snapshot->event_count > TOUCH_HISTORY_UI_MAX_VISIBLE_EVENTS ||
+        snapshot->event_state > TOUCH_HISTORY_UI_EVENT_STATE_INCOMPLETE ||
+        snapshot->event_total_count < snapshot->event_count ||
         snapshot->selected_signal >= TOUCH_HISTORY_SIGNAL_COUNT ||
         snapshot->progress_per_mille > 1000)
         return ESP_ERR_INVALID_ARG;
     if ((snapshot->day_count && !snapshot->days) ||
         (snapshot->session_count && !snapshot->sessions) ||
         (snapshot->event_count && !snapshot->events) ||
+        (snapshot->event_state == TOUCH_HISTORY_UI_EVENT_STATE_UNAVAILABLE &&
+         (snapshot->event_count || snapshot->event_total_count ||
+          snapshot->events_truncated)) ||
         (snapshot->selected_row != SIZE_MAX &&
          snapshot->selected_row >= snapshot->day_count))
         return ESP_ERR_INVALID_ARG;
@@ -2345,6 +2443,9 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
         ui->has_overview = false;
     }
     ui->event_count = snapshot->event_count;
+    ui->event_total_count = snapshot->event_total_count;
+    ui->event_state = snapshot->event_state;
+    ui->events_truncated = snapshot->events_truncated;
     if (snapshot->event_count)
         memcpy(ui->events, snapshot->events,
                snapshot->event_count * sizeof(ui->events[0]));
@@ -2399,6 +2500,7 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     history_ui_update_summary(ui);
     history_ui_update_channels(ui);
     history_ui_update_graph_header(ui);
+    history_ui_update_event_status(ui);
     history_ui_update_state(ui);
     history_ui_update_calendar(ui);
     lv_obj_invalidate(ui->graph);

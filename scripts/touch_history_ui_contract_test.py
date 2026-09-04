@@ -76,6 +76,26 @@ require(
     "31-pixel visual channel pill inside its 44-pixel target",
 )
 assert "on target" in SOURCE and "usage_target_known" in HEADER
+require(
+    SOURCE,
+    r"history_ui_format_day_compact.*?"
+    r'"Jan", "Feb", "Mar".*?"Sun", "Mon", "Tue".*?'
+    r'snprintf\(output, capacity, "%s %u %s %u"',
+    "compact weekday/date/month/year formatter",
+)
+require(
+    SOURCE,
+    r"lv_txt_get_size\(&title_size, title.*?"
+    r"title_size\.x > lv_obj_get_content_width\(ui->night_title\).*?"
+    r"history_ui_format_day_compact",
+    "full date falls back responsively to Tue 1 Sep 2026",
+)
+require(
+    SOURCE,
+    r"ui->night_title = history_ui_label\(.*?"
+    r"lv_label_set_long_mode\(ui->night_title, LV_LABEL_LONG_CLIP\)",
+    "selected-night title never renders an ellipsis",
+)
 
 # Calendar cells are one lazy draw/touch grid rather than 42 LVGL buttons.
 require(
@@ -119,6 +139,13 @@ for state in (
     "DEGRADED_UNKNOWN",
 ):
     assert f"TOUCH_HISTORY_UI_STATE_{state}" in HEADER, f"missing state {state}"
+
+for event_state in ("UNAVAILABLE", "COMPLETE", "INCOMPLETE"):
+    assert f"TOUCH_HISTORY_UI_EVENT_STATE_{event_state}" in HEADER, (
+        f"missing event provenance state {event_state}"
+    )
+for field in ("event_total_count", "event_state", "events_truncated"):
+    assert field in HEADER, f"missing event-lane snapshot field {field}"
 
 for intent in (
     "SELECT_DAY",
@@ -217,9 +244,36 @@ assert "cursor_valid" in SOURCE and "history_ui_cursor_event" in SOURCE
 for rich_graph_copy in (
     "SESSION %u · %s–%s",
     "Markers: OA · CA · H · A · RERA",
+    "No OA/CA/H/RERA events recorded",
+    "Event data unavailable",
+    "Event markers truncated · zoom in",
     "Trend review only. Not a diagnosis or a prescription.",
 ):
     assert rich_graph_copy in SOURCE, f"missing rich graph detail: {rich_graph_copy}"
+require(
+    SOURCE,
+    r"history_ui_draw_event_lane.*?marker->end_ms.*?"
+    r"history_ui_draw_rect\(draw_ctx, &marker_area, color, LV_OPA_COVER",
+    "source-timestamped filled-square event markers",
+)
+require(
+    SOURCE,
+    r"history_ui_draw_event_lane\(ui, draw_ctx, left, right, lane_y\).*?"
+    r"if \(!ui->has_overview \|\| !ui->overview\.loaded",
+    "event lane remains visible when the selected trace is empty",
+)
+require(
+    SOURCE,
+    r"event_state == TOUCH_HISTORY_UI_EVENT_STATE_COMPLETE.*?"
+    r"event_total_count == 0.*?No OA/CA/H/RERA events recorded.*?"
+    r"event_count == 0.*?No respiratory events in this window",
+    "complete-zero and empty-window event copy",
+)
+require(
+    SOURCE,
+    r"EVENT_STATE_UNAVAILABLE.*?event_count \|\| snapshot->event_total_count",
+    "unavailable event data cannot carry a false count",
+)
 require(
     SOURCE,
     r"for\s*\(unsigned tick = 0; tick <= 4; \+\+tick\).*?"

@@ -44,6 +44,16 @@ typedef enum {
     TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN,
 } touch_history_ui_state_t;
 
+/* Provenance for the respiratory-event lane. COMPLETE with a zero total is a
+ * trustworthy zero-event night; UNAVAILABLE must never be presented as zero.
+ * INCOMPLETE retains any source-backed markers while warning that others may
+ * be missing. Display-cap truncation is reported separately by the snapshot. */
+typedef enum {
+    TOUCH_HISTORY_UI_EVENT_STATE_UNAVAILABLE = 0,
+    TOUCH_HISTORY_UI_EVENT_STATE_COMPLETE,
+    TOUCH_HISTORY_UI_EVENT_STATE_INCOMPLETE,
+} touch_history_ui_event_state_t;
+
 typedef enum {
     TOUCH_HISTORY_UI_INTENT_SELECT_DAY = 0,
     TOUCH_HISTORY_UI_INTENT_PAGE_RELATIVE,
@@ -112,6 +122,10 @@ typedef struct {
     const touch_history_overview_t *overview;
     const touch_history_event_t *events;
     size_t event_count;
+    /* Whole-night source total; event_count is only the selected-window set. */
+    size_t event_total_count;
+    touch_history_ui_event_state_t event_state;
+    bool events_truncated;
 
     const touch_history_month_t *month;
     bool can_previous_month;

@@ -71,8 +71,11 @@ require(CONTROLLER, r"touch_history_load_view_ex\(.*?window_start_ms.*?"
 assert "lv_chart_create" not in UI
 require(UI, r"history_ui_graph_draw.*?TOUCH_HISTORY_POINT_VALID.*?"
             r"TOUCH_HISTORY_POINT_COMPANION_VALID.*?"
-            r"history_ui_event_color\(marker->type\).*?SESSION %u.*?cursor_x",
-        "bounded rich graph layers")
+            r"SESSION %u.*?cursor_x",
+        "bounded rich graph trace, session, and cursor layers")
+require(UI, r"history_ui_draw_event_lane.*?"
+            r"history_ui_event_color\(marker->type\).*?history_ui_draw_rect",
+        "bounded source-colored square event lane")
 require(UI, r"history_ui_row_pressed.*?LV_EVENT_SHORT_CLICKED",
         "night selection waits for scroll arbitration")
 

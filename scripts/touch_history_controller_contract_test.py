@@ -18,6 +18,23 @@ def require(text: str, pattern: str, label: str) -> None:
         raise AssertionError(f"missing {label}")
 
 
+def function_body(text: str, name: str) -> str:
+    match = re.search(rf"\b{name}\s*\([^;]*?\)\s*\{{", text, re.DOTALL)
+    if not match:
+        raise AssertionError(f"missing function body {name}")
+    depth = 1
+    index = match.end()
+    while index < len(text) and depth:
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        raise AssertionError(f"unterminated function body {name}")
+    return text[match.start():index]
+
+
 for api in (
     "touch_history_controller_create",
     "touch_history_controller_destroy",
@@ -88,6 +105,32 @@ require(SOURCE, r"for \(;;\).*?touch_history_load_events_ex.*?"
 require(SOURCE, r"event->end_ms\s*<\s*model->window_start_ms.*?"
                 r"event->start_ms\s*>=\s*model->window_end_ms",
         "visible event filtering")
+event_loader = function_body(SOURCE, "history_controller_load_events")
+assert "if (result == ESP_ERR_NOT_FOUND) return ESP_OK;" not in event_loader, (
+    "missing event sources must not collapse into a zero-event success"
+)
+require(
+    event_loader,
+    r"event_total_count\s*=\s*page\.total_count.*?"
+    r"page\.totals\.complete.*?EVENT_STATE_COMPLETE.*?EVENT_STATE_INCOMPLETE",
+    "complete-zero versus incomplete event provenance",
+)
+require(
+    SOURCE,
+    r"events_result\s*!=\s*ESP_OK.*?event_count\s*=\s*0.*?"
+    r"event_total_count\s*=\s*0.*?EVENT_STATE_UNAVAILABLE",
+    "unavailable event publication",
+)
+require(
+    SOURCE,
+    r"\.event_total_count\s*=\s*model->event_total_count.*?"
+    r"\.event_state\s*=\s*model->event_state.*?"
+    r"\.events_truncated\s*=\s*model->events_truncated",
+    "event provenance forwarded to the UI",
+)
+assert "Event markers are unavailable for this night." not in SOURCE, (
+    "event-only availability belongs in the non-overlay marker status"
+)
 
 for signal in ("PRESSURE", "LEAK", "FLOW_LIMIT", "SNORE"):
     require(SERVICE, rf"TOUCH_HISTORY_SIGNAL_{signal}", f"{signal} stats source")
