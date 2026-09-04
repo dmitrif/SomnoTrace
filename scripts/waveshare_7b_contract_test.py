@@ -42,7 +42,7 @@ device_settings = source("main/device_settings.c")
 expected_scalars = {
     r"#define\s+I2C_SDA\s+GPIO_NUM_8\b": "I2C SDA GPIO8",
     r"#define\s+I2C_SCL\s+GPIO_NUM_9\b": "I2C SCL GPIO9",
-    r"#define\s+IOX_ADDR\s+0x24\b": "CH422G address 0x24",
+    r"#define\s+IOX_ADDR\s+0x24\b": "CH32V003 controller address 0x24",
     r"\.pclk_hz\s*=\s*18000000\b": "redraw-safe 18 MHz pixel clock",
     r"\.hsync_pulse_width\s*=\s*162\b": "HSYNC pulse",
     r"\.hsync_back_porch\s*=\s*152\b": "HSYNC back porch",

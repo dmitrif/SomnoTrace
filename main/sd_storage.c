@@ -114,7 +114,7 @@ static void sdmmc_config_default(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
     sdmmc_slot_config_t s = SDMMC_SLOT_CONFIG_DEFAULT();
 #if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
     /* The 7B routes its TF socket as one-bit SD: CLK=12, CMD=11, D0=13.
-     * DAT3/CS is held high by EXIO4 on the CH422G expander. */
+     * DAT3/CS is held high by EXIO4 on the CH32V003 I/O controller. */
     s.clk   = GPIO_NUM_12;
     s.cmd   = GPIO_NUM_11;
     s.d0    = GPIO_NUM_13;

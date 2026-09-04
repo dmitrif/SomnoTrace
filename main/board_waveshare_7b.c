@@ -1,9 +1,9 @@
 /*
  * SomnoTrace board support for Waveshare ESP32-S3-Touch-LCD-7B.
  *
- * The RGB timings, GPIO map, and CH422G assignments are adapted from the
- * Waveshare ESP32-S3-Touch-LCD-7B examples (Apache-2.0). This adaptation is
- * part of SomnoTrace and distributed under GPL-3.0-or-later.
+ * The RGB timings, GPIO map, and CH32V003 controller assignments are adapted
+ * from the Waveshare ESP32-S3-Touch-LCD-7B examples (Apache-2.0). This
+ * adaptation is part of SomnoTrace and distributed under GPL-3.0-or-later.
  */
 
 #include "board_waveshare_7b.h"
@@ -80,14 +80,14 @@ static esp_err_t init_i2c_and_expander(void)
         .scl_speed_hz = I2C_HZ,
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_i2c, &dev_cfg, &s_iox), TAG,
-                        "attach CH422G expander");
+                        "attach CH32V003 I/O controller");
 
     s_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_NO_MEM, TAG, "create expander mutex");
     ESP_RETURN_ON_ERROR(iox_write(IOX_REG_MODE, 0xff), TAG,
-                        "configure CH422G outputs");
+                        "configure CH32V003 outputs");
     ESP_RETURN_ON_ERROR(iox_write(IOX_REG_OUTPUT, s_output), TAG,
-                        "initialize CH422G outputs");
+                        "initialize CH32V003 outputs");
     return ESP_OK;
 }
 

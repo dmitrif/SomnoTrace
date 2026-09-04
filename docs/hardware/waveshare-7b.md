@@ -31,7 +31,7 @@ integration credentials, OTA updates and other infrequent administration.
 - ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB octal PSRAM)
 - 1024x600 RGB565 panel using the ESP32-S3 RGB LCD peripheral
 - GT911 touch controller on I2C GPIO8/GPIO9, interrupt GPIO4
-- CH422G I/O expander at I2C address `0x24`
+- CH32V003 I/O controller at I2C address `0x24`
 - Onboard TF card in one-bit SD mode: CLK GPIO12, CMD GPIO11, D0 GPIO13
 
 The board has no compatible onboard alert speaker. Push alerts still work;

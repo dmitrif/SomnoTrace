@@ -90,7 +90,8 @@ setup script builds the small pinned width patch rather than stretching an
 
 It translates one host pointer into the same LVGL input path used by the GT911;
 it does not emulate the GT911's I2C protocol or multitouch. It also does not
-emulate the Waveshare RGB timings, CH422G expander, SDMMC or Bluetooth radio.
+emulate the Waveshare RGB timings, CH32V003 I/O controller, SDMMC or Bluetooth
+radio.
 Pairing controls are interactive but BLE operations remain physical-board
 tests. The bedside History screen presents a bounded night list, nightly
 metrics and a selectable overnight channel when the stored data is available;
