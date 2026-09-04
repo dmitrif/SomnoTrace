@@ -73,9 +73,13 @@ require(HISTORY, r"OXIMETRY_CANONICAL_VITALS_SPO2.*?"
 require(HISTORY, r"while\s*\(checked\s*<\s*actual\).*?valid_spo2\+\+.*?"
                  r"candidate->valid_records\s*=\s*valid_spo2",
         "full-recording valid SpO2 coverage count")
-require(HISTORY, r"candidate_valid_coverage_us\(&current\).*?"
+require(HISTORY, r"history_collect_ox_candidates.*?qsort\(candidates.*?"
+                 r"candidate_valid_coverage_us\(&candidates\[i\]\).*?"
                  r"coverage\s*>\s*best_coverage.*?duration\s*>\s*best_duration",
         "coverage-first O2 Ring candidate ranking")
+require(HISTORY, r"for\s*\(size_t c = 0; c < candidate_count; \+\+c\).*?"
+                 r"later.*?recording owns every display bin it touches",
+        "multi-recording O2 merge with deterministic overlap precedence")
 require(HISTORY, r"channel\s*==\s*TOUCH_HISTORY_CHANNEL_SPO2.*?"
                  r"value\s*<\s*aggregate->trend\.extreme.*?"
                  r"else if\s*\(value\s*>\s*aggregate->trend\.extreme",
@@ -93,7 +97,8 @@ require(HISTORY, r"validate_generation_manifest.*?"
 require(HISTORY, r"pointer_result\s*==\s*ESP_ERR_NOT_FOUND\)\s*"
                  r"pointer_result\s*=\s*ESP_FAIL",
         "observed recording without pointer remains retryable")
-require(HISTORY, r"discovery_error\s*!=\s*ESP_OK\)\s*return\s+discovery_error.*?"
+require(HISTORY, r"discovery_error\s*!=\s*ESP_OK\)\s*\{.*?"
+                 r"return\s+discovery_error;.*?if\s*\(!candidate_count\).*?"
                  r"return\s+ESP_ERR_NOT_FOUND",
         "discovery failures propagate before genuine absence")
 

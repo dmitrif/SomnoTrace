@@ -162,10 +162,10 @@ for unit in ("board_waveshare_7b.c", "bsp_display_7b.c", "bsp_power_7b.c", "bsp_
 # is custom rather than an LVGL tabview so the centred 172x58 pills and the
 # separate six-section Manage rail can be represented without tab chrome.
 for pattern, description in (
-    (r"#define\s+UI_HEADER_H\s+70\b", "70px shared header"),
-    (r"#define\s+UI_CONTENT_Y\s+70\b", "content begins below the 70px header"),
-    (r"#define\s+UI_CONTENT_H\s+448\b", "448px shared content region"),
-    (r"#define\s+UI_NAV_H\s+82\b", "82px shared navigation region"),
+    (r"#define\s+UI_HEADER_H\s+64\b", "64px shared header"),
+    (r"#define\s+UI_CONTENT_Y\s+64\b", "content begins below the 64px header"),
+    (r"#define\s+UI_CONTENT_H\s+462\b", "462px shared content region"),
+    (r"#define\s+UI_NAV_H\s+74\b", "74px shared navigation region"),
     (r"s_pages\s*\[\s*3\s*\]", "three primary screen containers"),
     (r"s_nav_buttons\s*\[\s*3\s*\]", "three custom navigation buttons"),
     (r"set_active_page\s*\(", "custom page selection"),
@@ -175,7 +175,10 @@ assert "lv_tabview_create" not in display, "bedside shell must use custom naviga
 assert "lv_tabview_add_tab" not in display, "legacy five-tab navigation remains"
 for page in ("Home", "History", "Manage"):
     require(display, rf'"{page}"', f"{page} primary navigation label")
-for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
+for section_label in (
+    "Devices", "Connectivity", "Alerts", "Uploads",
+    "Storage", "System", "Logs", "Advanced",
+):
     require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
 
 # LVGL v8 paints dropdown and textarea copy from pad_top.  Keep the shared
@@ -232,7 +235,7 @@ assert display.count("make_manage_field_chevron(") == 5, \
     "four Manage fields plus the helper must use aligned chevrons"
 
 display_section = display.split(
-    "static void build_display_section", 1)[1].split(
+    "static int build_display_controls", 1)[1].split(
         "static void build_alerts_section", 1)[0]
 require(display_section,
         r"lv_obj_set_size\(s_settings_brightness,\s*580,\s*12\).*?"
@@ -380,8 +383,10 @@ require(display,
 # on the RGB panel because it redraws the whole viewport without revealing any
 # additional content. The five status rows already fit their tray.
 require(display,
-        r"can_overflow\s*=\s*index\s*==\s*0\s*\|\|\s*index\s*==\s*1\s*\|\|\s*"
-        r"index\s*==\s*4;.*?if\s*\(can_overflow\)\s*\{.*?"
+        r"can_overflow\s*=\s*index\s*==\s*MANAGE_DEVICES\s*\|\|\s*"
+        r"index\s*==\s*MANAGE_CONNECTIVITY\s*\|\|\s*"
+        r"index\s*==\s*MANAGE_UPLOADS\s*\|\|\s*"
+        r"index\s*==\s*MANAGE_SYSTEM;.*?if\s*\(can_overflow\)\s*\{.*?"
         r"LV_OBJ_FLAG_SCROLLABLE.*?LV_OBJ_FLAG_SCROLL_ELASTIC",
         "only overflowing Manage panes scroll without elasticity")
 require(display,
@@ -412,7 +417,7 @@ require(secondary_source,
         r"return;",
         "periodic Manage repaint defers while scrolling")
 require(secondary_source,
-        r"if\s*\(s_active_manage_section\s*==\s*1\)\s*"
+        r"if\s*\(s_active_manage_section\s*==\s*MANAGE_CONNECTIVITY\)\s*"
         r"refresh_wifi_scan_controls\(\);",
         "Wi-Fi scan widgets refresh only in their visible section")
 
@@ -432,7 +437,7 @@ assert "lv_obj_move_foreground" not in status_open_source, \
 require(display,
         r"lv_obj_move_foreground\(s_status_scrim\);\s*"
         r"lv_obj_move_foreground\(s_status_tray\);.*?"
-        r"set_manage_section\(0\);",
+        r"set_manage_section\(MANAGE_DEVICES\);",
         "status overlay z-order established before first frame")
 require(display,
         r"active_tab\s*==\s*0\s*&&\s*!status_tray_open.*?"
@@ -510,7 +515,7 @@ for literal, description in (
     ("Safe to save now · restart will be deferred", "Wi-Fi deferred-restart state"),
     ("Wi-Fi saved; restart deferred while recording", "saved Wi-Fi deferred notice"),
     ("Send test push", "alert test control"),
-    ("microSD capacity and upload queue", "storage summary"),
+    ("microSD capacity and recording health", "storage summary"),
     ("Advanced diagnostics", "system disclosure row"),
 ):
     assert literal in display, f"missing bedside state: {description}"
@@ -546,7 +551,8 @@ require(display, r"device_settings_set_lcd_therapy_mode", "native therapy displa
 require(display, r"netprov_save_config\(&cfg\)", "native Wi-Fi credential save")
 require(display, r"LV_KEYBOARD_MODE_TEXT_LOWER", "on-screen Wi-Fi keyboard")
 require(display, r"touch_history_load", "background SD history load")
-require(history, r"edf_gen_summary_json", "history summary metrics adapter")
+require(history, r"touch_history_decode_summary_record",
+        "allocation-conscious native History summary decoder")
 assert '"touch_history.c"' in cmake, "7B build omits touch history adapter"
 require(main, r"oximeter_init\(\).*?bsp_display_enable_touch_services\(as11_ready,\s*oximeter_ready\)",
         "touch BLE controls enabled only after service initialization")
@@ -582,7 +588,7 @@ for timestamp in (
             f"{timestamp} tracks independent metric freshness")
 require(display,
         r"!paired.*?s_therapy_command_busy\s*=\s*false;.*?"
-        r"set_active_page\(2\);.*?set_manage_section\(0\);",
+        r"set_active_page\(2\);.*?set_manage_section\(MANAGE_DEVICES\);",
         "unpaired Home action routes to AirSense setup")
 require(display, r"sd_storage_recording_active\(\)",
         "Home recording copy follows writer state")
@@ -835,12 +841,16 @@ for direct_invalidation in (
            f"History renderer bypasses changed-only visibility: {direct_invalidation}"
 require(display, r"trace->loaded.*?trace->has_data.*?trace_count",
         "physical History renders only available recorded trace data")
-require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
+require(history,
+        r"decoded\.has_device_ahi\s*=\s*history_summary_index_value.*?"
+        r"decoded\.has_ahi\s*=\s*decoded\.has_device_ahi",
+        "device AHI provenance and compatibility availability")
 require(history_header, r"int\s+mask_off_count\s*;",
         "nightly mask-off count value")
 require(history_header, r"bool\s+has_mask_off_count\s*;",
         "nightly mask-off availability")
-require(history, r'has_mask_off_count\s*=\s*\n?\s*json_number\(root,\s*"mask_off_count"',
+require(history, r'decoded\.has_mask_off_count\s*=\s*parsed\.has_sessions.*?'
+                 r'decoded\.mask_off_count\s*=\s*\(int\)parsed\.session_count',
         "summary-backed mask-off parsing")
 require(edf, r'cJSON_AddNumberToObject\(root,\s*"mask_off_count",\s*ctx->n_session_entries\)',
         "one mask-off endpoint per Summary session entry")
@@ -851,15 +861,19 @@ require(display, r'"Mask on/off · —"',
 require(display, r'\.mask_off_count\s*=\s*12.*?\.has_mask_off_count\s*=\s*true',
         "two-digit QEMU mask-off layout fixture")
 require(history_header, r"#define\s+TOUCH_HISTORY_MAX_DAYS\s+30\b",
-        "bounded 30-night native history model")
+        "bounded current-UI history page")
 for metric in ("oai", "cai", "hi", "rera"):
     require(history_header, rf"float\s+{metric}\s*;", f"{metric} history value")
     require(history_header, rf"bool\s+has_{metric}\s*;", f"{metric} availability flag")
-    require(history, rf"has_{metric}\s*=\s*json_number\(root,\s*\"{metric}\"",
+    require(history, rf"decoded\.has_{metric}\s*=\s*history_summary_index_value",
             f"truthful optional {metric} parsing")
-require(history, r"capacity\s*<\s*TOUCH_HISTORY_MAX_DAYS.*?capacity\s*:\s*TOUCH_HISTORY_MAX_DAYS",
-        "history loader enforces its 30-night bound")
-require(display, r"TOUCH_HISTORY_MAX_DAYS", "touch UI consumes the 30-night history bound")
+require(history, r"history_load_page_leased\(.*?"
+                 r"page->total_days\s*=\s*total.*?page->has_more",
+        "pageable full-card history index")
+assert not re.search(
+    r"capacity\s*<\s*TOUCH_HISTORY_MAX_DAYS.*?capacity\s*:\s*TOUCH_HISTORY_MAX_DAYS",
+    history, re.DOTALL), "History service must not impose a 30-night product cap"
+require(display, r"TOUCH_HISTORY_MAX_DAYS", "touch UI consumes a bounded history page")
 for event_label in ("Obstructive", "Central", "Hypopnea", "RERA"):
     require(display, rf'"{event_label}"', f"{event_label} History event label")
 require(display, r'"AHI"', "handoff AHI metric label")
