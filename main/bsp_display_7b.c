@@ -5914,6 +5914,67 @@ static void lvgl_task(void *arg)
     }
 }
 
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+typedef struct {
+    SemaphoreHandle_t done;
+    esp_err_t result;
+    esp_lcd_panel_handle_t panel;
+    esp_lcd_touch_handle_t touch;
+} panel_init_context_t;
+
+static void panel_init_task(void *arg)
+{
+    panel_init_context_t *ctx = arg;
+    ESP_LOGI(TAG, "allocating RGB panel on core %d beside LVGL",
+             xPortGetCoreID());
+    ctx->result = waveshare_7b_init(&ctx->panel, &ctx->touch);
+
+    /* The caller owns ctx and this task. Do not access ctx after signalling;
+     * suspending lets the caller delete us and reclaim the temporary internal
+     * stack synchronously before the rest of boot consumes that heap. */
+    xSemaphoreGive(ctx->done);
+    vTaskSuspend(NULL);
+}
+
+static esp_err_t init_panel_on_render_core(esp_lcd_panel_handle_t *panel,
+                                           esp_lcd_touch_handle_t *touch)
+{
+    StaticSemaphore_t done_storage;
+    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
+    ESP_RETURN_ON_FALSE(done, ESP_ERR_NO_MEM, TAG,
+                        "create panel-init completion signal");
+
+    panel_init_context_t ctx = {
+        .done = done,
+        .result = ESP_FAIL,
+    };
+    TaskHandle_t task = NULL;
+    BaseType_t created = xTaskCreatePinnedToCore(
+        panel_init_task, "panel_init", 8192, &ctx, 5, &task, 1);
+    if (created != pdPASS || !task) {
+        /* Preserve a usable display if boot is already unexpectedly short of
+         * internal RAM. The log makes clear that this fallback did not apply
+         * the same-core scanout optimization. */
+        ESP_LOGW(TAG, "panel-init task unavailable; using boot core");
+        return waveshare_7b_init(panel, touch);
+    }
+
+    if (xSemaphoreTake(done, pdMS_TO_TICKS(15000)) != pdTRUE) {
+        ESP_LOGE(TAG, "panel initialization timed out");
+        vTaskDelete(task);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* panel_init_task no longer touches ctx after giving the semaphore. */
+    vTaskDelete(task);
+    if (ctx.result == ESP_OK) {
+        *panel = ctx.panel;
+        *touch = ctx.touch;
+    }
+    return ctx.result;
+}
+#endif
+
 esp_err_t bsp_display_init(void)
 {
     memset(&s_state, 0, sizeof(s_state));
@@ -5935,8 +5996,16 @@ esp_err_t bsp_display_init(void)
     ESP_RETURN_ON_FALSE(s_render_services, ESP_ERR_NO_MEM, TAG,
                         "allocate UI service snapshot");
 
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
     ESP_RETURN_ON_ERROR(waveshare_7b_init(&s_panel, &s_touch), TAG,
-                        "initialize Waveshare 7B");
+                        "initialize QEMU display");
+#else
+    /* ESP-IDF installs the RGB DMA EOF interrupt on the core which allocates
+     * the panel. Keep that PSRAM-to-bounce-buffer copy on core 1 beside LVGL,
+     * so it preempts framebuffer rendering instead of racing it from core 0. */
+    ESP_RETURN_ON_ERROR(init_panel_on_render_core(&s_panel, &s_touch), TAG,
+                        "initialize Waveshare 7B on render core");
+#endif
 
     /* With an RGB bounce buffer, frame-buffer handoff completion is reported
      * by on_frame_buf_complete. Waiting for it prevents LVGL from drawing into
