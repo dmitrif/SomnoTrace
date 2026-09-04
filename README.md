@@ -220,8 +220,10 @@ use `./scripts/build-7b.sh` and follow the
 [7B bring-up and test guide](docs/hardware/waveshare-7b.md). This profile uses
 the whole landscape display for three persistent screens: Home, History and
 Manage. Manage provides six local sections—Devices, Connectivity, Display,
-Alerts, Storage and System—for pairing and routine bedside controls. Detailed
-traces and advanced administration remain available in the browser dashboard.
+Alerts, Storage and System—for pairing and routine bedside controls. History
+also provides a bounded overnight flow overview for the selected night; deeper
+multi-channel zooming and advanced administration remain in the browser
+dashboard.
 
 ---
 
