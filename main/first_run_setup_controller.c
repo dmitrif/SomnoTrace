@@ -67,12 +67,34 @@ typedef struct {
     bool active;
     bool operation_busy;
     bool finished_requested;
+    uint32_t references;
     esp_err_t initial_card_result;
     first_run_setup_ui_controller_t callbacks;
 } setup_controller_t;
 
 static setup_controller_t *s_controller;
+/* A detached controller reclaims itself on its worker after STOP is
+ * observed. Keep restart closed until that reclamation has completed so two
+ * setup service workers can never overlap. */
+static bool s_controller_stopping;
 static portMUX_TYPE s_controller_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static setup_controller_t *controller_acquire(void)
+{
+    portENTER_CRITICAL(&s_controller_lock);
+    setup_controller_t *controller = s_controller;
+    if (controller) controller->references++;
+    portEXIT_CRITICAL(&s_controller_lock);
+    return controller;
+}
+
+static void controller_release(setup_controller_t *controller)
+{
+    if (!controller) return;
+    portENTER_CRITICAL(&s_controller_lock);
+    if (controller->references > 0) controller->references--;
+    portEXIT_CRITICAL(&s_controller_lock);
+}
 
 static void copy_text(char *destination, size_t capacity, const char *source)
 {
@@ -1056,11 +1078,32 @@ static void setup_worker(void *argument)
         refresh_observed(controller);
     }
 
-    state_lock(controller);
-    controller->active = false;
-    controller->worker = NULL;
-    state_unlock(controller);
     ESP_LOGI(TAG, "setup worker stopped");
+
+    /* stop() detaches the singleton before posting STOP, so no new snapshot
+     * can acquire this pointer. The worker is the final owner and reclaims
+     * all controller resources immediately before deleting its own
+     * PSRAM-backed task. */
+    portENTER_CRITICAL(&s_controller_lock);
+    if (s_controller == controller) s_controller = NULL;
+    portEXIT_CRITICAL(&s_controller_lock);
+    while (true) {
+        portENTER_CRITICAL(&s_controller_lock);
+        bool referenced = controller->references != 0;
+        portEXIT_CRITICAL(&s_controller_lock);
+        if (!referenced) break;
+        vTaskDelay(1);
+    }
+    QueueHandle_t queue = controller->queue;
+    SemaphoreHandle_t mutex = controller->mutex;
+    controller->queue = NULL;
+    controller->mutex = NULL;
+    vQueueDelete(queue);
+    vSemaphoreDelete(mutex);
+    free(controller);
+    portENTER_CRITICAL(&s_controller_lock);
+    s_controller_stopping = false;
+    portEXIT_CRITICAL(&s_controller_lock);
     psram_task_delete(NULL);
 }
 
@@ -1134,7 +1177,7 @@ static void initialise_live_state(setup_controller_t *controller)
 esp_err_t first_run_setup_controller_start(esp_err_t initial_card_result)
 {
     portENTER_CRITICAL(&s_controller_lock);
-    bool already_started = s_controller != NULL;
+    bool already_started = s_controller != NULL || s_controller_stopping;
     portEXIT_CRITICAL(&s_controller_lock);
     if (already_started) return ESP_ERR_INVALID_STATE;
 
@@ -1198,8 +1241,18 @@ void first_run_setup_controller_stop(void)
     setup_controller_t *controller;
     portENTER_CRITICAL(&s_controller_lock);
     controller = s_controller;
+    if (controller) {
+        /* Detach first: after this point callbacks/snapshots cannot discover a
+         * controller that its worker is preparing to free. */
+        s_controller = NULL;
+        s_controller_stopping = true;
+    }
     portEXIT_CRITICAL(&s_controller_lock);
     if (!controller) return;
+
+    state_lock(controller);
+    controller->active = false;
+    state_unlock(controller);
     setup_operation_t stop = { .kind = SETUP_OP_STOP };
     /* The queue has length one. Overwrite guarantees a stop is retained even
      * if a final UI press was queued but not yet dispatched. */
@@ -1220,28 +1273,24 @@ bool first_run_setup_controller_snapshot(first_run_setup_ui_live_t *out,
                                          uint32_t *generation)
 {
     if (!out) return false;
-    setup_controller_t *controller;
-    portENTER_CRITICAL(&s_controller_lock);
-    controller = s_controller;
-    portEXIT_CRITICAL(&s_controller_lock);
+    setup_controller_t *controller = controller_acquire();
     if (!controller) return false;
     state_lock(controller);
     *out = controller->live;
     if (generation) *generation = controller->generation;
     state_unlock(controller);
+    controller_release(controller);
     return true;
 }
 
 bool first_run_setup_controller_take_finished(void)
 {
-    setup_controller_t *controller;
-    portENTER_CRITICAL(&s_controller_lock);
-    controller = s_controller;
-    portEXIT_CRITICAL(&s_controller_lock);
+    setup_controller_t *controller = controller_acquire();
     if (!controller) return false;
     state_lock(controller);
     bool requested = controller->finished_requested;
     controller->finished_requested = false;
     state_unlock(controller);
+    controller_release(controller);
     return requested;
 }

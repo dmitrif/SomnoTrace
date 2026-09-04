@@ -22,8 +22,9 @@ extern "C" {
  * it is retained so "missing" is never presented as "unreadable". */
 esp_err_t first_run_setup_controller_start(esp_err_t initial_card_result);
 
-/* Stop and reclaim the worker stack after the setup surface is destroyed.
- * The small bounded snapshot remains valid until reboot for diagnostics. */
+/* Detach immediately after the setup surface is destroyed. The worker rejects
+ * new callbacks, consumes STOP after any in-flight service call, then reclaims
+ * its queue, mutex, controller state and PSRAM-backed task. */
 void first_run_setup_controller_stop(void);
 
 /* Controller callbacks passed directly to first_run_setup_ui_create(). */
