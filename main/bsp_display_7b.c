@@ -3194,12 +3194,22 @@ static lv_obj_t *make_manage_section(lv_obj_t *section, int index,
     if (index == 1) s_connectivity_section_subtitle = sub;
     if (index == 5) s_system_section_subtitle = sub;
     s_manage_scrolls[index] = make_plain_container(section, 14, 76, 718, 340);
-    lv_obj_add_flag(s_manage_scrolls[index], LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_manage_scrolls[index], LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(s_manage_scrolls[index], LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_width(s_manage_scrolls[index], 5, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_color(s_manage_scrolls[index],
-                              lv_color_hex(COLOR_TERTIARY), LV_PART_SCROLLBAR);
+    /* Only panes that can exceed the viewport should participate in LVGL's
+     * drag/throw machinery.  A vertical gesture on a short pane used to move
+     * the entire surface elastically and redraw hundreds of thousands of
+     * pixels even though there was nowhere useful to scroll. */
+    bool can_overflow = index == 0 || index == 1 || index == 4;
+    if (can_overflow) {
+        lv_obj_add_flag(s_manage_scrolls[index], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(s_manage_scrolls[index], LV_OBJ_FLAG_SCROLL_ELASTIC);
+        lv_obj_set_scroll_dir(s_manage_scrolls[index], LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(s_manage_scrolls[index],
+                                  LV_SCROLLBAR_MODE_AUTO);
+        lv_obj_set_style_width(s_manage_scrolls[index], 5, LV_PART_SCROLLBAR);
+        lv_obj_set_style_bg_color(s_manage_scrolls[index],
+                                  lv_color_hex(COLOR_TERTIARY),
+                                  LV_PART_SCROLLBAR);
+    }
     return s_manage_scrolls[index];
 }
 
@@ -3207,7 +3217,8 @@ static lv_obj_t *make_manage_row(lv_obj_t *scroll, int y, int height)
 {
     /* Only sections whose content actually overflows reserve the handoff's
      * 14 px scrollbar gutter. Short sections use the full 718 px column. */
-    bool has_scroll_gutter = scroll == s_manage_scrolls[1] ||
+    bool has_scroll_gutter = scroll == s_manage_scrolls[0] ||
+                             scroll == s_manage_scrolls[1] ||
                              scroll == s_manage_scrolls[4];
     lv_obj_t *row = make_card(scroll, 0, y,
                               has_scroll_gutter ? 704 : 718, height);
@@ -3889,12 +3900,8 @@ static void build_ui(void)
                                    FONT_BODY_SMALL, COLOR_SECONDARY);
     lv_obj_set_style_text_align(updated, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_t *tray_scroll = make_plain_container(s_status_tray, 8, 56, 480, 398);
-    lv_obj_add_flag(tray_scroll, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(tray_scroll, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(tray_scroll, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_width(tray_scroll, 5, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_color(tray_scroll, lv_color_hex(COLOR_TERTIARY),
-                              LV_PART_SCROLLBAR);
+    /* Five 66 px rows plus their gaps fit in this viewport. Keeping the tray
+     * fixed avoids elastic scrolling and a full tray redraw on stray drags. */
     static const char *tray_titles[] = {
         "AirSense 11", "microSD card", "Wi-Fi", "Uploads", "O2 Ring"
     };
@@ -3913,10 +3920,11 @@ static void build_ui(void)
                    FONT_BODY_SMALL, COLOR_TEXT);
         *details[i] = make_label(row, "Checking...", 42, 34, 320,
                                  FONT_BODY_SMALL, COLOR_SECONDARY);
-        s_status_tray_actions[i] = make_touch_button(row, 370, 11, 82, 44,
-                                                      tray_actions[i], COLOR_CONTROL,
-                                                      status_tray_route_cb,
-                                                      tray_sections[i]);
+        s_status_tray_actions[i] = make_destination_button(
+            row, 370, 11, 82, 44, tray_actions[i], COLOR_CONTROL,
+            status_tray_route_cb, tray_sections[i]);
+        set_destination_surface(s_status_tray_actions[i], COLOR_CONTROL,
+                                LV_OPA_COVER);
         lv_obj_set_style_text_font(lv_obj_get_child(s_status_tray_actions[i], 0),
                                    FONT_BODY_SMALL, 0);
         lv_obj_add_flag(s_status_tray_actions[i], LV_OBJ_FLAG_HIDDEN);
@@ -4915,7 +4923,46 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     wifi_restart_pending = s_wifi_restart_pending;
     pairing_mode_confirmed = s_as11_pairing_mode_confirmed;
     portEXIT_CRITICAL(&s_state_lock);
-    refresh_wifi_scan_controls();
+
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    const char *as_status = "simulated preview";
+    const char *ox_status = "simulated preview";
+#else
+    const char *as_status = s_as11_service_ready ? as11_ble_get_status() : "unavailable";
+    const char *ox_status = s_ox_service_ready ? oximeter_get_status() : "unavailable";
+#endif
+
+    /* Pairing can finish after the user leaves Manage, so completion polling
+     * remains a background responsibility. Everything below this point only
+     * paints Manage widgets and should not consume render time on Home or
+     * History. */
+    if (ble_started && esp_timer_get_time() - ble_started > 1000000) {
+        bool as_done = ble_operation == BLE_UI_PAIR_AS11 &&
+                       (!strcmp(as_status, AS11_STATUS_PAIRED) ||
+                        !strcmp(as_status, AS11_STATUS_ERROR));
+        bool ox_done = ble_operation == BLE_UI_PAIR_OX &&
+                       (!strcmp(ox_status, OX_STATUS_PAIRED) ||
+                        !strcmp(ox_status, OX_STATUS_MONITORING) ||
+                        !strcmp(ox_status, OX_STATUS_ERROR));
+        if (as_done && !strcmp(as_status, AS11_STATUS_ERROR)) {
+            portENTER_CRITICAL(&s_state_lock);
+            s_as11_pairing_mode_confirmed = false;
+            portEXIT_CRITICAL(&s_state_lock);
+            pairing_mode_confirmed = false;
+        }
+        if (as_done || ox_done) end_ble_operation();
+    }
+
+    if (active_tab != 2) return;
+    if (s_active_manage_section >= 0 && s_active_manage_section < 6 &&
+        lv_obj_is_scrolling(s_manage_scrolls[s_active_manage_section])) {
+        /* Static state catches up on the next 500 ms pass. Deferring it while
+         * the finger is moving prevents unrelated labels and hidden sections
+         * from competing with LVGL's scroll redraw. */
+        return;
+    }
+
+    if (s_active_manage_section == 1) refresh_wifi_scan_controls();
     if (active_tab == 2 && s_active_manage_section == 0) {
         refresh_device_dropdown(false, services);
         refresh_device_dropdown(true, services);
@@ -4993,14 +5040,6 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         }
     }
 
-#if CONFIG_SOMNOTRACE_BOARD_QEMU
-    const char *as_status = "simulated preview";
-    const char *ox_status = "simulated preview";
-#else
-    const char *as_status = s_as11_service_ready ? as11_ble_get_status() : "unavailable";
-    const char *ox_status = s_ox_service_ready ? oximeter_get_status() : "unavailable";
-#endif
-
     if (wifi_restart_pending) {
         lv_label_set_text(s_wifi_restart_detail,
                           state->therapy
@@ -5017,22 +5056,6 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
                       : wifi_restart_pending
                           ? (state->therapy ? "Restart deferred" : "Restart now")
                           : "Save changes");
-    if (ble_started && esp_timer_get_time() - ble_started > 1000000) {
-        bool as_done = ble_operation == BLE_UI_PAIR_AS11 &&
-                       (!strcmp(as_status, AS11_STATUS_PAIRED) ||
-                        !strcmp(as_status, AS11_STATUS_ERROR));
-        bool ox_done = ble_operation == BLE_UI_PAIR_OX &&
-                       (!strcmp(ox_status, OX_STATUS_PAIRED) ||
-                        !strcmp(ox_status, OX_STATUS_MONITORING) ||
-                        !strcmp(ox_status, OX_STATUS_ERROR));
-        if (as_done && !strcmp(as_status, AS11_STATUS_ERROR)) {
-            portENTER_CRITICAL(&s_state_lock);
-            s_as11_pairing_mode_confirmed = false;
-            portEXIT_CRITICAL(&s_state_lock);
-            pairing_mode_confirmed = false;
-        }
-        if (as_done || ox_done) end_ble_operation();
-    }
     bool as_paired = state->paired;
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
     as_paired = s_as11_service_ready && as11_ble_is_paired();

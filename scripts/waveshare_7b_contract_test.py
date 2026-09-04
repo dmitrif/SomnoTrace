@@ -234,6 +234,12 @@ require(display, r"s_manage_buttons\[i\]\s*=\s*make_destination_button",
 require(display, r"s_status_capsule\s*=\s*make_destination_button",
         "immediate non-destructive status tray")
 require(display,
+        r"s_status_tray_actions\[i\]\s*=\s*make_destination_button",
+        "immediate status-tray destination actions")
+require(display,
+        r"s_history_channel_buttons\[i\]\s*=\s*make_destination_button",
+        "immediate History trace channel selection")
+require(display,
         r"static void set_destination_surface.*?"
         r"LV_STYLE_TRANSLATE_Y,\s*0,\s*LV_STATE_PRESSED.*?"
         r"LV_STYLE_BG_OPA,\s*resting_opa,\s*LV_STATE_PRESSED",
@@ -293,6 +299,46 @@ require(display,
         r'xTaskCreatePinnedToCore\(lvgl_task,\s*"display_7b",\s*12288,\s*'
         r"NULL,\s*5,\s*&s_lvgl_task,\s*1\)",
         "responsive priority-5 display task with measured stack headroom")
+
+# Scroll only where content can actually overflow, and avoid elastic overscroll
+# on the RGB panel because it redraws the whole viewport without revealing any
+# additional content. The five status rows already fit their tray.
+require(display,
+        r"can_overflow\s*=\s*index\s*==\s*0\s*\|\|\s*index\s*==\s*1\s*\|\|\s*"
+        r"index\s*==\s*4;.*?if\s*\(can_overflow\)\s*\{.*?"
+        r"LV_OBJ_FLAG_SCROLLABLE.*?LV_OBJ_FLAG_SCROLL_ELASTIC",
+        "only overflowing Manage panes scroll without elasticity")
+require(display,
+        r"s_history_list_scroll.*?LV_OBJ_FLAG_SCROLLABLE.*?"
+        r"lv_obj_clear_flag\(s_history_list_scroll,\s*"
+        r"LV_OBJ_FLAG_SCROLL_ELASTIC\)",
+        "History list scrolls without elastic overscroll")
+tray_scroll_start = display.index(
+    "lv_obj_t *tray_scroll = make_plain_container(s_status_tray"
+)
+tray_scroll_source = display[
+    tray_scroll_start:display.index("static const char *tray_titles", tray_scroll_start)
+]
+assert "LV_OBJ_FLAG_SCROLLABLE" not in tray_scroll_source, \
+       "fixed-height status tray must not scroll"
+secondary_start = display.index(
+    "static void refresh_secondary_pages(const ui_state_t *state, int active_tab)\n{"
+)
+secondary_source = display[
+    secondary_start:display.index("static void resync_flow_visual", secondary_start)
+]
+require(secondary_source,
+        r"if\s*\(ble_started.*?end_ble_operation\(\);.*?"
+        r"if\s*\(active_tab\s*!=\s*2\)\s*return;",
+        "BLE completion survives hidden Manage render gating")
+require(secondary_source,
+        r"lv_obj_is_scrolling\(s_manage_scrolls\[s_active_manage_section\]\).*?"
+        r"return;",
+        "periodic Manage repaint defers while scrolling")
+require(secondary_source,
+        r"if\s*\(s_active_manage_section\s*==\s*1\)\s*"
+        r"refresh_wifi_scan_controls\(\);",
+        "Wi-Fi scan widgets refresh only in their visible section")
 
 # QEMU keeps the full-fidelity handoff, while the physical build compiles out
 # large software-blurred shadows and expensive flow fill/glow layers.
