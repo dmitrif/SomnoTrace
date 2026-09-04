@@ -111,6 +111,66 @@ def drag(process, log_path, stream, start, end, steps=8):
     return observed, start_offset
 
 
+def assert_emulated_backlight_frame(stream, path, dark):
+    """Require QEMU's framebuffer to visibly match the backlight state."""
+    deadline = time.monotonic() + 2
+    brightest = None
+    while time.monotonic() < deadline:
+        qmp_command(stream, "screendump", {"filename": str(path)})
+        with path.open("rb") as image:
+            magic = image.readline().strip()
+            dimensions = image.readline().strip()
+            maximum = image.readline().strip()
+            pixels = image.read()
+        if magic != b"P6" or dimensions != b"1024 600" or maximum != b"255":
+            raise AssertionError(f"unexpected QEMU screendump format in {path}")
+        if len(pixels) != 1024 * 600 * 3:
+            raise AssertionError(f"incomplete QEMU screendump in {path}")
+        brightest = max(pixels)
+        if (dark and brightest <= 8) or (not dark and brightest >= 128):
+            return
+        time.sleep(0.1)
+    if dark:
+        raise AssertionError(
+            f"screen-off framebuffer still contains lit pixels ({brightest})"
+        )
+    raise AssertionError(
+        f"wake did not restore the visible framebuffer ({brightest})"
+    )
+
+
+def sleep_from_header_then_wake_over(
+        process, log_path, stream, screen_name, wake_point, destination_page):
+    """Exercise shared-header Off now and prove its wake press is consumed."""
+    _, off_offset = tap(process, log_path, stream, 566, 35)
+    backlight_off = wait_for_log(
+        process, log_path, "backlight off", 3,
+        start_offset=off_offset,
+    )
+    assert_emulated_backlight_frame(
+        stream, log_path.parent / f"{screen_name}-off.ppm", True
+    )
+
+    _, wake_offset = tap(process, log_path, stream, *wake_point)
+    backlight_on = wait_for_log(
+        process, log_path, "backlight on", 3,
+        start_offset=wake_offset,
+    )
+    time.sleep(0.25)
+    assert_emulated_backlight_frame(
+        stream, log_path.parent / f"{screen_name}-awake.ppm", False
+    )
+    wake_end = log_character_offset(log_path)
+    wake_log = log_path.read_text(errors="replace")[wake_offset:wake_end]
+    leaked_selection = f"emulated touch selected page {destination_page}"
+    if leaked_selection in wake_log:
+        raise AssertionError(
+            "first touch after shared-header screen-off selected page "
+            f"{destination_page} instead of only waking the display"
+        )
+    return backlight_off, backlight_on
+
+
 def main():
     qemu = subprocess.check_output(
         [ROOT / "scripts/setup-qemu-macos.sh"], text=True
@@ -188,50 +248,69 @@ def main():
                     f"QEMU navigation click took {click_latency:.2f}s"
                 )
 
-            # Exercise the complete manual-sleep interaction from the current
-            # History page. Destination controls react on touch-down; command
-            # controls still require a press/release gesture.
+            # The startup simulation notice intentionally covers the header.
+            # Wait for its three-second lifetime, then exercise the one shared
+            # Screen off control from every primary page. Each wake press is
+            # aimed at a different destination so any input leak is observable.
+            time.sleep(3.2)
+            history_off, history_on = sleep_from_header_then_wake_over(
+                process, serial_log, stream, "history", (330, 563), 0
+            )
             _, home_offset = tap(process, serial_log, stream, 330, 563)
             home_selected = wait_for_log(
                 process, serial_log, "emulated touch selected page 0", 3,
                 start_offset=home_offset,
             )
-
-            # QEMU boots with therapy running. Stop it through the same Home
-            # command used on hardware, then allow its worker to publish the
-            # stopped state before entering Manage.
-            tap(process, serial_log, stream, 858, 458)
-            time.sleep(0.5)
-
+            home_off, home_on = sleep_from_header_then_wake_over(
+                process, serial_log, stream, "home", (694, 563), 2
+            )
             _, manage_offset = tap(process, serial_log, stream, 694, 563)
             manage_selected = wait_for_log(
                 process, serial_log, "emulated touch selected page 2", 3,
                 start_offset=manage_offset,
             )
-            tap(process, serial_log, stream, 130, 368)  # System rail row
-            drag(process, serial_log, stream, (280, 450), (280, 180))
-
-            _, off_offset = tap(process, serial_log, stream, 900, 410)
-            backlight_off = wait_for_log(
-                process, serial_log, "backlight off", 3,
-                start_offset=off_offset,
+            # Manage lazily builds its first detail pane in the pressed-event
+            # callback. Let LVGL sample the release after that bounded build
+            # before injecting the header command's next press edge.
+            time.sleep(0.35)
+            manage_off, manage_on = sleep_from_header_then_wake_over(
+                process, serial_log, stream, "manage", (512, 563), 1
             )
 
-            # The wake layer must consume this first press over History. If it
-            # leaks through, the page-selection log will appear in this exact
-            # post-sleep interval and fail the smoke test.
-            _, wake_offset = tap(process, serial_log, stream, 512, 563)
-            backlight_on = wait_for_log(
+            # Retain the original Settings > Display > Off now acceptance as
+            # well. Both controls carry UI_ACTION_SCREEN_OFF, so this verifies
+            # the shared callback remains reachable from its original home.
+            tap(process, serial_log, stream, 130, 368)  # System rail row
+            time.sleep(0.35)
+            drag(process, serial_log, stream, (280, 450), (280, 180))
+            _, settings_off_offset = tap(
+                process, serial_log, stream, 900, 410
+            )
+            settings_off = wait_for_log(
+                process, serial_log, "backlight off", 3,
+                start_offset=settings_off_offset,
+            )
+            assert_emulated_backlight_frame(
+                stream, serial_log.parent / "settings-off.ppm", True
+            )
+            _, settings_wake_offset = tap(
+                process, serial_log, stream, 512, 563
+            )
+            settings_on = wait_for_log(
                 process, serial_log, "backlight on", 3,
-                start_offset=wake_offset,
+                start_offset=settings_wake_offset,
             )
             time.sleep(0.25)
-            wake_end = log_character_offset(serial_log)
-            wake_log = serial_log.read_text(errors="replace")[wake_offset:wake_end]
-            if "emulated touch selected page 1" in wake_log:
+            assert_emulated_backlight_frame(
+                stream, serial_log.parent / "settings-awake.ppm", False
+            )
+            settings_wake_end = log_character_offset(serial_log)
+            settings_wake_log = serial_log.read_text(errors="replace")[
+                settings_wake_offset:settings_wake_end
+            ]
+            if "emulated touch selected page 1" in settings_wake_log:
                 raise AssertionError(
-                    "first touch after screen-off selected History instead of "
-                    "only waking the display"
+                    "first touch after Settings Off now leaked into History"
                 )
 
             _, second_history_offset = tap(
@@ -244,8 +323,11 @@ def main():
             print(
                 f"QEMU touch smoke test passed: {observed}; {selected}; "
                 f"{registers.strip()}; {click_latency:.2f}s; "
-                f"{home_selected}; {manage_selected}; {backlight_off}; "
-                f"{backlight_on}; wake-only first touch; {history_after_wake}"
+                f"History {history_off}; {history_on}; {home_selected}; "
+                f"Home {home_off}; {home_on}; {manage_selected}; "
+                f"Manage {manage_off}; {manage_on}; wake-only first touches; "
+                f"Settings {settings_off}; {settings_on}; "
+                f"{history_after_wake}"
             )
         finally:
             process.terminate()

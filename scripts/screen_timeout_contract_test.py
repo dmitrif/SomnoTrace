@@ -14,6 +14,9 @@ TOUCH_BSP = (ROOT / "main/bsp_display_7b.c").read_text(encoding="utf-8")
 TOUCH_BOARD = (ROOT / "main/board_waveshare_7b.c").read_text(encoding="utf-8")
 COMPACT_BSP = (ROOT / "main/bsp_display.c").read_text(encoding="utf-8")
 HOST_TEST = (ROOT / "scripts/test-host.sh").read_text(encoding="utf-8")
+QEMU_TOUCH_TEST = (ROOT / "scripts/test-qemu-touch.py").read_text(
+    encoding="utf-8"
+)
 BODY_FONT = (
     ROOT / "assets/fonts/generated/somnotrace_space_grotesk_medium_15.c"
 ).read_text(encoding="utf-8")
@@ -147,6 +150,33 @@ require(TOUCH_BSP,
         r'"Never\\n1 minute\\n5 minutes\\n15 minutes\\n30 minutes"',
         "touchscreen exposes every persisted timeout")
 
+# Home, History, and Manage are sibling content panes under one persistent
+# header. The header action deliberately uses the exact same action id and
+# callback as System > Display > Off now, rather than maintaining a second
+# backlight path.
+require(TOUCH_BSP, r"#define\s+UI_ACTION_SCREEN_OFF\s+4\b",
+        "one shared manual screen-off action")
+require(TOUCH_BSP, r"#define\s+UI_HEADER_SCREEN_OFF_X\s+500\b",
+        "screen-off control leaves the date clear")
+require(TOUCH_BSP, r"#define\s+UI_HEADER_SCREEN_OFF_W\s+132\b",
+        "screen-off control has a generous pure-touch target")
+shared_header = TOUCH_BSP.split(
+    "lv_obj_t *header = make_plain_container", 1)[1].split(
+        "for (int i = 0; i < 3; ++i)", 1)[0]
+require(shared_header,
+        r"header_screen_off\s*=\s*make_touch_button\(\s*"
+        r"header,\s*UI_HEADER_SCREEN_OFF_X,\s*7,\s*"
+        r"UI_HEADER_SCREEN_OFF_W,\s*STATUS_CAPSULE_H,\s*"
+        r'"Screen off",\s*COLOR_CONTROL,\s*action_cb,\s*'
+        r"UI_ACTION_SCREEN_OFF\s*\)",
+        "screen-off action belongs to the shared header")
+require(shared_header,
+        r"lv_obj_set_style_radius\(header_screen_off,\s*28.*?"
+        r"FONT_BUTTON_COMPACT.*?"
+        r"!screen_wake_input_available\(\).*?"
+        r"lv_obj_add_state\(header_screen_off,\s*LV_STATE_DISABLED\)",
+        "header control follows the capsule design and fails open without touch")
+
 display_section = TOUCH_BSP.split(
     "static int build_display_controls", 1)[1].split(
         "static void build_alerts_section", 1)[0]
@@ -167,6 +197,11 @@ require(TOUCH_BSP,
 require(display_section,
         r"lv_obj_set_size\(s_settings_screen_timeout,\s*194,\s*56\)",
         "main timeout selector is at least 56 px tall")
+require(display_section,
+        r'make_touch_button\(\s*off,\s*566,\s*-3,\s*128,\s*56,\s*'
+        r'"Off now",\s*COLOR_INVERSE,\s*action_cb,\s*'
+        r'UI_ACTION_SCREEN_OFF\s*\)',
+        "Settings Off now and the shared header invoke one action")
 
 font_height_match = re.search(r"\.line_height\s*=\s*(\d+)", BODY_FONT)
 if not font_height_match:
@@ -225,6 +260,12 @@ require(TOUCH_BSP,
         r"s_backlight_requested\s*=\s*false",
         "idle-off eligibility and request are atomic and fail open without touch")
 require(TOUCH_BSP,
+        r"action_cb.*?action\s*==\s*UI_ACTION_SCREEN_OFF.*?"
+        r"!screen_wake_input_available\(\).*?"
+        r'"Touch is unavailable - screen kept on".*?'
+        r"bsp_display_set_backlight\(false\)",
+        "shared manual action retains the established guarded Off now behavior")
+require(TOUCH_BSP,
         r"request_idle_sleep_if_due\(&display_settings,\s*visual_alarm,\s*now_us\)"
         r".*?apply_pending_backlight_locked\(\)",
         "standby timeout applies its hardware-off request")
@@ -266,7 +307,13 @@ require(TOUCH_BSP,
         r"lv_obj_set_style_bg_opa\(s_wake_overlay,\s*LV_OPA_TRANSP.*?"
         r"LV_OBJ_FLAG_CLICKABLE.*?LV_OBJ_FLAG_PRESS_LOCK.*?"
         r"wake_overlay_cb,\s*LV_EVENT_PRESSED",
-        "transparent wake surface stays above dialogs and intercepts presses")
+        "hardware wake surface stays transparent above dialogs and intercepts presses")
+require(TOUCH_BSP,
+        r"CONFIG_SOMNOTRACE_BOARD_QEMU.*?"
+        r"lv_obj_set_style_bg_opa\(s_wake_overlay,\s*LV_OPA_COVER.*?"
+        r"#else.*?"
+        r"lv_obj_set_style_bg_opa\(s_wake_overlay,\s*LV_OPA_TRANSP",
+        "QEMU visibly emulates an electrically dark backlight")
 require(TOUCH_BSP,
         r"wake_overlay_cb.*?lv_indev_wait_release\(indev\).*?"
         r"bsp_display_restart_idle_timeout\(\).*?"
@@ -316,5 +363,27 @@ require(TOUCH_BSP,
 
 require(HOST_TEST, r"python3 scripts/screen_timeout_contract_test\.py",
         "screen-timeout contracts run in the host suite")
+
+require(QEMU_TOUCH_TEST,
+        r"sleep_from_header_then_wake_over.*?tap\("
+        r"process,\s*log_path,\s*stream,\s*566,\s*35\).*?"
+        r'"backlight off".*?assert_emulated_backlight_frame\(.*?True.*?'
+        r'"backlight on".*?assert_emulated_backlight_frame\(.*?False.*?'
+        r"leaked_selection",
+        "QEMU checks visible off/on frames and wake-only input consumption")
+for screen, point, page in (
+    ("history", "330, 563", 0),
+    ("home", "694, 563", 2),
+    ("manage", "512, 563", 1),
+):
+    require(QEMU_TOUCH_TEST,
+            rf'"{screen}",\s*\({point}\),\s*{page}',
+            f"QEMU exercises shared-header screen off from {screen.title()}")
+require(QEMU_TOUCH_TEST,
+        r"System rail row.*?settings_off_offset.*?"
+        r'"settings-off\.ppm",\s*True.*?settings_wake_offset.*?'
+        r'"settings-awake\.ppm",\s*False.*?'
+        r'first touch after Settings Off now leaked into History',
+        "QEMU preserves the original Settings Off now and wake-only path")
 
 print("screen timeout contracts: PASS")

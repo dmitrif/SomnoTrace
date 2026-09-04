@@ -61,6 +61,7 @@
 #define TOUCH_FAILURE_THRESHOLD 3
 #define BACKLIGHT_RETRY_US 250000
 #define MANAGE_SECTION_COUNT 8
+#define UI_ACTION_SCREEN_OFF 4
 
 typedef enum {
     MANAGE_DEVICES = 0,
@@ -89,6 +90,8 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define UI_NAV_PILL_Y 8
 #define UI_NAV_PILL_W 166
 #define UI_NAV_PILL_H 54
+#define UI_HEADER_SCREEN_OFF_X 500
+#define UI_HEADER_SCREEN_OFF_W 132
 #define UI_MANAGE_RAIL_W 212
 #define UI_MANAGE_DETAIL_X 240
 #define UI_MANAGE_DETAIL_W 768
@@ -2357,7 +2360,7 @@ static void action_cb(lv_event_t *event)
         }
         bsp_display_set_notice("Starting Wi-Fi setup hotspot...");
         if (s_setup_callback) s_setup_callback();
-    } else if (action == 4) {
+    } else if (action == UI_ACTION_SCREEN_OFF) {
         if (!screen_wake_input_available()) {
             bsp_display_set_notice("Touch is unavailable - screen kept on");
             return;
@@ -3133,8 +3136,9 @@ static int build_display_controls(lv_obj_t *scroll, int start_y)
                         LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_settings_screen_timeout,
                         manage_dropdown_list_ready_cb, LV_EVENT_READY, NULL);
-    lv_obj_t *screen_off = make_touch_button(off, 566, -3, 128, 56, "Off now",
-                                              COLOR_INVERSE, action_cb, 4);
+    lv_obj_t *screen_off = make_touch_button(
+        off, 566, -3, 128, 56, "Off now", COLOR_INVERSE,
+        action_cb, UI_ACTION_SCREEN_OFF);
     lv_obj_set_style_text_color(lv_obj_get_child(screen_off, 0),
                                 lv_color_hex(COLOR_BASE), 0);
     if (!can_wake_screen) {
@@ -3710,6 +3714,18 @@ static void build_ui(void)
 #endif
                               130, 23, 330,
                               FONT_BODY, COLOR_SECONDARY);
+    /* This is the same command as System > Display > Off now, hosted by the
+     * one header shared by Home, History, and Manage. Keep it left of even the
+     * expanded degraded-state status capsule so neither target is crowded. */
+    lv_obj_t *header_screen_off = make_touch_button(
+        header, UI_HEADER_SCREEN_OFF_X, 7,
+        UI_HEADER_SCREEN_OFF_W, STATUS_CAPSULE_H,
+        "Screen off", COLOR_CONTROL, action_cb, UI_ACTION_SCREEN_OFF);
+    lv_obj_set_style_radius(header_screen_off, 28, 0);
+    lv_obj_set_style_text_font(lv_obj_get_child(header_screen_off, 0),
+                               FONT_BUTTON_COMPACT, 0);
+    if (!screen_wake_input_available())
+        lv_obj_add_state(header_screen_off, LV_STATE_DISABLED);
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
     /* A transparent emulator-only hit target over the deterministic clock
      * opens a fresh setup acceptance run.  A plain object is used instead of
@@ -3939,10 +3955,15 @@ static void build_ui(void)
     lv_obj_set_pos(s_wake_overlay, 0, 0);
     lv_obj_set_size(s_wake_overlay, WAVESHARE_7B_H_RES, WAVESHARE_7B_V_RES);
     lv_obj_set_style_bg_color(s_wake_overlay, lv_color_black(), 0);
-    /* Touch interception does not require painting black pixels. Keeping this
-     * surface transparent leaves the completed UI framebuffer ready for an
-     * immediate wake instead of forcing two full-screen redraws. */
+    /* Hardware sleep electrically disables the backlight, so painting black
+     * there would only force two needless full-screen redraws. QEMU has no
+     * physical lamp to disable; make the same state visibly black so emulator
+     * acceptance can observe the command as well as its wake-only shield. */
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    lv_obj_set_style_bg_opa(s_wake_overlay, LV_OPA_COVER, 0);
+#else
     lv_obj_set_style_bg_opa(s_wake_overlay, LV_OPA_TRANSP, 0);
+#endif
     lv_obj_set_style_border_width(s_wake_overlay, 0, 0);
     lv_obj_set_style_radius(s_wake_overlay, 0, 0);
     lv_obj_clear_flag(s_wake_overlay, LV_OBJ_FLAG_SCROLLABLE);
@@ -6070,8 +6091,8 @@ static void apply_pending_backlight_locked(void)
     int64_t retry_after_us = s_backlight_retry_after_us;
     portEXIT_CRITICAL(&s_state_lock);
 
-    /* Keep the transparent wake surface synchronized even after a failed or
-     * superseded hardware request. */
+    /* Keep the wake surface synchronized even after a failed or superseded
+     * hardware request. */
     if (requested == current) {
         if (s_wake_overlay) {
             if (current) lv_obj_add_flag(s_wake_overlay, LV_OBJ_FLAG_HIDDEN);
