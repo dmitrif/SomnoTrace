@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
@@ -55,6 +56,9 @@ static const char *TAG = "log_stream";
 #define RINGBUF_SIZE_INTERNAL   (8  * 1024)
 #define RINGBUF_SIZE_PSRAM      (16 * 1024)
 #define LOG_LINE_MAX            256
+#define LOGS_RECENT_RESPONSE_CAP (8 * 1024)
+/* Includes the longest non-negative signed cursor and leaves room for NUL. */
+#define LOGS_RECENT_SUFFIX_RESERVE (sizeof("],\"cursor\":2147483647}"))
 
 /* ── SD Persistent Logging ───────────────────────────────────────── */
 
@@ -1422,26 +1426,29 @@ static esp_err_t logs_recent_handler(httpd_req_t *req)
     /* Build the entire JSON response in a single buffer to avoid
      * hundreds of tiny chunked sends (each one a socket write that
      * generates ENOTCONN spam if the client has disconnected). */
-    char *buf = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    char *buf = heap_caps_malloc(LOGS_RECENT_RESPONSE_CAP, MALLOC_CAP_SPIRAM);
     if (!buf) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
-    size_t cap = 8192;
+    size_t cap = LOGS_RECENT_RESPONSE_CAP;
     size_t pos = 0;
 
-    pos += snprintf(buf + pos, cap - pos, "{\"lines\":[");
+    static const char prefix[] = "{\"lines\":[";
+    memcpy(buf, prefix, sizeof(prefix) - 1);
+    pos = sizeof(prefix) - 1;
 
     int local_cursor = since;
     int chunks_sent = 0;
+    bool response_full = false;
 
     /* Drain available ring-buffer data, non-blocking. */
-    while (true) {
+    while (s_ringbuf && !response_full) {
         size_t item_sz = 0;
         void *item = xRingbufferReceiveUpTo(s_ringbuf, &item_sz, 0, LOG_LINE_MAX);
         if (!item) break;
 
-        local_cursor++;
+        if (local_cursor < INT_MAX) local_cursor++;
 
         /* Split chunk into individual lines on '\n' and emit as JSON strings. */
         const char *p   = (const char *)item;
@@ -1457,31 +1464,44 @@ static esp_err_t logs_recent_handler(httpd_req_t *req)
             }
 
             if (line_len > 0) {
-                if (chunks_sent > 0) {
-                    if (pos + 1 >= cap) goto buf_full;
-                    buf[pos++] = ',';
+                /* Size the complete escaped line before writing anything.
+                 * A response that fills mid-line is not valid JSON.  Keep a
+                 * suffix reserve at all times so snprintf can never report a
+                 * length beyond the allocation passed to httpd_resp_send. */
+                size_t escaped_len = 0;
+                for (size_t i = 0; i < line_len; i++) {
+                    unsigned char c = (unsigned char)p[i];
+                    escaped_len += (c == '\\' || c == '"') ? 2u :
+                                   (c < 0x20) ? 6u : 1u;
+                }
+                size_t needed = escaped_len + 2u + (chunks_sent > 0 ? 1u : 0u);
+                if (needed + LOGS_RECENT_SUFFIX_RESERVE > cap - pos) {
+                    response_full = true;
+                    break;
                 }
 
-                if (pos + 1 >= cap) goto buf_full;
+                if (chunks_sent > 0) buf[pos++] = ',';
                 buf[pos++] = '"';
 
                 /* Escape JSON-special characters. */
+                static const char hex[] = "0123456789abcdef";
                 for (size_t i = 0; i < line_len; i++) {
-                    char c = p[i];
+                    unsigned char c = (unsigned char)p[i];
                     if (c == '\\' || c == '"') {
-                        if (pos + 2 >= cap) goto buf_full;
                         buf[pos++] = '\\';
-                        buf[pos++] = c;
-                    } else if ((unsigned char)c < 0x20) {
-                        if (pos + 6 >= cap) goto buf_full;
-                        pos += snprintf(buf + pos, cap - pos, "\\u%04x", (unsigned char)c);
+                        buf[pos++] = (char)c;
+                    } else if (c < 0x20) {
+                        buf[pos++] = '\\';
+                        buf[pos++] = 'u';
+                        buf[pos++] = '0';
+                        buf[pos++] = '0';
+                        buf[pos++] = hex[c >> 4];
+                        buf[pos++] = hex[c & 0x0f];
                     } else {
-                        if (pos + 1 >= cap) goto buf_full;
-                        buf[pos++] = c;
+                        buf[pos++] = (char)c;
                     }
                 }
 
-                if (pos + 1 >= cap) goto buf_full;
                 buf[pos++] = '"';
                 chunks_sent++;
             }
@@ -1489,11 +1509,19 @@ static esp_err_t logs_recent_handler(httpd_req_t *req)
             p = nl ? nl + 1 : end;
         }
 
+        /* Every receive must have exactly one return, including the bounded
+         * response path above. */
         vRingbufferReturnItem(s_ringbuf, item);
     }
 
-buf_full:
-    pos += snprintf(buf + pos, cap - pos, "],\"cursor\":%d}", local_cursor);
+    int suffix_len = snprintf(buf + pos, cap - pos,
+                              "],\"cursor\":%d}", local_cursor);
+    if (suffix_len < 0 || (size_t)suffix_len >= cap - pos) {
+        free(buf);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    pos += (size_t)suffix_len;
 
     httpd_resp_send(req, buf, pos);
     free(buf);
