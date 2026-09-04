@@ -35,6 +35,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "log_stream.h"
 #include "net_provision.h"
 #include "oximeter.h"
 #include "psram_task.h"
@@ -55,6 +56,20 @@
 #define POLICY_PEEK_TIMEOUT_S 60
 #define TOUCH_FAILURE_THRESHOLD 3
 #define BACKLIGHT_RETRY_US 250000
+#define MANAGE_SECTION_COUNT 8
+#define LOG_VISIBLE_ROWS 10
+#define LOG_QUERY_MAX 48
+
+typedef enum {
+    MANAGE_DEVICES = 0,
+    MANAGE_CONNECTIVITY,
+    MANAGE_ALERTS,
+    MANAGE_UPLOADS,
+    MANAGE_STORAGE,
+    MANAGE_SYSTEM,
+    MANAGE_LOGS,
+    MANAGE_ADVANCED,
+} manage_section_t;
 
 static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
     0, 60, 300, 900, 1800
@@ -470,6 +485,7 @@ static lv_obj_t *s_upload_titles[UPLOADER_PROGRESS_MAX_BACKENDS];
 static lv_obj_t *s_upload_details[UPLOADER_PROGRESS_MAX_BACKENDS];
 static lv_obj_t *s_upload_states[UPLOADER_PROGRESS_MAX_BACKENDS];
 static lv_obj_t *s_upload_meters[UPLOADER_PROGRESS_MAX_BACKENDS];
+static lv_obj_t *s_upload_browser_row;
 static lv_obj_t *s_storage_browser_row;
 static lv_obj_t *s_system_health_title;
 static lv_obj_t *s_system_health_dot;
@@ -479,12 +495,49 @@ static lv_obj_t *s_system_restart_detail;
 static lv_obj_t *s_device_section_subtitle;
 static lv_obj_t *s_connectivity_section_subtitle;
 static lv_obj_t *s_system_section_subtitle;
-static lv_obj_t *s_manage_scrolls[6];
-static lv_obj_t *s_manage_sections[6];
-static lv_obj_t *s_manage_buttons[6];
-static lv_obj_t *s_manage_labels[6];
-static lv_obj_t *s_manage_dots[6];
+static lv_obj_t *s_manage_scrolls[MANAGE_SECTION_COUNT];
+static lv_obj_t *s_manage_sections[MANAGE_SECTION_COUNT];
+static lv_obj_t *s_manage_buttons[MANAGE_SECTION_COUNT];
+static lv_obj_t *s_manage_labels[MANAGE_SECTION_COUNT];
+static lv_obj_t *s_manage_dots[MANAGE_SECTION_COUNT];
 static int s_active_manage_section = -1;
+static lv_obj_t *s_logs_status_dot;
+static lv_obj_t *s_logs_status;
+static lv_obj_t *s_logs_pause_button;
+static lv_obj_t *s_logs_pause_label;
+static lv_obj_t *s_logs_clear_button;
+static lv_obj_t *s_logs_save_button;
+static lv_obj_t *s_logs_save_label;
+static lv_obj_t *s_logs_query;
+static lv_obj_t *s_logs_level_buttons[4];
+static lv_obj_t *s_logs_level_labels[4];
+static lv_obj_t *s_logs_rows[LOG_VISIBLE_ROWS];
+static lv_obj_t *s_logs_accents[LOG_VISIBLE_ROWS];
+static lv_obj_t *s_logs_times[LOG_VISIBLE_ROWS];
+static lv_obj_t *s_logs_levels[LOG_VISIBLE_ROWS];
+static lv_obj_t *s_logs_tags[LOG_VISIBLE_ROWS];
+static lv_obj_t *s_logs_messages[LOG_VISIBLE_ROWS];
+static lv_obj_t *s_logs_empty;
+static lv_obj_t *s_logs_empty_title;
+static lv_obj_t *s_logs_empty_body;
+static lv_obj_t *s_logs_footer_left;
+static lv_obj_t *s_logs_footer_right;
+static lv_obj_t *s_logs_jump_button;
+static lv_obj_t *s_logs_jump_label;
+static log_stream_retained_line_t *s_logs_visible_lines;
+static size_t s_logs_visible_count;
+static log_stream_retained_info_t s_logs_visible_info;
+static uint32_t s_logs_level_mask = LOG_STREAM_RETAINED_LEVEL_ERROR |
+                                    LOG_STREAM_RETAINED_LEVEL_WARN |
+                                    LOG_STREAM_RETAINED_LEVEL_INFO;
+static uint64_t s_logs_seen_generation = UINT64_MAX;
+static uint64_t s_logs_pause_total;
+static bool s_logs_paused;
+static bool s_logs_filter_dirty = true;
+static bool s_logs_save_busy;
+static uint8_t s_logs_save_progress;
+static esp_err_t s_logs_save_result = ESP_ERR_INVALID_STATE;
+static size_t s_logs_saved_count;
 static lv_obj_t *s_keyboard_sheet;
 static lv_obj_t *s_keyboard_title;
 static lv_obj_t *s_keyboard;
@@ -1913,7 +1966,8 @@ static void set_connectivity_editing(lv_obj_t *target, bool editing)
             lv_obj_set_pos(s_wifi_password_reveal, 558, 46);
             lv_obj_move_foreground(s_wifi_password_reveal);
         }
-        lv_obj_scroll_to_y(s_manage_scrolls[1], 0, LV_ANIM_OFF);
+        lv_obj_scroll_to_y(s_manage_scrolls[MANAGE_CONNECTIVITY], 0,
+                           LV_ANIM_OFF);
         return;
     }
 
@@ -1926,7 +1980,7 @@ static void set_connectivity_editing(lv_obj_t *target, bool editing)
     lv_obj_set_size(s_wifi_password, 482, 60);
     lv_obj_set_pos(s_wifi_password_reveal, 552, 4);
     lv_obj_clear_flag(s_wifi_password_helper, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_scroll_to_y(s_manage_scrolls[1], 0, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(s_manage_scrolls[MANAGE_CONNECTIVITY], 0, LV_ANIM_OFF);
 }
 
 static void close_keyboard_sheet(bool restore)
@@ -2447,10 +2501,10 @@ static void nav_cb(lv_event_t *event)
 
 static void set_manage_section(int section)
 {
-    if (section < 0 || section >= 6) return;
+    if (section < 0 || section >= MANAGE_SECTION_COUNT) return;
     if (section == s_active_manage_section) return;
     s_active_manage_section = section;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < MANAGE_SECTION_COUNT; ++i) {
         bool selected = i == section;
         set_hidden(s_manage_sections[i], !selected);
         set_destination_surface(s_manage_buttons[i],
@@ -2472,8 +2526,10 @@ static void set_manage_section(int section)
                                      selected ? LV_OPA_50 : LV_OPA_TRANSP),
                                  0);
     }
-    if (section == 3) start_alert_config_refresh();
-    if (section == 4) start_storage_refresh();
+    if (section == MANAGE_ALERTS) start_alert_config_refresh();
+    if (section == MANAGE_STORAGE || section == MANAGE_UPLOADS)
+        start_storage_refresh();
+    if (section == MANAGE_LOGS) s_logs_filter_dirty = true;
     close_keyboard_sheet(true);
 }
 
@@ -2596,7 +2652,7 @@ static void action_cb(lv_event_t *event)
             s_therapy_command_busy = false;
             portEXIT_CRITICAL(&s_state_lock);
             set_active_page(2);
-            set_manage_section(0);
+            set_manage_section(MANAGE_DEVICES);
             return;
         }
         if (xTaskCreate(action_task, "ui_therapy", 4096,
@@ -3241,15 +3297,18 @@ static lv_obj_t *make_manage_section(lv_obj_t *section, int index,
     make_label(section, title, 22, 17, 500, FONT_SCREEN_TITLE, COLOR_TEXT);
     lv_obj_t *sub = make_label(section, subtitle, 22, 45, 650,
                                FONT_BODY, COLOR_SECONDARY);
-    if (index == 0) s_device_section_subtitle = sub;
-    if (index == 1) s_connectivity_section_subtitle = sub;
-    if (index == 5) s_system_section_subtitle = sub;
+    if (index == MANAGE_DEVICES) s_device_section_subtitle = sub;
+    if (index == MANAGE_CONNECTIVITY) s_connectivity_section_subtitle = sub;
+    if (index == MANAGE_SYSTEM) s_system_section_subtitle = sub;
     s_manage_scrolls[index] = make_plain_container(section, 14, 76, 718, 340);
     /* Only panes that can exceed the viewport should participate in LVGL's
      * drag/throw machinery.  A vertical gesture on a short pane used to move
      * the entire surface elastically and redraw hundreds of thousands of
      * pixels even though there was nowhere useful to scroll. */
-    bool can_overflow = index == 0 || index == 1 || index == 4;
+    bool can_overflow = index == MANAGE_DEVICES ||
+                        index == MANAGE_CONNECTIVITY ||
+                        index == MANAGE_UPLOADS ||
+                        index == MANAGE_SYSTEM;
     if (can_overflow) {
         lv_obj_add_flag(s_manage_scrolls[index], LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_clear_flag(s_manage_scrolls[index], LV_OBJ_FLAG_SCROLL_ELASTIC);
@@ -3268,9 +3327,10 @@ static lv_obj_t *make_manage_row(lv_obj_t *scroll, int y, int height)
 {
     /* Only sections whose content actually overflows reserve the handoff's
      * 14 px scrollbar gutter. Short sections use the full 718 px column. */
-    bool has_scroll_gutter = scroll == s_manage_scrolls[0] ||
-                             scroll == s_manage_scrolls[1] ||
-                             scroll == s_manage_scrolls[4];
+    bool has_scroll_gutter = scroll == s_manage_scrolls[MANAGE_DEVICES] ||
+                             scroll == s_manage_scrolls[MANAGE_CONNECTIVITY] ||
+                             scroll == s_manage_scrolls[MANAGE_UPLOADS] ||
+                             scroll == s_manage_scrolls[MANAGE_SYSTEM];
     lv_obj_t *row = make_card(scroll, 0, y,
                               has_scroll_gutter ? 704 : 718, height);
     lv_obj_set_style_bg_color(row, lv_color_hex(COLOR_CARD), 0);
@@ -3343,7 +3403,7 @@ static void style_manage_textarea(lv_obj_t *field)
 
 static void build_devices_section(lv_obj_t *section)
 {
-    lv_obj_t *scroll = make_manage_section(section, 0, "Devices",
+    lv_obj_t *scroll = make_manage_section(section, MANAGE_DEVICES, "Devices",
                                             "Pair and manage bedside sensors");
     lv_obj_t *as = make_manage_row(scroll, 0, 230);
     s_as11_row = as;
@@ -3475,7 +3535,7 @@ static void build_devices_section(lv_obj_t *section)
 
 static void build_connectivity_section(lv_obj_t *section)
 {
-    lv_obj_t *scroll = make_manage_section(section, 1, "Connectivity",
+    lv_obj_t *scroll = make_manage_section(section, MANAGE_CONNECTIVITY, "Connectivity",
                                             "Wi-Fi and local dashboard access");
     s_wifi_scan_button = make_touch_button(section, 594, 14, 134, 48,
                                             "Scan", COLOR_CONTROL,
@@ -3579,13 +3639,11 @@ static void build_connectivity_section(lv_obj_t *section)
                                 lv_color_hex(COLOR_BASE), 0);
 }
 
-static void build_display_section(lv_obj_t *section)
+static int build_display_controls(lv_obj_t *scroll, int start_y)
 {
     device_settings_t initial_settings;
     device_settings_snapshot(&initial_settings);
-    lv_obj_t *scroll = make_manage_section(section, 2, "Display",
-                                            "Brightness, sleep, and therapy behaviour");
-    lv_obj_t *brightness = make_manage_row(scroll, 0, 112);
+    lv_obj_t *brightness = make_manage_row(scroll, start_y, 112);
     make_label(brightness, "Screen brightness", 0, 0, 260,
                FONT_ROW_TITLE, COLOR_TEXT);
     s_settings_brightness_value = make_label(brightness, "100% - steady", 472, 0, 200,
@@ -3620,7 +3678,7 @@ static void build_display_section(lv_obj_t *section)
     make_label(brightness, "High", 642, 52, 30,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 
-    lv_obj_t *therapy = make_manage_row(scroll, 120, 128);
+    lv_obj_t *therapy = make_manage_row(scroll, start_y + 120, 128);
     make_label(therapy, "During therapy", 0, 0, 260,
                FONT_ROW_TITLE, COLOR_TEXT);
     static const char *modes[] = {
@@ -3638,7 +3696,7 @@ static void build_display_section(lv_obj_t *section)
         x += widths[i] + 8;
     }
 
-    lv_obj_t *off = make_manage_row(scroll, 256, 82);
+    lv_obj_t *off = make_manage_row(scroll, start_y + 256, 82);
     make_label(off, "Turn screen off after", 0, 0, 350,
                FONT_ROW_TITLE, COLOR_TEXT);
     bool can_wake_screen = screen_wake_input_available();
@@ -3673,12 +3731,12 @@ static void build_display_section(lv_obj_t *section)
         lv_obj_add_state(s_settings_screen_timeout, LV_STATE_DISABLED);
         lv_obj_add_state(screen_off, LV_STATE_DISABLED);
     }
-
+    return start_y + 346;
 }
 
 static void build_alerts_section(lv_obj_t *section)
 {
-    lv_obj_t *scroll = make_manage_section(section, 3, "Alerts",
+    lv_obj_t *scroll = make_manage_section(section, MANAGE_ALERTS, "Alerts",
                                             "If therapy stops unexpectedly overnight");
     lv_obj_t *status = make_manage_row(scroll, 0, 114);
     make_label(status, "Push alerts", 0, 0, 190,
@@ -3710,33 +3768,13 @@ static void build_alerts_section(lv_obj_t *section)
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
 
-static void build_storage_section(lv_obj_t *section)
+static void build_uploads_section(lv_obj_t *section)
 {
-    lv_obj_t *scroll = make_manage_section(section, 4, "Storage and uploads",
-                                            "microSD card and upload health");
-    lv_obj_t *card = make_manage_row(scroll, 0, 128);
-    make_label(card, "microSD card", 0, 0, 190,
-               FONT_ROW_TITLE, COLOR_TEXT);
-    s_storage_status = make_label(card, "microSD capacity and upload queue", 200, 0, 300,
-                                  FONT_BODY_SMALL, COLOR_SECONDARY);
-    s_storage_estimate = make_label(
-        card, "Capacity estimate will appear after the card responds",
-        0, 29, 490, FONT_BODY_SMALL, COLOR_TERTIARY);
-    s_storage_meter = lv_bar_create(card);
-    lv_obj_set_pos(s_storage_meter, 0, 64);
-    lv_obj_set_size(s_storage_meter, 500, 10);
-    lv_bar_set_range(s_storage_meter, 0, 100);
-    lv_bar_set_value(s_storage_meter, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_storage_meter, lv_color_hex(COLOR_CONTROL),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_storage_meter, lv_color_hex(COLOR_LIVE),
-                              LV_PART_INDICATOR);
-    s_storage_refresh_button = make_touch_button(card, 506, 47, 166, 56,
-                                                  "Refresh", COLOR_CONTROL,
-                                                  storage_refresh_cb, 0);
+    lv_obj_t *scroll = make_manage_section(section, MANAGE_UPLOADS, "Uploads",
+                                            "Destination status and retry progress");
 
     for (int i = 0; i < UPLOADER_PROGRESS_MAX_BACKENDS; ++i) {
-        lv_obj_t *row = make_manage_row(scroll, 136 + i * 100, 92);
+        lv_obj_t *row = make_manage_row(scroll, i * 100, 92);
         s_upload_rows[i] = row;
         s_upload_dots[i] = make_status_dot(row, 0, 7, 12);
         s_upload_titles[i] = make_label(row, "Upload destination", 28, 0, 330,
@@ -3758,20 +3796,300 @@ static void build_storage_section(lv_obj_t *section)
         lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }
 
+    s_upload_browser_row = make_manage_row(scroll, 0, 96);
+    make_label(s_upload_browser_row, "Upload configuration", 0, 0, 270,
+               FONT_ROW_TITLE, COLOR_TEXT);
+    make_label(s_upload_browser_row,
+               "Credentials, FTP access, formatting, and bulk upload controls stay in the browser dashboard.",
+               0, 29, 470, FONT_BODY_SMALL, COLOR_SECONDARY);
+    make_label(s_upload_browser_row, "Browser dashboard only", 500, 22, 172,
+               FONT_BODY_SMALL, COLOR_TERTIARY);
+}
+
+static void build_storage_section(lv_obj_t *section)
+{
+    lv_obj_t *scroll = make_manage_section(section, MANAGE_STORAGE, "Storage",
+                                            "microSD capacity and recording health");
+    lv_obj_t *card = make_manage_row(scroll, 0, 128);
+    make_label(card, "microSD card", 0, 0, 190,
+               FONT_ROW_TITLE, COLOR_TEXT);
+    s_storage_status = make_label(card, "microSD capacity and recording status",
+                                  200, 0, 300, FONT_BODY_SMALL,
+                                  COLOR_SECONDARY);
+    s_storage_estimate = make_label(
+        card, "Capacity estimate will appear after the card responds",
+        0, 29, 490, FONT_BODY_SMALL, COLOR_TERTIARY);
+    s_storage_meter = lv_bar_create(card);
+    lv_obj_set_pos(s_storage_meter, 0, 64);
+    lv_obj_set_size(s_storage_meter, 500, 10);
+    lv_bar_set_range(s_storage_meter, 0, 100);
+    lv_bar_set_value(s_storage_meter, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_storage_meter, lv_color_hex(COLOR_CONTROL),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_storage_meter, lv_color_hex(COLOR_LIVE),
+                              LV_PART_INDICATOR);
+    s_storage_refresh_button = make_touch_button(card, 506, 47, 166, 56,
+                                                  "Refresh", COLOR_CONTROL,
+                                                  storage_refresh_cb, 0);
+
     s_storage_browser_row = make_manage_row(scroll, 136, 96);
-    make_label(s_storage_browser_row, "Upload configuration", 0, 0, 270,
+    make_label(s_storage_browser_row, "Recorded files", 0, 0, 270,
                FONT_ROW_TITLE, COLOR_TEXT);
     make_label(s_storage_browser_row,
-               "Credentials, FTP access, formatting, and bulk upload controls stay in the browser dashboard.",
+               "Browse, regenerate EDF, and delete recordings in the browser dashboard for now.",
                0, 29, 470, FONT_BODY_SMALL, COLOR_SECONDARY);
     make_label(s_storage_browser_row, "Browser dashboard only", 500, 22, 172,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 }
 
+typedef struct {
+    log_stream_retained_filter_t filter;
+    char query[LOG_QUERY_MAX + 1];
+} logs_save_job_t;
+
+static void logs_set_paused(bool paused)
+{
+    if (s_logs_paused == paused) return;
+    s_logs_paused = paused;
+    if (paused) {
+        log_stream_retained_info_t info;
+        if (log_stream_retained_get_info(&info) == ESP_OK)
+            s_logs_pause_total = info.total_count;
+    } else {
+        s_logs_filter_dirty = true;
+    }
+}
+
+static void logs_pause_cb(lv_event_t *event)
+{
+    (void)event;
+    logs_set_paused(!s_logs_paused);
+}
+
+static void logs_query_focus_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_FOCUSED) return;
+    /* Search never silently resumes a moving viewport. The user can resume
+     * explicitly after dismissing the keyboard and checking the result. */
+    logs_set_paused(true);
+    open_keyboard_sheet(lv_event_get_target(event),
+                        LV_KEYBOARD_MODE_TEXT_LOWER, "Filter logs", 314);
+}
+
+static void logs_query_changed_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_VALUE_CHANGED)
+        s_logs_filter_dirty = true;
+}
+
+static void logs_level_cb(lv_event_t *event)
+{
+    static const uint32_t masks[] = {
+        LOG_STREAM_RETAINED_LEVEL_ERROR,
+        LOG_STREAM_RETAINED_LEVEL_WARN,
+        LOG_STREAM_RETAINED_LEVEL_INFO,
+        LOG_STREAM_RETAINED_LEVEL_DEBUG |
+            LOG_STREAM_RETAINED_LEVEL_VERBOSE,
+    };
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    if (index < 0 || index >= (int)(sizeof(masks) / sizeof(masks[0]))) return;
+    s_logs_level_mask ^= masks[index];
+    s_logs_filter_dirty = true;
+}
+
+static void logs_clear_cb(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&s_state_lock);
+    bool save_busy = s_logs_save_busy;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (save_busy) return;
+    esp_err_t result = log_stream_retained_clear();
+    s_logs_visible_count = 0;
+    s_logs_seen_generation = UINT64_MAX;
+    s_logs_filter_dirty = true;
+    if (result == ESP_OK) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_logs_save_result = ESP_ERR_INVALID_STATE;
+        s_logs_saved_count = 0;
+        portEXIT_CRITICAL(&s_state_lock);
+    }
+}
+
+static void logs_jump_cb(lv_event_t *event)
+{
+    (void)event;
+    /* Refresh once at the tail but remain paused, preserving the primary
+     * readability affordance and avoiding a surprise return to motion. */
+    s_logs_filter_dirty = true;
+}
+
+static void logs_save_progress(size_t processed, size_t total, void *ctx)
+{
+    (void)ctx;
+    uint8_t percent = total == 0 ? 100 :
+        (uint8_t)LV_MIN((processed * 100U) / total, 100U);
+    portENTER_CRITICAL(&s_state_lock);
+    s_logs_save_progress = percent;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+static void logs_save_task(void *arg)
+{
+    logs_save_job_t *job = arg;
+    size_t saved_count = 0;
+    esp_err_t result = log_stream_retained_save_to_sd(
+        &job->filter, NULL, 0, &saved_count, logs_save_progress, NULL);
+    free(job);
+    portENTER_CRITICAL(&s_state_lock);
+    s_logs_save_busy = false;
+    s_logs_save_result = result;
+    s_logs_saved_count = saved_count;
+    if (result == ESP_OK) s_logs_save_progress = 100;
+    portEXIT_CRITICAL(&s_state_lock);
+    psram_task_delete(NULL);
+}
+
+static void logs_save_cb(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&s_state_lock);
+    bool busy = s_logs_save_busy;
+    if (!busy) {
+        s_logs_save_busy = true;
+        s_logs_save_progress = 0;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    if (busy) return;
+
+    logs_save_job_t *job = calloc(1, sizeof(*job));
+    if (!job) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_logs_save_busy = false;
+        s_logs_save_result = ESP_ERR_NO_MEM;
+        portEXIT_CRITICAL(&s_state_lock);
+        return;
+    }
+    const char *query = s_logs_query ? lv_textarea_get_text(s_logs_query) : "";
+    strlcpy(job->query, query ? query : "", sizeof(job->query));
+    job->filter.level_mask = s_logs_level_mask ? s_logs_level_mask
+                                                : (1u << 31);
+    job->filter.query = job->query;
+    job->filter.order = LOG_STREAM_RETAINED_OLDEST_FIRST;
+    if (!psram_task_create(logs_save_task, "ui_log_save", 6144, job, 3, 0,
+                           NULL, NULL)) {
+        free(job);
+        portENTER_CRITICAL(&s_state_lock);
+        s_logs_save_busy = false;
+        s_logs_save_result = ESP_ERR_NO_MEM;
+        portEXIT_CRITICAL(&s_state_lock);
+    }
+}
+
+static void build_logs_section(lv_obj_t *section)
+{
+    make_label(section, "Logs", 18, 12, 100, FONT_SCREEN_TITLE, COLOR_TEXT);
+    s_logs_status_dot = make_status_dot(section, 18, 49, 8);
+    s_logs_status = make_label(section, "Starting retained log feed", 34, 43,
+                               330, FONT_AXIS, COLOR_SECONDARY);
+
+    s_logs_pause_button = make_touch_button(section, 468, 9, 76, 44, "Pause",
+                                             COLOR_CONTROL, logs_pause_cb, 0);
+    s_logs_pause_label = lv_obj_get_child(s_logs_pause_button, 0);
+    lv_obj_set_style_text_font(s_logs_pause_label, FONT_BUTTON_SMALL, 0);
+    s_logs_clear_button = make_touch_button(section, 552, 9, 72, 44, "Clear",
+                                             COLOR_CONTROL, logs_clear_cb, 0);
+    lv_obj_set_style_text_font(lv_obj_get_child(s_logs_clear_button, 0),
+                               FONT_BUTTON_SMALL, 0);
+    s_logs_save_button = make_touch_button(section, 632, 9, 100, 44,
+                                            "Save to card", COLOR_CONTROL,
+                                            logs_save_cb, 0);
+    s_logs_save_label = lv_obj_get_child(s_logs_save_button, 0);
+    lv_obj_set_style_text_font(s_logs_save_label, FONT_BUTTON_SMALL, 0);
+
+    s_logs_query = lv_textarea_create(section);
+    lv_textarea_set_one_line(s_logs_query, true);
+    lv_textarea_set_max_length(s_logs_query, LOG_QUERY_MAX);
+    lv_textarea_set_placeholder_text(s_logs_query, "Filter by tag or message");
+    lv_obj_set_pos(s_logs_query, 14, 68);
+    lv_obj_set_size(s_logs_query, 330, 44);
+    lv_obj_set_style_text_font(s_logs_query, FONT_AXIS, 0);
+    style_manage_textarea(s_logs_query);
+    lv_obj_add_event_cb(s_logs_query, logs_query_focus_cb, LV_EVENT_FOCUSED,
+                        NULL);
+    lv_obj_add_event_cb(s_logs_query, logs_query_changed_cb,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+
+    static const char *level_names[] = { "Error", "Warn", "Info", "Debug" };
+    for (int i = 0; i < 4; ++i) {
+        s_logs_level_buttons[i] = make_touch_button(
+            section, 352 + i * 95, 68, 87, 44, level_names[i], COLOR_CONTROL,
+            logs_level_cb, i);
+        lv_obj_set_style_radius(s_logs_level_buttons[i], 22, 0);
+        s_logs_level_labels[i] = lv_obj_get_child(s_logs_level_buttons[i], 0);
+        lv_obj_set_style_text_font(s_logs_level_labels[i], FONT_AXIS, 0);
+    }
+
+    lv_obj_t *viewport = make_inner_card(section, 14, 120, 718, 258, 18);
+    lv_obj_set_style_bg_color(viewport, lv_color_hex(0x090c13), 0);
+    lv_obj_set_style_border_width(viewport, 1, 0);
+    lv_obj_set_style_border_color(viewport, lv_color_hex(0x252b36), 0);
+    s_manage_scrolls[MANAGE_LOGS] = viewport;
+    for (int i = 0; i < LOG_VISIBLE_ROWS; ++i) {
+        lv_obj_t *row = make_inner_card(viewport, 7, 4 + i * 25, 704, 24, 4);
+        s_logs_rows[i] = row;
+        s_logs_accents[i] = make_inner_card(row, 0, 0, 3, 24, 1);
+        s_logs_times[i] = make_label(row, "--:--:--.---", 10, 6, 91,
+                                     FONT_AXIS, COLOR_TERTIARY);
+        s_logs_levels[i] = make_label(row, "INFO", 105, 6, 38,
+                                      FONT_AXIS, COLOR_LIVE);
+        s_logs_tags[i] = make_label(row, "system", 148, 6, 112,
+                                    FONT_AXIS, COLOR_SECONDARY);
+        s_logs_messages[i] = make_label(row, "", 264, 6, 430,
+                                        FONT_AXIS, COLOR_TEXT);
+        lv_label_set_long_mode(s_logs_times[i], LV_LABEL_LONG_CLIP);
+        lv_label_set_long_mode(s_logs_levels[i], LV_LABEL_LONG_CLIP);
+        lv_label_set_long_mode(s_logs_tags[i], LV_LABEL_LONG_CLIP);
+        lv_label_set_long_mode(s_logs_messages[i], LV_LABEL_LONG_CLIP);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    s_logs_empty = make_plain_container(viewport, 0, 0, 718, 258);
+    make_label(s_logs_empty, "?", 335, 54, 48, FONT_SCREEN_TITLE,
+               COLOR_SECONDARY);
+    s_logs_empty_title = make_label(s_logs_empty, "No log lines yet", 100, 105,
+                                    518, FONT_ROW_TITLE, COLOR_TEXT);
+    lv_obj_set_style_text_align(s_logs_empty_title, LV_TEXT_ALIGN_CENTER, 0);
+    s_logs_empty_body = make_label(
+        s_logs_empty, "The retained feed will appear here as services report.",
+        90, 136, 538, FONT_BODY_SMALL, COLOR_SECONDARY);
+    lv_obj_set_style_text_align(s_logs_empty_body, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_logs_jump_button = make_touch_button(section, 258, 326, 226, 44,
+                                            "Jump to newest", COLOR_INVERSE,
+                                            logs_jump_cb, 0);
+    lv_obj_set_style_radius(s_logs_jump_button, 22, 0);
+    s_logs_jump_label = lv_obj_get_child(s_logs_jump_button, 0);
+    lv_obj_set_style_text_font(s_logs_jump_label, FONT_BUTTON_SMALL, 0);
+    lv_obj_set_style_text_color(s_logs_jump_label, lv_color_hex(COLOR_BASE), 0);
+    lv_obj_add_flag(s_logs_jump_button, LV_OBJ_FLAG_HIDDEN);
+
+    s_logs_footer_left = make_label(section, "Waiting for log feed", 14, 390,
+                                    330, FONT_AXIS, COLOR_TERTIARY);
+    s_logs_footer_right = make_label(
+        section, "Older lines roll off the buffer. Save to card to keep them.",
+        350, 390, 382, FONT_AXIS, COLOR_TERTIARY);
+    lv_obj_set_style_text_align(s_logs_footer_right, LV_TEXT_ALIGN_RIGHT, 0);
+
+    s_logs_visible_lines = heap_caps_calloc(
+        LOG_VISIBLE_ROWS, sizeof(*s_logs_visible_lines),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
 static void build_system_section(lv_obj_t *section)
 {
-    lv_obj_t *scroll = make_manage_section(section, 5, "System",
-                                            "Hardware health and maintenance");
+    lv_obj_t *scroll = make_manage_section(section, MANAGE_SYSTEM, "System",
+                                            "Display, hardware health, and maintenance");
     lv_obj_t *header_diagnostics = make_touch_button(
         section, 590, 12, 134, 48, "Diagnostics", COLOR_CONTROL,
         diagnostics_cb, 0);
@@ -3803,7 +4121,8 @@ static void build_system_section(lv_obj_t *section)
     make_touch_button(diag, 526, -10, 146, 56, "Open",
                       COLOR_CONTROL, diagnostics_cb, 0);
 
-    lv_obj_t *restart = make_manage_row(scroll, 244, 68);
+    int restart_y = build_display_controls(scroll, 244);
+    lv_obj_t *restart = make_manage_row(scroll, restart_y, 68);
     make_label(restart, "Restart", 0, 0, 180,
                FONT_ROW_TITLE, COLOR_TEXT);
     s_system_restart_detail = make_label(restart,
@@ -3819,24 +4138,40 @@ static void build_system_section(lv_obj_t *section)
                                 lv_color_hex(0xffd0ca), 0);
 }
 
+static void build_advanced_section(lv_obj_t *section)
+{
+    lv_obj_t *scroll = make_manage_section(
+        section, MANAGE_ADVANCED, "Advanced",
+        "High-impact maintenance remains in the browser for now");
+    lv_obj_t *future = make_manage_row(scroll, 0, 176);
+    make_label(future, "Advanced controls are not on-device yet", 0, 0, 600,
+               FONT_ROW_TITLE, COLOR_TEXT);
+    make_label(future,
+               "OTA installation, card formatting, reset-all, and destructive file operations need a hold-to-confirm interaction before they can move here safely.",
+               0, 35, 650, FONT_BODY, COLOR_SECONDARY);
+    make_label(future, "Planned for Wave Three", 0, 112, 280,
+               FONT_BODY_SMALL, COLOR_TERTIARY);
+}
+
 static void build_manage_page(lv_obj_t *manage)
 {
     static const char *section_names[] = {
-        "Devices", "Connectivity", "Display", "Alerts", "Storage", "System"
+        "Devices", "Connectivity", "Alerts", "Uploads",
+        "Storage", "System", "Logs", "Advanced"
     };
     lv_obj_t *rail = make_card(manage, 18, 6, 228, 430);
     lv_obj_set_style_radius(rail, 28, 0);
     lv_obj_set_style_pad_all(rail, 8, 0);
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < MANAGE_SECTION_COUNT; ++i) {
         s_manage_buttons[i] = make_destination_button(
-            rail, 0, i * 70, 212, 64, section_names[i], COLOR_PANEL,
+            rail, 0, i * 52, 212, 48, section_names[i], COLOR_PANEL,
             manage_section_cb, i);
-        lv_obj_set_style_radius(s_manage_buttons[i], 22, 0);
+        lv_obj_set_style_radius(s_manage_buttons[i], 20, 0);
         s_manage_labels[i] = lv_obj_get_child(s_manage_buttons[i], 0);
         lv_obj_align(s_manage_labels[i], LV_ALIGN_LEFT_MID, 36, 0);
         lv_obj_set_style_text_font(s_manage_labels[i], FONT_BODY, 0);
         s_manage_dots[i] = lv_obj_create(s_manage_buttons[i]);
-        lv_obj_set_pos(s_manage_dots[i], 16, 28);
+        lv_obj_set_pos(s_manage_dots[i], 16, 20);
         lv_obj_set_size(s_manage_dots[i], 8, 8);
         lv_obj_set_style_radius(s_manage_dots[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(s_manage_dots[i], 0, 0);
@@ -3848,14 +4183,16 @@ static void build_manage_page(lv_obj_t *manage)
     lv_obj_t *panel = make_card(manage, 260, 6, 746, 430);
     lv_obj_set_style_radius(panel, 28, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < MANAGE_SECTION_COUNT; ++i)
         s_manage_sections[i] = make_plain_container(panel, 0, 0, 746, 430);
-    build_devices_section(s_manage_sections[0]);
-    build_connectivity_section(s_manage_sections[1]);
-    build_display_section(s_manage_sections[2]);
-    build_alerts_section(s_manage_sections[3]);
-    build_storage_section(s_manage_sections[4]);
-    build_system_section(s_manage_sections[5]);
+    build_devices_section(s_manage_sections[MANAGE_DEVICES]);
+    build_connectivity_section(s_manage_sections[MANAGE_CONNECTIVITY]);
+    build_alerts_section(s_manage_sections[MANAGE_ALERTS]);
+    build_uploads_section(s_manage_sections[MANAGE_UPLOADS]);
+    build_storage_section(s_manage_sections[MANAGE_STORAGE]);
+    build_system_section(s_manage_sections[MANAGE_SYSTEM]);
+    build_logs_section(s_manage_sections[MANAGE_LOGS]);
+    build_advanced_section(s_manage_sections[MANAGE_ADVANCED]);
 }
 
 static const char *s_passkey_keyboard_map[] = {
@@ -4015,7 +4352,10 @@ static void build_ui(void)
     static const char *tray_actions[] = {
         "Pair", "Manage", "Manage", "", "Pair"
     };
-    static const int tray_sections[] = { 0, 4, 1, 4, 0 };
+    static const int tray_sections[] = {
+        MANAGE_DEVICES, MANAGE_STORAGE, MANAGE_CONNECTIVITY,
+        MANAGE_UPLOADS, MANAGE_DEVICES
+    };
     lv_obj_t **details[] = {
         &s_status_tray_as11, &s_status_tray_sd, &s_status_tray_wifi,
         &s_status_tray_upload, &s_status_tray_ox
@@ -4167,7 +4507,7 @@ static void build_ui(void)
     lv_obj_move_foreground(s_status_scrim);
     lv_obj_move_foreground(s_status_tray);
 
-    set_manage_section(0);
+    set_manage_section(MANAGE_DEVICES);
     set_active_page(0);
     lv_obj_invalidate(screen);
 }
@@ -4916,7 +5256,7 @@ static void refresh_upload_destinations(const ui_service_state_t *services)
 
     for (size_t i = 0; i < UPLOADER_PROGRESS_MAX_BACKENDS; ++i)
         set_hidden(s_upload_rows[i], i >= count);
-    lv_obj_set_y(s_storage_browser_row, 136 + (int)count * 100);
+    lv_obj_set_y(s_upload_browser_row, (int)count * 100);
 }
 
 static void set_control_disabled(lv_obj_t *control, bool disabled)
@@ -5011,6 +5351,288 @@ static void refresh_wifi_scan_controls(void)
     }
 }
 
+static const char *logs_level_name(uint8_t level)
+{
+    switch (level) {
+        case LOG_STREAM_RETAINED_LEVEL_ERROR: return "ERROR";
+        case LOG_STREAM_RETAINED_LEVEL_WARN: return "WARN";
+        case LOG_STREAM_RETAINED_LEVEL_INFO: return "INFO";
+        case LOG_STREAM_RETAINED_LEVEL_DEBUG:
+        case LOG_STREAM_RETAINED_LEVEL_VERBOSE: return "DEBUG";
+        default: return "OTHER";
+    }
+}
+
+static uint32_t logs_level_tone(uint8_t level)
+{
+    switch (level) {
+        case LOG_STREAM_RETAINED_LEVEL_ERROR: return COLOR_FAULT;
+        case LOG_STREAM_RETAINED_LEVEL_WARN: return COLOR_AMBER;
+        case LOG_STREAM_RETAINED_LEVEL_INFO: return COLOR_LIVE;
+        default: return COLOR_TERTIARY;
+    }
+}
+
+static void logs_parse_line(const log_stream_retained_line_t *line,
+                            char *time_text, size_t time_size,
+                            char *tag, size_t tag_size,
+                            char *message, size_t message_size)
+{
+    if (!line || !time_text || !tag || !message) return;
+    strlcpy(time_text, "--:--:--.---", time_size);
+    strlcpy(tag, "system", tag_size);
+    strlcpy(message, line->text, message_size);
+
+    const char *open = strchr(line->text, '(');
+    const char *close = open ? strchr(open + 1, ')') : NULL;
+    if (!open || !close) return;
+
+    size_t stamp_length = (size_t)(close - (open + 1));
+    if (memchr(open + 1, ':', stamp_length) && stamp_length < time_size) {
+        memcpy(time_text, open + 1, stamp_length);
+        time_text[stamp_length] = '\0';
+    } else {
+        char *stamp_end = NULL;
+        unsigned long long stamp_ms = strtoull(open + 1, &stamp_end, 10);
+        if (stamp_end != close) goto parse_payload;
+        time_t wall_now = time(NULL);
+        int64_t boot_ms = esp_timer_get_time() / 1000;
+        if (wall_now > 1600000000 && (int64_t)stamp_ms <= boot_ms + 60000) {
+            int64_t epoch_ms = (int64_t)wall_now * 1000 - boot_ms +
+                               (int64_t)stamp_ms;
+            time_t seconds = (time_t)(epoch_ms / 1000);
+            struct tm local;
+            localtime_r(&seconds, &local);
+            snprintf(time_text, time_size, "%02d:%02d:%02d.%03u",
+                     local.tm_hour, local.tm_min, local.tm_sec,
+                     (unsigned)(epoch_ms % 1000));
+        } else {
+            unsigned long long seconds = stamp_ms / 1000;
+            unsigned hours = seconds / 3600 > 999 ? 999
+                                                   : (unsigned)(seconds / 3600);
+            snprintf(time_text, time_size, "+%03u:%02u:%02u", hours,
+                     (unsigned)((seconds / 60) % 60),
+                     (unsigned)(seconds % 60));
+        }
+    }
+
+parse_payload:
+    const char *tag_start = close + 1;
+    while (*tag_start == ' ') tag_start++;
+    const char *colon = strchr(tag_start, ':');
+    if (!colon) return;
+    size_t tag_length = (size_t)(colon - tag_start);
+    if (tag_length >= tag_size) tag_length = tag_size - 1;
+    memcpy(tag, tag_start, tag_length);
+    tag[tag_length] = '\0';
+    const char *message_start = colon + 1;
+    while (*message_start == ' ') message_start++;
+    strlcpy(message, message_start, message_size);
+    if (line->truncated && strlen(message) + 3 < message_size)
+        strlcat(message, "...", message_size);
+}
+
+static void refresh_log_level_controls(void)
+{
+    static const uint32_t masks[] = {
+        LOG_STREAM_RETAINED_LEVEL_ERROR,
+        LOG_STREAM_RETAINED_LEVEL_WARN,
+        LOG_STREAM_RETAINED_LEVEL_INFO,
+        LOG_STREAM_RETAINED_LEVEL_DEBUG |
+            LOG_STREAM_RETAINED_LEVEL_VERBOSE,
+    };
+    static const uint32_t tones[] = {
+        COLOR_FAULT, COLOR_AMBER, COLOR_LIVE, COLOR_TERTIARY,
+    };
+    for (int i = 0; i < 4; ++i) {
+        bool enabled = (s_logs_level_mask & masks[i]) != 0;
+        set_button_surface(s_logs_level_buttons[i],
+                           enabled ? tones[i] : COLOR_CONTROL,
+                           enabled ? LV_OPA_30 : LV_OPA_COVER);
+        set_style_color_if_changed(s_logs_level_buttons[i],
+                                   LV_STYLE_BORDER_COLOR, tones[i], 0);
+        set_style_num_if_changed(s_logs_level_buttons[i],
+                                 LV_STYLE_BORDER_WIDTH, enabled ? 1 : 0, 0);
+        set_style_color_if_changed(s_logs_level_labels[i], LV_STYLE_TEXT_COLOR,
+                                   enabled ? COLOR_TEXT : COLOR_DISABLED, 0);
+    }
+}
+
+static void refresh_logs_widgets(const ui_state_t *state)
+{
+    log_stream_retained_info_t info = {0};
+    esp_err_t result = log_stream_retained_get_info(&info);
+    bool available = result == ESP_OK && info.available &&
+                     s_logs_visible_lines != NULL;
+    uint64_t new_lines = s_logs_paused && info.total_count > s_logs_pause_total
+                             ? info.total_count - s_logs_pause_total : 0;
+
+    bool should_snapshot = available &&
+        (s_logs_filter_dirty ||
+         (!s_logs_paused && info.generation != s_logs_seen_generation));
+    if (should_snapshot) {
+        log_stream_retained_filter_t filter = {
+            .level_mask = s_logs_level_mask ? s_logs_level_mask
+                                             : (1u << 31),
+            .query = lv_textarea_get_text(s_logs_query),
+            .after_sequence = 0,
+            .order = LOG_STREAM_RETAINED_NEWEST_FIRST,
+        };
+        size_t count = 0;
+        result = log_stream_retained_snapshot(
+            s_logs_visible_lines, LOG_VISIBLE_ROWS, &filter, &count, &info);
+        if (result == ESP_OK) {
+            s_logs_visible_count = count;
+            s_logs_visible_info = info;
+            s_logs_seen_generation = info.generation;
+            s_logs_pause_total = info.total_count;
+            s_logs_filter_dirty = false;
+            new_lines = 0;
+        } else {
+            available = false;
+        }
+    }
+
+    refresh_log_level_controls();
+    set_label_text_if_changed(s_logs_pause_label,
+                              s_logs_paused ? "Resume" : "Pause");
+    set_control_disabled(s_logs_pause_button, !available);
+    bool save_busy;
+    uint8_t save_progress;
+    esp_err_t save_result;
+    size_t saved_count;
+    portENTER_CRITICAL(&s_state_lock);
+    save_busy = s_logs_save_busy;
+    save_progress = s_logs_save_progress;
+    save_result = s_logs_save_result;
+    saved_count = s_logs_saved_count;
+    portEXIT_CRITICAL(&s_state_lock);
+    set_control_disabled(s_logs_clear_button,
+                         save_busy || !available || info.retained_count == 0);
+    if (save_busy) {
+        set_label_text_fmt_if_changed(s_logs_save_label, "%u%%",
+                                      (unsigned)save_progress);
+    } else {
+        set_label_text_if_changed(s_logs_save_label, "Save to card");
+    }
+    set_control_disabled(s_logs_save_button,
+                         save_busy || !available || !state->sd_ready ||
+                         info.retained_count == 0);
+
+    if (!available) {
+        set_dot_tone(s_logs_status_dot, COLOR_FAULT, true);
+        set_dot_tone(s_manage_dots[MANAGE_LOGS], COLOR_FAULT, true);
+        set_label_text_if_changed(s_logs_status,
+                                  "Stream disconnected - therapy and recording continue");
+    } else if (s_logs_paused) {
+        set_dot_tone(s_logs_status_dot, COLOR_AMBER, true);
+        set_dot_tone(s_manage_dots[MANAGE_LOGS], COLOR_AMBER, true);
+        set_label_text_fmt_if_changed(
+            s_logs_status, "Paused - %llu new line%s buffered",
+            (unsigned long long)new_lines, new_lines == 1 ? "" : "s");
+    } else {
+        set_dot_tone(s_logs_status_dot, COLOR_LIVE, true);
+        set_dot_tone(s_manage_dots[MANAGE_LOGS], COLOR_LIVE, true);
+        set_label_text_fmt_if_changed(
+            s_logs_status, "Live - %u-line ring buffer%s",
+            (unsigned)info.capacity,
+            info.dropped_count ? " - some lines dropped" : "");
+    }
+
+    if (!available) {
+        set_label_text_if_changed(s_logs_empty_title, "Log stream disconnected");
+        set_label_text_if_changed(
+            s_logs_empty_body,
+            "The logging feed stopped reporting. Therapy and card recording are unaffected; saved card logs remain available.");
+    } else if (s_logs_visible_count == 0) {
+        const char *query = lv_textarea_get_text(s_logs_query);
+        if (query && query[0]) {
+            set_label_text_fmt_if_changed(s_logs_empty_title,
+                                          "No lines match \"%s\"", query);
+            set_label_text_if_changed(
+                s_logs_empty_body,
+                (s_logs_level_mask & LOG_STREAM_RETAINED_LEVEL_DEBUG)
+                    ? "Clear the filter or enable another level."
+                    : "Clear the filter or enable Debug to widen the search.");
+        } else if (s_logs_level_mask == 0) {
+            set_label_text_if_changed(s_logs_empty_title, "No levels selected");
+            set_label_text_if_changed(s_logs_empty_body,
+                                      "Enable at least one level above.");
+        } else {
+            set_label_text_if_changed(s_logs_empty_title, "No log lines yet");
+            set_label_text_if_changed(
+                s_logs_empty_body,
+                "The retained feed will appear here as services report.");
+        }
+    }
+    set_hidden(s_logs_empty, available && s_logs_visible_count > 0);
+
+    for (int row = 0; row < LOG_VISIBLE_ROWS; ++row) {
+        bool shown = available && row < (int)s_logs_visible_count;
+        set_hidden(s_logs_rows[row], !shown);
+        if (!shown) continue;
+        /* The service returns newest-first so reverse only the ten visible
+         * rows; the screen then reads naturally from older to newer. */
+        const log_stream_retained_line_t *line =
+            &s_logs_visible_lines[s_logs_visible_count - 1 - row];
+        char time_text[20];
+        char tag[24];
+        char message[LOG_STREAM_RETAINED_TEXT_MAX];
+        logs_parse_line(line, time_text, sizeof(time_text), tag, sizeof(tag),
+                        message, sizeof(message));
+        uint32_t tone = logs_level_tone(line->level);
+        uint32_t row_color = line->level == LOG_STREAM_RETAINED_LEVEL_ERROR
+                                 ? 0x2b1218
+                             : line->level == LOG_STREAM_RETAINED_LEVEL_WARN
+                                 ? 0x272112
+                                 : 0x0c1018;
+        set_style_color_if_changed(s_logs_rows[row], LV_STYLE_BG_COLOR,
+                                   row_color, 0);
+        set_style_color_if_changed(s_logs_accents[row], LV_STYLE_BG_COLOR,
+                                   tone, 0);
+        set_label_text_if_changed(s_logs_times[row], time_text);
+        set_label_text_if_changed(s_logs_levels[row],
+                                  logs_level_name(line->level));
+        set_label_text_if_changed(s_logs_tags[row], tag);
+        set_label_text_if_changed(s_logs_messages[row], message);
+        set_style_color_if_changed(s_logs_levels[row], LV_STYLE_TEXT_COLOR,
+                                   tone, 0);
+        set_style_color_if_changed(
+            s_logs_messages[row], LV_STYLE_TEXT_COLOR,
+            line->level == LOG_STREAM_RETAINED_LEVEL_DEBUG ||
+                    line->level == LOG_STREAM_RETAINED_LEVEL_VERBOSE
+                ? COLOR_SECONDARY : COLOR_TEXT,
+            0);
+    }
+
+    set_hidden(s_logs_jump_button, !available || !s_logs_paused || new_lines == 0);
+    if (new_lines > 0)
+        set_label_text_fmt_if_changed(s_logs_jump_label,
+                                      "Jump to newest - %llu new",
+                                      (unsigned long long)new_lines);
+
+    if (!available) {
+        set_label_text_if_changed(s_logs_footer_left, "Retained feed unavailable");
+    } else if (save_busy) {
+        set_label_text_fmt_if_changed(
+            s_logs_footer_left, "Saving log snapshot to card - %u%%",
+            (unsigned)save_progress);
+    } else if (save_result == ESP_OK) {
+        set_label_text_fmt_if_changed(s_logs_footer_left,
+                                      "Saved %u lines to card",
+                                      (unsigned)saved_count);
+    } else if (save_result != ESP_ERR_INVALID_STATE) {
+        set_label_text_if_changed(s_logs_footer_left,
+                                  "Could not save snapshot - check the card");
+    } else {
+        set_label_text_fmt_if_changed(
+            s_logs_footer_left, "Showing %u recent line%s - %u retained",
+            (unsigned)s_logs_visible_count,
+            s_logs_visible_count == 1 ? "" : "s",
+            (unsigned)s_logs_visible_info.retained_count);
+    }
+}
+
 static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
 {
     const ui_service_state_t *services = s_render_services;
@@ -5061,7 +5683,8 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     }
 
     if (active_tab != 2) return;
-    if (s_active_manage_section >= 0 && s_active_manage_section < 6 &&
+    if (s_active_manage_section >= 0 &&
+        s_active_manage_section < MANAGE_SECTION_COUNT &&
         lv_obj_is_scrolling(s_manage_scrolls[s_active_manage_section])) {
         /* Static state catches up on the next 500 ms pass. Deferring it while
          * the finger is moving prevents unrelated labels and hidden sections
@@ -5069,8 +5692,13 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         return;
     }
 
-    if (s_active_manage_section == 1) refresh_wifi_scan_controls();
-    if (active_tab == 2 && s_active_manage_section == 0) {
+    if (s_active_manage_section == MANAGE_LOGS) {
+        refresh_logs_widgets(state);
+        return;
+    }
+    if (s_active_manage_section == MANAGE_CONNECTIVITY)
+        refresh_wifi_scan_controls();
+    if (active_tab == 2 && s_active_manage_section == MANAGE_DEVICES) {
         refresh_device_dropdown(false, services);
         refresh_device_dropdown(true, services);
     }
@@ -5445,9 +6073,24 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
                       alert_state == ALERT_BUZZING;
     uint32_t alert_color = actionable ? COLOR_FAULT :
                            alert_state == ALERT_ARMED ? COLOR_LIVE : COLOR_TERTIARY;
-    const uint32_t dots[] = { device_color, network_color, COLOR_LIVE,
-                              alert_color, storage_color, COLOR_LIVE };
-    for (int i = 0; i < 6; ++i)
+    uint32_t upload_color = services->upload_progress_result == ESP_OK
+                                ? COLOR_LIVE : COLOR_TERTIARY;
+    log_stream_retained_info_t log_info;
+    uint32_t log_color = log_stream_retained_get_info(&log_info) == ESP_OK &&
+                                 log_info.available
+                             ? (s_logs_paused ? COLOR_AMBER : COLOR_LIVE)
+                             : COLOR_FAULT;
+    const uint32_t dots[MANAGE_SECTION_COUNT] = {
+        [MANAGE_DEVICES] = device_color,
+        [MANAGE_CONNECTIVITY] = network_color,
+        [MANAGE_ALERTS] = alert_color,
+        [MANAGE_UPLOADS] = upload_color,
+        [MANAGE_STORAGE] = storage_color,
+        [MANAGE_SYSTEM] = system_healthy ? COLOR_LIVE : COLOR_AMBER,
+        [MANAGE_LOGS] = log_color,
+        [MANAGE_ADVANCED] = COLOR_TERTIARY,
+    };
+    for (int i = 0; i < MANAGE_SECTION_COUNT; ++i)
         set_dot_tone(s_manage_dots[i], dots[i], dots[i] != COLOR_TERTIARY);
 
     if (alert_test_busy) lv_obj_add_state(s_alert_test_button, LV_STATE_DISABLED);

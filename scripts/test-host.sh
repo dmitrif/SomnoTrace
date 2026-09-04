@@ -57,4 +57,5 @@ python3 scripts/clock_snapshot_contract_test.py
 python3 scripts/live_flow_units_contract_test.py
 python3 scripts/first_run_setup_contract_test.py
 python3 scripts/log_stream_retained_contract_test.py
+python3 scripts/logs_touch_ui_contract_test.py
 echo "All synthetic host tests passed"

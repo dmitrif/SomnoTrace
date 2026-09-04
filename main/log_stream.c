@@ -661,7 +661,9 @@ esp_err_t log_stream_retained_save_to_sd(
     const log_stream_retained_filter_t *filter,
     char *saved_path,
     size_t saved_path_size,
-    size_t *saved_line_count)
+    size_t *saved_line_count,
+    log_stream_retained_progress_fn progress_fn,
+    void *progress_ctx)
 {
     if ((saved_path && saved_path_size == 0) ||
         (!saved_path && saved_path_size != 0) ||
@@ -714,6 +716,7 @@ esp_err_t log_stream_retained_save_to_sd(
     retained_bounds_t bounds;
     error = retained_read_bounds(&bounds, NULL);
     if (error != ESP_OK) goto done;
+    if (progress_fn) progress_fn(0, bounds.count, progress_ctx);
 
     /* A temporary sibling prevents a failed/partial write from replacing the
      * last successful touchscreen export.  Capture remains available while
@@ -741,16 +744,22 @@ esp_err_t log_stream_retained_save_to_sd(
             error = ESP_ERR_INVALID_STATE;
             goto done;
         }
-        if (!retained_filter_matches(&line, &chronological)) continue;
-
-        if ((line.length > 0 &&
-             fwrite(line.text, 1, line.length, file) != line.length) ||
-            fwrite("\n", 1, 1, file) != 1) {
-            error = ESP_FAIL;
-            goto done;
+        if (retained_filter_matches(&line, &chronological)) {
+            if ((line.length > 0 &&
+                 fwrite(line.text, 1, line.length, file) != line.length) ||
+                fwrite("\n", 1, 1, file) != 1) {
+                error = ESP_FAIL;
+                goto done;
+            }
+            written_lines++;
         }
-        written_lines++;
+        if (progress_fn) progress_fn(offset + 1, bounds.count, progress_ctx);
     }
+
+    /* Filtering can skip the final slot's write; progress still describes the
+     * bounded snapshot scan rather than only matching output lines. */
+    if (progress_fn && bounds.count == 0)
+        progress_fn(0, 0, progress_ctx);
 
     bool close_failed = fflush(file) != 0;
     if (fclose(file) != 0) close_failed = true;
@@ -770,6 +779,7 @@ esp_err_t log_stream_retained_save_to_sd(
     }
     tmp_exists = false;
     error = ESP_OK;
+    if (progress_fn) progress_fn(bounds.count, bounds.count, progress_ctx);
 
 done:
     if (file && fclose(file) != 0 && error == ESP_OK) error = ESP_FAIL;

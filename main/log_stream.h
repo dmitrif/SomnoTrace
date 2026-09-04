@@ -105,6 +105,12 @@ typedef struct {
     esp_err_t last_error;
 } log_stream_retained_info_t;
 
+/* Optional progress notification for a synchronous card snapshot.  Calls are
+ * made from the caller's worker task, never from the vprintf hook. */
+typedef void (*log_stream_retained_progress_fn)(size_t processed_lines,
+                                                size_t total_lines,
+                                                void *ctx);
+
 /** Read retained-feed status without allocating. */
 esp_err_t log_stream_retained_get_info(log_stream_retained_info_t *info);
 
@@ -136,13 +142,17 @@ esp_err_t log_stream_retained_clear(void);
  * completed copy.  `saved_path` is optional; if supplied it receives the full
  * mounted path.  This function may block on storage and must not run on the
  * LVGL/touch handler or the vprintf hook.  The filter and query string must
- * remain valid until the synchronous call returns.
+ * remain valid until the synchronous call returns.  `progress_fn` is optional
+ * and reports scanned source lines, so filtered saves still reach 100%; the
+ * callback runs synchronously on the caller's worker task.
  */
 esp_err_t log_stream_retained_save_to_sd(
     const log_stream_retained_filter_t *filter,
     char *saved_path,
     size_t saved_path_size,
-    size_t *saved_line_count);
+    size_t *saved_line_count,
+    log_stream_retained_progress_fn progress_fn,
+    void *progress_ctx);
 
 /**
  * Register the system WebSocket & log HTTP endpoints on the given server:

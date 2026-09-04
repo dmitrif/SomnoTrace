@@ -52,6 +52,7 @@ for symbol in (
     "last_error",
     "available",
     "in_psram",
+    "log_stream_retained_progress_fn",
     "after_sequence",
     "level_mask",
     "query",
@@ -138,6 +139,9 @@ assert -1 not in (lease_at, mkdir_at, open_at, rename_at, release_at)
 assert lease_at < mkdir_at < open_at < rename_at < release_at
 assert "chronological.order = LOG_STREAM_RETAINED_OLDEST_FIRST" in save
 assert "retained_filter_matches" in save
+assert "progress_fn(0, bounds.count, progress_ctx)" in save
+assert "progress_fn(offset + 1, bounds.count, progress_ctx)" in save
+assert "progress_fn(bounds.count, bounds.count, progress_ctx)" in save
 assert "tmp_exists" in save and "remove(tmp_path)" in save
 assert "bool close_failed = fflush(file) != 0" in save
 assert "if (fclose(file) != 0) close_failed = true" in save
