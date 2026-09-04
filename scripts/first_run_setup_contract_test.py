@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "main/first_run_setup.h").read_text(encoding="utf-8")
 MODEL = (ROOT / "main/first_run_setup_model.c").read_text(encoding="utf-8")
 SERVICE = (ROOT / "main/first_run_setup.c").read_text(encoding="utf-8")
+MAIN = (ROOT / "main/main.c").read_text(encoding="utf-8")
+QEMU = (ROOT / "main/main_qemu.c").read_text(encoding="utf-8")
 CMAKE = (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
 HOST = (ROOT / "scripts/test-host.sh").read_text(encoding="utf-8")
 
@@ -92,6 +94,95 @@ require(
     SERVICE,
     r"nvs_writer_run\(do_reset_nvs,\s*NULL\)",
     "reset runs through the internal-stack NVS worker",
+)
+
+# Physical boot integration.  Load the versioned record before collecting
+# setup-facing facts, reconcile only after storage and the pairing cache are
+# known, and publish that coherent state before touch services become live.
+require(MAIN, r'#include "first_run_setup\.h"', "boot includes setup service")
+assert MAIN.index("nvs_writer_init();") < MAIN.index("first_run_setup_load();"), (
+    "boot must initialise the NVS writer before loading first-run state"
+)
+assert MAIN.index("first_run_setup_load();") < MAIN.index(
+    "netprov_load_config(&cfg)"
+), "setup record must be loaded before boot-time fact probes"
+assert MAIN.index("sd_storage_init();") < MAIN.index(
+    "reconcile_first_run_setup(&setup_facts);"
+), "card readiness must be known before setup reconciliation"
+assert MAIN.index("as11_ble_init()") < MAIN.index(
+    "reconcile_first_run_setup(&setup_facts);"
+), "the durable AirSense pair cache must be loaded before reconciliation"
+assert MAIN.index("reconcile_first_run_setup(&setup_facts);") < MAIN.index(
+    "bsp_display_enable_touch_services(as11_ready, oximeter_ready);"
+), "touch services must not become interactive before setup is coherent"
+
+require(
+    MAIN,
+    r"\.established_installation\s*=\s*facts->setup_state_missing\s*&&\s*"
+    r"boot_has_legacy_setup_evidence\(facts\)",
+    "legacy migration only applies when the setup record was absent",
+)
+legacy_fn = re.search(
+    r"static bool boot_has_legacy_setup_evidence\([^)]*\)\s*\{(.*?)\n\}",
+    MAIN,
+    re.MULTILINE | re.DOTALL,
+)
+assert legacy_fn, "legacy-evidence helper is missing"
+assert "card_ready" not in legacy_fn.group(1), (
+    "an inserted card alone must never classify a fresh device as established"
+)
+for fact, observed in (
+    ("wifi_configured", "wifi_configured"),
+    ("timezone_saved", "time_configured"),
+    ("airsense_paired", "airsense_paired"),
+    ("card_ready", "card_present"),
+    ("alert_config_saved", "alerts_configured"),
+    ("upload_destination_configured", "uploads_configured"),
+):
+    require(
+        MAIN,
+        rf"\.{observed}\s*=\s*facts->{fact}",
+        f"truthful {observed} boot fact",
+    )
+require(
+    MAIN,
+    r"if\s*\(setup_reconcile_needed\(&snapshot,\s*&observed\)\)\s*\{.*?"
+    r"first_run_setup_reconcile\(&observed\)",
+    "unchanged setup state is not rewritten on every boot",
+)
+require(
+    MAIN,
+    r"uploader_has_destination.*?smb_enabled.*?smb_host.*?smb_share.*?"
+    r"shq_enabled.*?shq_client_id.*?shq_client_secret",
+    "Uploads only resolves for a usable SMB or SleepHQ destination",
+)
+
+# QEMU is a deterministic normal-shell preview.  It repairs only its
+# disposable first-run namespace, resolves every simulated fact, and does so
+# before LVGL builds the shell.
+require(QEMU, r"seed_finished_setup_preview\s*\(", "QEMU setup seed")
+assert QEMU.index("seed_finished_setup_preview();") < QEMU.index(
+    "bsp_display_init()"
+), "QEMU setup state must be final before the shell is constructed"
+require(
+    QEMU,
+    r"first_run_setup_load\(\).*?first_run_setup_reset\(\).*?"
+    r"first_run_setup_reconcile\(&observed\)",
+    "QEMU repairs stale disposable state and reconciles its fixture",
+)
+for fact in (
+    "wifi_configured",
+    "time_configured",
+    "airsense_paired",
+    "card_present",
+    "alerts_configured",
+    "uploads_configured",
+):
+    require(QEMU, rf"\.{fact}\s*=\s*true", f"QEMU finished {fact} fixture")
+require(
+    QEMU,
+    r"first_run_setup_is_finished\(&snapshot\.state\)",
+    "QEMU verifies the finished fixture",
 )
 
 for source in ("first_run_setup.c", "first_run_setup_model.c"):

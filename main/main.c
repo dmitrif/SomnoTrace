@@ -49,12 +49,116 @@
 #include "bsp_audio.h"
 #include "crash_diag.h"
 #include "therapy_alert.h"
+#include "first_run_setup.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
 
 static const char *TAG = "somnotrace";
 static volatile bool s_softap_requested = false;
+
+#define SETUP_STEP_BIT(step) ((uint8_t)(1U << (unsigned)(step)))
+
+/* Boot facts intentionally distinguish a usable fact from evidence that this
+ * is an upgrade of a pre-setup-schema installation.  In particular, a card
+ * can already be inserted in a brand-new device, so card_ready must never by
+ * itself suppress first-run setup. */
+typedef struct {
+    bool setup_state_missing;
+    bool wifi_configured;
+    bool timezone_saved;
+    bool drift_saved;
+    bool airsense_paired;
+    bool card_ready;
+    bool device_settings_saved;
+    bool alert_config_saved;
+    bool upload_config_saved;
+    bool upload_destination_configured;
+} first_run_boot_facts_t;
+
+static bool uploader_has_destination(const uploader_config_t *cfg)
+{
+    if (!cfg) return false;
+    bool smb = cfg->smb_enabled && cfg->smb_host[0] != '\0' &&
+               cfg->smb_share[0] != '\0';
+    bool sleephq = cfg->shq_enabled && cfg->shq_client_id[0] != '\0' &&
+                   cfg->shq_client_secret[0] != '\0';
+    return smb || sleephq;
+}
+
+static bool boot_has_legacy_setup_evidence(const first_run_boot_facts_t *facts)
+{
+    if (!facts) return false;
+    return facts->wifi_configured || facts->timezone_saved ||
+           facts->drift_saved || facts->airsense_paired ||
+           facts->device_settings_saved || facts->alert_config_saved ||
+           facts->upload_config_saved;
+}
+
+static bool setup_reconcile_needed(
+    const first_run_setup_snapshot_t *snapshot,
+    const first_run_setup_observed_t *observed)
+{
+    if (!snapshot || !observed || !snapshot->schema_compatible) return false;
+    if (!snapshot->persisted) return true;
+
+    const bool present[FIRST_RUN_SETUP_STEP_COUNT] = {
+        [FIRST_RUN_SETUP_STEP_WIFI] = observed->wifi_configured,
+        [FIRST_RUN_SETUP_STEP_TIME] = observed->time_configured,
+        [FIRST_RUN_SETUP_STEP_AIRSENSE] = observed->airsense_paired,
+        [FIRST_RUN_SETUP_STEP_CARD] = observed->card_present,
+        [FIRST_RUN_SETUP_STEP_ALERTS] = observed->alerts_configured,
+        [FIRST_RUN_SETUP_STEP_UPLOADS] = observed->uploads_configured,
+    };
+    for (unsigned step = 0; step < FIRST_RUN_SETUP_STEP_COUNT; step++) {
+        if (present[step] &&
+            (snapshot->state.completed_mask & SETUP_STEP_BIT(step)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void reconcile_first_run_setup(const first_run_boot_facts_t *facts)
+{
+    if (!facts) return;
+
+    const first_run_setup_observed_t observed = {
+        .established_installation = facts->setup_state_missing &&
+                                    boot_has_legacy_setup_evidence(facts),
+        .wifi_configured = facts->wifi_configured,
+        .time_configured = facts->timezone_saved,
+        .airsense_paired = facts->airsense_paired,
+        .card_present = facts->card_ready,
+        .alerts_configured = facts->alert_config_saved,
+        .uploads_configured = facts->upload_destination_configured,
+    };
+
+    first_run_setup_snapshot_t snapshot;
+    first_run_setup_snapshot(&snapshot);
+    if (!snapshot.schema_compatible) {
+        ESP_LOGE(TAG, "first-run setup state unavailable: %s",
+                 esp_err_to_name(snapshot.last_storage_result));
+        return;
+    }
+
+    if (setup_reconcile_needed(&snapshot, &observed)) {
+        esp_err_t err = first_run_setup_reconcile(&observed);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "first-run setup reconcile failed: %s",
+                     esp_err_to_name(err));
+            return;
+        }
+        first_run_setup_snapshot(&snapshot);
+    }
+
+    ESP_LOGI(TAG,
+             "first-run setup: current=%u finished=%u persisted=%u legacy=%u",
+             (unsigned)snapshot.state.current_step,
+             (unsigned)first_run_setup_is_finished(&snapshot.state),
+             (unsigned)snapshot.persisted,
+             (unsigned)observed.established_installation);
+}
 
 static void request_softap_from_display(void)
 {
@@ -151,13 +255,48 @@ void app_main(void)
     /* 4. Initialise networking stack (includes NVS init). */
     ESP_ERROR_CHECK(netprov_init());
 
+    /* 4-pre. The first-run record must be loaded before any setup-facing
+     * service can accept input.  Start the internal-stack NVS proxy first and
+     * inject it into components whose configuration probes run below. */
+    nvs_writer_init();
+    uploader_set_nvs_executor((uploader_nvs_exec_fn_t)nvs_writer_run);
+    therapy_alert_set_nvs_executor((alert_nvs_exec_fn_t)nvs_writer_run);
+
+    esp_err_t setup_load_ret = first_run_setup_load();
+    if (setup_load_ret != ESP_OK &&
+        setup_load_ret != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "first-run setup load failed: %s",
+                 esp_err_to_name(setup_load_ret));
+    }
+
+    /* Capture durable configuration evidence before this boot can change it.
+     * These reads distinguish an upgrade from a fresh device when the new
+     * first-run namespace does not exist yet. */
+    struct netprov_config cfg;
+    bool has_creds = netprov_load_config(&cfg);
+
     /* 4a. Load device settings (brightness, LCD therapy mode) and apply.
      * Must be after netprov_init() which calls nvs_flash_init(). */
     device_settings_t dev_cfg;
-    device_settings_load(&dev_cfg);
+    esp_err_t device_settings_ret = device_settings_load(&dev_cfg);
     bsp_display_set_brightness(dev_cfg.brightness);
     bsp_audio_set_volume(dev_cfg.alert_volume);
     bsp_display_set_rotation(dev_cfg.lcd_rotation);
+
+    char saved_timezone[64];
+    time_sync_get_timezone(saved_timezone, sizeof(saved_timezone));
+    bool timezone_saved = saved_timezone[0] != '\0';
+    bool drift_saved = time_sync_has_drift();
+
+    therapy_alert_config_t alert_cfg_probe;
+    bool alert_config_saved =
+        therapy_alert_load_config(&alert_cfg_probe) == ESP_OK;
+
+    uploader_config_t upload_cfg_probe;
+    bool upload_config_saved =
+        uploader_load_config(&upload_cfg_probe) == ESP_OK;
+    bool upload_destination_configured =
+        upload_config_saved && uploader_has_destination(&upload_cfg_probe);
 
     /* 4a-bis. Apply the saved timezone now, before BLE can reconnect.
      * as11_ble_init() may find therapy already running and start a session
@@ -227,6 +366,23 @@ void app_main(void)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
 
+    /* Publish one coherent, persisted setup snapshot before native touch
+     * services become interactive.  A mounted card resolves the card check,
+     * but is deliberately excluded from legacy-installation evidence. */
+    const first_run_boot_facts_t setup_facts = {
+        .setup_state_missing = setup_load_ret == ESP_ERR_NVS_NOT_FOUND,
+        .wifi_configured = has_creds,
+        .timezone_saved = timezone_saved,
+        .drift_saved = drift_saved,
+        .airsense_paired = as11_ble_is_paired(),
+        .card_ready = sd_ret == ESP_OK && sd_storage_is_ready(),
+        .device_settings_saved = device_settings_ret == ESP_OK,
+        .alert_config_saved = alert_config_saved,
+        .upload_config_saved = upload_config_saved,
+        .upload_destination_configured = upload_destination_configured,
+    };
+    reconcile_first_run_setup(&setup_facts);
+
     /* 4c-ter. Initialise O2 Ring oximeter (shares NimBLE host with AS11). */
     bool oximeter_ready = oximeter_init() == ESP_OK;
     if (!oximeter_ready) {
@@ -245,10 +401,6 @@ void app_main(void)
     therapy_alert_set_beep_fn(bsp_audio_beep);
     therapy_alert_set_therapy_active_fn(bsp_display_is_therapy_active);
     therapy_alert_init();
-
-    /* 5. Load config from NVS. */
-    struct netprov_config cfg;
-    bool has_creds = netprov_load_config(&cfg);
 
 #if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
     /* The 7B's BOOT pin becomes an RGB data line after startup. On a fresh
