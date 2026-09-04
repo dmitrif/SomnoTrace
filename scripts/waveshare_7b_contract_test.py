@@ -178,6 +178,82 @@ for page in ("Home", "History", "Manage"):
 for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
     require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
 
+# LVGL v8 paints dropdown and textarea copy from pad_top.  Keep the shared
+# single-line geometry explicit and independent of pre-layout object coords.
+field_style = display.split(
+    "static void style_manage_field(lv_obj_t *field)\n{", 1)[1].split("\n}\n", 1)[0]
+for pattern, description in (
+    (r"lv_obj_get_style_height\(field,\s*LV_PART_MAIN\)",
+     "configured field height used before first layout"),
+    (r"lv_font_get_line_height\(font\)", "custom font line-height centering"),
+    (r"lv_obj_set_style_pad_top\(field,\s*free_height\s*/\s*2,\s*LV_PART_MAIN\)",
+     "single-line top padding"),
+    (r"lv_obj_set_style_pad_bottom\(field,\s*free_height\s*-\s*free_height\s*/\s*2,\s*LV_PART_MAIN\)",
+     "single-line bottom padding"),
+):
+    require(field_style, pattern, description)
+surface_style = display.split(
+    "static void style_manage_surface(lv_obj_t *field)\n{", 1)[1].split("\n}\n", 1)[0]
+require(surface_style,
+        r"border_width\(field,\s*1,\s*0\).*?"
+        r"border_width\(field,\s*1,\s*LV_STATE_FOCUSED\)",
+        "focus ring keeps the content origin stable")
+textarea_style = display.split(
+    "static void style_manage_textarea(lv_obj_t *field)\n{", 1)[1].split("\n}\n", 1)[0]
+for pattern, description in (
+    (r"pad_bottom\(field,\s*0,\s*LV_PART_MAIN\)",
+     "one-line textarea cursor slack"),
+    (r"set_scroll_dir\(field,\s*LV_DIR_HOR\)",
+     "one-line textarea horizontal scrolling"),
+    (r"set_scrollbar_mode\(field,\s*LV_SCROLLBAR_MODE_OFF\)",
+     "one-line textarea hidden scrollbar"),
+):
+    require(textarea_style, pattern, description)
+
+dropdown_fields = {
+    "s_as11_dropdown", "s_ox_dropdown", "s_wifi_scan_dropdown",
+    "s_settings_screen_timeout",
+}
+ready_bindings = re.findall(
+    r"lv_obj_add_event_cb\(\s*"
+    r"(s_(?:as11_dropdown|ox_dropdown|wifi_scan_dropdown|settings_screen_timeout))"
+    r"\s*,\s*([A-Za-z_]\w*)\s*,\s*LV_EVENT_READY\s*,\s*NULL\s*\)",
+    display, re.MULTILINE | re.DOTALL)
+assert {field for field, _ in ready_bindings} == dropdown_fields, \
+    f"dropdown READY styling incomplete: {ready_bindings}"
+assert len({callback for _, callback in ready_bindings}) == 1, \
+    "all Manage dropdowns must reuse one popup styling callback"
+require(display,
+        r"manage_dropdown_list_ready_cb.*?max_height\(list,\s*250.*?"
+        r"pad_top\(list,\s*12.*?pad_bottom\(list,\s*12.*?"
+        r"text_line_space\(list,\s*28",
+        "scrollable bedside-sized dropdown options")
+assert display.count("make_manage_field_chevron(") == 5, \
+    "four Manage fields plus the helper must use aligned chevrons"
+
+display_section = display.split(
+    "static void build_display_section", 1)[1].split(
+        "static void build_alerts_section", 1)[0]
+require(display_section,
+        r"lv_obj_set_size\(s_settings_brightness,\s*580,\s*12\).*?"
+        r"lv_obj_set_ext_click_area\(s_settings_brightness,\s*18\).*?"
+        r"lv_obj_set_style_pad_all\(s_settings_brightness,\s*12,\s*LV_PART_KNOB\)",
+        "12px brightness rail with a 48px touch target and 36px knob")
+assert not re.search(
+    r"set_style_(?:width|height)\(s_settings_brightness,\s*36,\s*LV_PART_KNOB",
+    display_section), "LVGL v8 knob size must use padding"
+slider_y = int(re.search(
+    r"lv_obj_set_pos\(s_settings_brightness,\s*\d+,\s*(\d+)\)",
+    display_section).group(1))
+label_y = {
+    name: int(y) for name, y in re.findall(
+        r'make_label\(brightness,\s*"(Low|High)",\s*\d+,\s*(\d+)',
+        display_section)
+}
+assert label_y.keys() == {"Low", "High"}
+assert all(abs((y + 8) - (slider_y + 6)) <= 1 for y in label_y.values()), \
+    f"brightness labels are not vertically inline: rail={slider_y}, labels={label_y}"
+
 # The shared header status capsule sizes itself from the rendered status text.
 # Keep every state on one line, vertically centre dots against that line, and
 # preserve the fixed screen-right edge plus an explicit chevron inset.

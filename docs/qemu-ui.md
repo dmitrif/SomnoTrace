@@ -64,6 +64,12 @@ Use repeated `--screen` options to limit the primary captures, for example
 
 Add `--interaction-states` to capture fresh-boot interaction frames.
 `devices.ppm` shows therapy stopped with Manage's default Devices section open.
+The two Display frames show the aligned brightness/timeout controls and the
+open timeout menu:
+
+- `display-controls.ppm`
+- `display-timeout-open.ppm`
+
 The three Connectivity frames show the password keyboard after typing a sample
 value, then the revealed value, then the remasked value:
 
@@ -76,6 +82,14 @@ captures selected with `--screen`:
 
 ```sh
 ./scripts/capture-qemu-ui.py --screen manage --interaction-states
+```
+
+Use repeated `--interaction-state` options to run only the states under review
+without also opening the primary-screen captures, for example:
+
+```sh
+./scripts/capture-qemu-ui.py --interaction-state display-controls \
+  --interaction-state connectivity-password-revealed
 ```
 
 Every output frame uses a separate QEMU process. The capture helper keeps each

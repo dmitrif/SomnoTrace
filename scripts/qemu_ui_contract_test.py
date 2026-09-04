@@ -266,7 +266,10 @@ for contract, description in (
     ('"--screen"', "selective screen capture option"),
     ('"--representative"', "literal handoff-state capture option"),
     ('"--interaction-states"', "additional interaction-state capture option"),
+    ('"--interaction-state"', "selective interaction-state capture option"),
     ('"devices"', "therapy-stopped Devices capture"),
+    ('"display-controls"', "Display form-controls capture"),
+    ('"display-timeout-open"', "open timeout dropdown capture"),
     ('"connectivity-password-keyboard"', "open password-keyboard capture"),
     ('"connectivity-password-revealed"', "revealed password capture"),
     ('"connectivity-password-remasked"', "remasked password capture"),
@@ -295,10 +298,10 @@ require(display, r"lv_obj_set_y\(s_keyboard,\s*top\s*==\s*356\s*\?\s*58\s*:\s*67
 require(display, r"set_connectivity_editing.*?lv_obj_set_size\(active_row,\s*718,\s*124\).*?lv_obj_set_pos\(target,\s*0,\s*42\).*?lv_obj_set_size\(target,\s*686,\s*60\)",
         "dedicated network-field editing composition")
 require(display,
-        r"style_manage_field.*?COLOR_LIVE.*?LV_STATE_FOCUSED.*?"
-        r"border_width\(field,\s*2,\s*LV_STATE_FOCUSED\).*?"
+        r"style_manage_surface.*?COLOR_LIVE.*?LV_STATE_FOCUSED.*?"
+        r"border_width\(field,\s*1,\s*LV_STATE_FOCUSED\).*?"
         r"shadow_width\(field,\s*8,\s*LV_STATE_FOCUSED\)",
-        "focused network-field ring")
+        "stable focused network-field ring")
 require(display,
         r"s_wifi_password_reveal.*?112,\s*52,\s*\"Reveal\".*?"
         r"wifi_password_reveal_cb",

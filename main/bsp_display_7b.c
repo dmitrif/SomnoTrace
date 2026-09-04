@@ -511,7 +511,9 @@ static void set_manage_section(int section);
 static void refresh_history_widgets(const ui_service_state_t *services);
 static void start_storage_refresh(void);
 static void apply_pending_backlight_locked(void);
+static void style_manage_surface(lv_obj_t *obj);
 static void style_manage_field(lv_obj_t *field);
+static void style_manage_textarea(lv_obj_t *field);
 static void set_control_disabled(lv_obj_t *control, bool disabled);
 
 static bool screen_wake_input_available(void)
@@ -890,6 +892,15 @@ static lv_obj_t *make_down_chevron(lv_obj_t *parent, int x, int y)
     return chevron;
 }
 
+static lv_obj_t *make_manage_field_chevron(lv_obj_t *field)
+{
+    lv_obj_t *chevron = make_down_chevron(field, 0, 0);
+    /* Field children are positioned in the padded content box. Aligning here
+     * keeps the glyph centred when a field's font, height, or padding changes. */
+    lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, 0, 0);
+    return chevron;
+}
+
 static lv_coord_t status_label_width(lv_obj_t *label)
 {
     lv_point_t size = {0};
@@ -1197,14 +1208,15 @@ static void screen_timeout_cb(lv_event_t *event)
     queue_settings_save();
 }
 
-static void screen_timeout_list_ready_cb(lv_event_t *event)
+static void manage_dropdown_list_ready_cb(lv_event_t *event)
 {
     lv_obj_t *list = lv_dropdown_get_list(lv_event_get_target(event));
     if (!list) return;
 
-    /* Five options fit above the field while retaining a 45 px row pitch,
-     * large enough for reliable bedside touch selection. */
-    style_manage_field(list);
+    /* A 45 px option pitch is large enough for reliable bedside selection;
+     * longer device and Wi-Fi result sets remain vertically scrollable. */
+    style_manage_surface(list);
+    lv_obj_set_style_max_height(list, 250, LV_PART_MAIN);
     lv_obj_set_style_pad_top(list, 12, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(list, 12, LV_PART_MAIN);
     lv_obj_set_style_text_font(list, FONT_BODY, LV_PART_MAIN);
@@ -1955,6 +1967,7 @@ static void wifi_password_reveal_cb(lv_event_t *event)
     (void)event;
     s_wifi_password_revealed = !s_wifi_password_revealed;
     lv_textarea_set_password_mode(s_wifi_password, !s_wifi_password_revealed);
+    lv_obj_scroll_to_y(s_wifi_password, 0, LV_ANIM_OFF);
     lv_label_set_text(s_wifi_password_reveal_label,
                       s_wifi_password_revealed ? "Mask" : "Reveal");
 }
@@ -3227,7 +3240,7 @@ static lv_obj_t *make_manage_row(lv_obj_t *scroll, int y, int height)
     return row;
 }
 
-static void style_manage_field(lv_obj_t *field)
+static void style_manage_surface(lv_obj_t *field)
 {
     lv_obj_set_style_bg_color(field, lv_color_hex(COLOR_CONTROL), 0);
     lv_obj_set_style_bg_opa(field, LV_OPA_COVER, 0);
@@ -3235,7 +3248,8 @@ static void style_manage_field(lv_obj_t *field)
     lv_obj_set_style_border_width(field, 1, 0);
     lv_obj_set_style_border_color(field, lv_color_hex(COLOR_LIVE),
                                   LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(field, 2, LV_STATE_FOCUSED);
+    /* Do not grow the border on focus: changing it moves the content origin. */
+    lv_obj_set_style_border_width(field, 1, LV_STATE_FOCUSED);
     lv_obj_set_style_shadow_color(field, lv_color_hex(COLOR_LIVE),
                                   LV_STATE_FOCUSED);
     lv_obj_set_style_shadow_width(field, 8, LV_STATE_FOCUSED);
@@ -3244,6 +3258,48 @@ static void style_manage_field(lv_obj_t *field)
     lv_obj_set_style_text_color(field, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_set_style_pad_left(field, 16, 0);
     lv_obj_set_style_pad_right(field, 16, 0);
+}
+
+static void style_manage_field(lv_obj_t *field)
+{
+    style_manage_surface(field);
+
+    /* LVGL v8 starts dropdown and textarea copy at pad_top; it does not
+     * vertically centre single-line content. Derive symmetric padding from
+     * the actual control height and selected font so every field shares the
+     * same optical centre. The one-pixel border is intentionally constant. */
+    const lv_font_t *font = lv_obj_get_style_text_font(field, LV_PART_MAIN);
+    /* Read the explicit style value: object coordinates still contain the
+     * widget constructor's default height until LVGL's first layout pass. */
+    lv_coord_t free_height = lv_obj_get_style_height(field, LV_PART_MAIN) -
+                             lv_font_get_line_height(font) - 2;
+    if (free_height < 0) free_height = 0;
+    lv_obj_set_style_pad_top(field, free_height / 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(field, free_height - free_height / 2,
+                                LV_PART_MAIN);
+}
+
+static void manage_textarea_scroll_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_FOCUSED ||
+        code == LV_EVENT_SIZE_CHANGED) {
+        /* LVGL's cursor visibility logic can introduce a vertical offset even
+         * on one-line controls after a resize or password-mode transition. */
+        lv_obj_scroll_to_y(lv_event_get_target(event), 0, LV_ANIM_OFF);
+    }
+}
+
+static void style_manage_textarea(lv_obj_t *field)
+{
+    style_manage_field(field);
+    /* The label and focused cursor need a little vertical scroll slack beyond
+     * the font line box. Keep the centred top origin, leave the lower content
+     * area open, and constrain one-line fields to horizontal scrolling. */
+    lv_obj_set_style_pad_bottom(field, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(field, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(field, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_event_cb(field, manage_textarea_scroll_cb, LV_EVENT_ALL, NULL);
 }
 
 static void build_devices_section(lv_obj_t *section)
@@ -3288,7 +3344,9 @@ static void build_devices_section(lv_obj_t *section)
     lv_obj_set_size(s_as11_dropdown, 302, 56);
     lv_obj_set_style_text_font(s_as11_dropdown, FONT_BODY_SMALL, 0);
     style_manage_field(s_as11_dropdown);
-    make_down_chevron(s_as11_dropdown, 274, 23);
+    make_manage_field_chevron(s_as11_dropdown);
+    lv_obj_add_event_cb(s_as11_dropdown, manage_dropdown_list_ready_cb,
+                        LV_EVENT_READY, NULL);
     s_ble_buttons[0] = make_touch_button(as, 314, 82, 94, 56,
                                          "AirSense is ready", COLOR_CONTROL,
                                          scan_cb, 0);
@@ -3316,7 +3374,7 @@ static void build_devices_section(lv_obj_t *section)
     lv_obj_set_pos(s_passkey, 0, 150);
     lv_obj_set_size(s_passkey, 302, 56);
     lv_obj_set_style_text_font(s_passkey, FONT_BODY, 0);
-    style_manage_field(s_passkey);
+    style_manage_textarea(s_passkey);
     lv_obj_add_event_cb(s_passkey, passkey_focus_cb, LV_EVENT_FOCUSED, NULL);
     s_passkey_confirm_button = make_touch_button(as, 314, 150, 200, 56,
                                                   "Confirm code", COLOR_CONTROL,
@@ -3347,7 +3405,9 @@ static void build_devices_section(lv_obj_t *section)
     lv_obj_set_size(s_ox_dropdown, 302, 56);
     lv_obj_set_style_text_font(s_ox_dropdown, FONT_BODY_SMALL, 0);
     style_manage_field(s_ox_dropdown);
-    make_down_chevron(s_ox_dropdown, 274, 23);
+    make_manage_field_chevron(s_ox_dropdown);
+    lv_obj_add_event_cb(s_ox_dropdown, manage_dropdown_list_ready_cb,
+                        LV_EVENT_READY, NULL);
     s_ble_buttons[3] = make_touch_button(ox, 314, 48, 94, 56,
                                          "Scan", COLOR_CONTROL, scan_cb, 1);
     s_ble_buttons[4] = make_touch_button(ox, 420, 48, 94, 56,
@@ -3403,7 +3463,9 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_obj_set_size(s_wifi_scan_dropdown, 332, 56);
     lv_obj_set_style_text_font(s_wifi_scan_dropdown, FONT_BODY_SMALL, 0);
     style_manage_field(s_wifi_scan_dropdown);
-    make_down_chevron(s_wifi_scan_dropdown, 304, 23);
+    make_manage_field_chevron(s_wifi_scan_dropdown);
+    lv_obj_add_event_cb(s_wifi_scan_dropdown, manage_dropdown_list_ready_cb,
+                        LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(s_wifi_scan_dropdown, wifi_scan_selection_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
     s_wifi_scan_use_button = make_touch_button(s_wifi_scan_row, 534, 0, 138, 56,
@@ -3423,7 +3485,7 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_obj_set_pos(s_wifi_ssid, 190, 0);
     lv_obj_set_size(s_wifi_ssid, 482, 60);
     lv_obj_set_style_text_font(s_wifi_ssid, FONT_BODY, 0);
-    style_manage_field(s_wifi_ssid);
+    style_manage_textarea(s_wifi_ssid);
     lv_obj_add_event_cb(s_wifi_ssid, text_focus_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(s_wifi_ssid, wifi_field_changed_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
@@ -3443,7 +3505,7 @@ static void build_connectivity_section(lv_obj_t *section)
     lv_obj_set_pos(s_wifi_password, 190, 0);
     lv_obj_set_size(s_wifi_password, 482, 60);
     lv_obj_set_style_text_font(s_wifi_password, FONT_BODY, 0);
-    style_manage_field(s_wifi_password);
+    style_manage_textarea(s_wifi_password);
     lv_obj_set_style_pad_right(s_wifi_password, 128, 0);
     lv_obj_add_event_cb(s_wifi_password, text_focus_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(s_wifi_password, wifi_field_changed_cb,
@@ -3490,13 +3552,22 @@ static void build_display_section(lv_obj_t *section)
     s_settings_brightness_value = make_label(brightness, "100% - steady", 472, 0, 200,
                                               FONT_DATA_BODY, COLOR_TEXT);
     lv_obj_set_style_text_align(s_settings_brightness_value, LV_TEXT_ALIGN_RIGHT, 0);
+    make_label(brightness, "Low", 0, 52, 34,
+               FONT_BODY_SMALL, COLOR_TERTIARY);
     s_settings_brightness = lv_slider_create(brightness);
-    lv_obj_set_pos(s_settings_brightness, 48, 40);
-    lv_obj_set_size(s_settings_brightness, 576, 48);
-    lv_obj_set_style_height(s_settings_brightness, 12, LV_PART_MAIN);
+    lv_obj_set_pos(s_settings_brightness, 48, 54);
+    lv_obj_set_size(s_settings_brightness, 580, 12);
+    lv_obj_set_ext_click_area(s_settings_brightness, 18);
+    /* Inset the value endpoints by the knob radius. The visual rail still
+     * spans the full object, while a min/max knob stays clear of its labels. */
+    lv_obj_set_style_pad_left(s_settings_brightness, 18, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(s_settings_brightness, 18, LV_PART_MAIN);
     lv_obj_set_style_height(s_settings_brightness, 12, LV_PART_INDICATOR);
-    lv_obj_set_style_width(s_settings_brightness, 36, LV_PART_KNOB);
-    lv_obj_set_style_height(s_settings_brightness, 36, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_settings_brightness, 12, LV_PART_KNOB);
+    lv_obj_set_style_transform_width(s_settings_brightness, 0,
+                                     LV_PART_KNOB | LV_STATE_PRESSED);
+    lv_obj_set_style_transform_height(s_settings_brightness, 0,
+                                      LV_PART_KNOB | LV_STATE_PRESSED);
     lv_obj_set_style_bg_color(s_settings_brightness, lv_color_hex(COLOR_CONTROL),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_settings_brightness, lv_color_hex(COLOR_LIVE),
@@ -3507,9 +3578,7 @@ static void build_display_section(lv_obj_t *section)
     lv_slider_set_value(s_settings_brightness,
                         initial_settings.brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(s_settings_brightness, brightness_cb, LV_EVENT_ALL, NULL);
-    make_label(brightness, "Low", 0, 56, 48,
-               FONT_BODY_SMALL, COLOR_TERTIARY);
-    make_label(brightness, "High", 628, 56, 44,
+    make_label(brightness, "High", 642, 52, 30,
                FONT_BODY_SMALL, COLOR_TERTIARY);
 
     lv_obj_t *therapy = make_manage_row(scroll, 120, 128);
@@ -3549,14 +3618,14 @@ static void build_display_section(lv_obj_t *section)
     lv_obj_set_size(s_settings_screen_timeout, 172, 56);
     lv_obj_set_style_text_font(s_settings_screen_timeout, FONT_BODY_SMALL, 0);
     style_manage_field(s_settings_screen_timeout);
-    make_down_chevron(s_settings_screen_timeout, 144, 23);
+    make_manage_field_chevron(s_settings_screen_timeout);
     lv_dropdown_set_selected(
         s_settings_screen_timeout,
         screen_timeout_option_index(initial_settings.screen_timeout_s));
     lv_obj_add_event_cb(s_settings_screen_timeout, screen_timeout_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_settings_screen_timeout,
-                        screen_timeout_list_ready_cb, LV_EVENT_READY, NULL);
+                        manage_dropdown_list_ready_cb, LV_EVENT_READY, NULL);
     lv_obj_t *screen_off = make_touch_button(off, 544, -3, 128, 56, "Off now",
                                               COLOR_INVERSE, action_cb, 4);
     lv_obj_set_style_text_color(lv_obj_get_child(screen_off, 0),
@@ -5078,9 +5147,8 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
     bool waiting_passkey = !strcmp(as_status, AS11_STATUS_WAIT_PASSKEY);
     if (waiting_passkey) {
         lv_obj_set_style_border_color(s_passkey, lv_color_hex(0x43d7e8), 0);
-        lv_obj_set_style_border_width(s_passkey, 2, 0);
     } else {
-        lv_obj_set_style_border_width(s_passkey, 1, 0);
+        lv_obj_set_style_border_color(s_passkey, lv_color_hex(0x454b58), 0);
     }
     if (waiting_passkey && !state->therapy) {
         lv_obj_clear_state(s_passkey, LV_STATE_DISABLED);
@@ -5150,10 +5218,10 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         lv_obj_set_pos(s_ble_buttons[show_as_idle ? 0 : 2], 526, -3);
         lv_obj_set_size(s_ble_buttons[show_as_idle ? 0 : 2], 146, 56);
     } else if (show_as_results) {
-        lv_obj_set_pos(s_as11_dropdown, 0, 42);
-        lv_obj_set_pos(s_ble_buttons[0], 314, 42);
+        lv_obj_set_pos(s_as11_dropdown, 0, 40);
+        lv_obj_set_pos(s_ble_buttons[0], 314, 40);
         lv_obj_set_size(s_ble_buttons[0], 94, 56);
-        lv_obj_set_pos(s_as11_pair_button, 420, 42);
+        lv_obj_set_pos(s_as11_pair_button, 420, 40);
     } else if (waiting_passkey) {
         lv_obj_set_pos(s_passkey, 0, 82);
         lv_obj_set_pos(s_passkey_confirm_button, 314, 82);
@@ -5184,10 +5252,10 @@ static void refresh_secondary_pages(const ui_state_t *state, int active_tab)
         lv_obj_set_pos(s_ble_buttons[show_ox_idle ? 3 : 5], 526, -3);
         lv_obj_set_size(s_ble_buttons[show_ox_idle ? 3 : 5], 146, 56);
     } else if (show_ox_results) {
-        lv_obj_set_pos(s_ox_dropdown, 0, 42);
-        lv_obj_set_pos(s_ble_buttons[3], 314, 42);
+        lv_obj_set_pos(s_ox_dropdown, 0, 40);
+        lv_obj_set_pos(s_ble_buttons[3], 314, 40);
         lv_obj_set_size(s_ble_buttons[3], 94, 56);
-        lv_obj_set_pos(s_ble_buttons[4], 420, 42);
+        lv_obj_set_pos(s_ble_buttons[4], 420, 40);
     }
 
     bool show_device_change = as_paired || ox_paired;

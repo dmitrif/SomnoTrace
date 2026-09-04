@@ -18,6 +18,8 @@ SCREEN_SCENARIOS = {
 }
 INTERACTION_SCENARIOS = (
     "devices",
+    "display-controls",
+    "display-timeout-open",
     "connectivity-password-keyboard",
     "connectivity-password-revealed",
     "connectivity-password-remasked",
@@ -131,6 +133,14 @@ def interaction_sequence(name):
             ((858, 458), 3.4, None),
             ((694, 559), 0.35, "emulated touch selected page 2"),
         )
+    if name in ("display-controls", "display-timeout-open"):
+        sequence = [
+            ((694, 559), 0.35, "emulated touch selected page 2"),
+            ((130, 256), 0.5, None),
+        ]
+        if name == "display-timeout-open":
+            sequence.append(((738, 450), 0.5, None))
+        return tuple(sequence)
     if name.startswith("connectivity-password-"):
         sequence = [
             ((694, 559), 0.35, "emulated touch selected page 2"),
@@ -210,7 +220,7 @@ def validate_persistent_shell(name, payload, representative, interaction):
         if bright_samples(payload, (27, 137, 326, 203), 120) < 800:
             raise AssertionError("representative History night is not selected")
 
-    if name == "devices":
+    if name in ("devices", "display-controls", "display-timeout-open"):
         for index, label in enumerate((
             "Devices", "Connectivity", "Display", "Alerts", "Storage", "System"
         )):
@@ -407,8 +417,11 @@ def main():
     )
     parser.add_argument(
         "--interaction-states", action="store_true",
-        help=("also capture therapy-stopped Devices plus masked, revealed, "
-              "and remasked Connectivity password keyboard states"),
+        help="also capture every interactive Manage acceptance state",
+    )
+    parser.add_argument(
+        "--interaction-state", action="append", choices=INTERACTION_SCENARIOS,
+        help="capture only this interactive Manage state (repeatable)",
     )
     args = parser.parse_args()
 
@@ -425,7 +438,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix="somnotrace-capture-") as temporary:
         # A fresh emulator per frame prevents a synchronous screendump from
         # perturbing the touch edge used to choose the following screen.
-        names = args.screen or list(SCREEN_SCENARIOS)
+        interaction_names = (list(INTERACTION_SCENARIOS)
+                             if args.interaction_states
+                             else args.interaction_state or [])
+        names = (args.screen if args.screen is not None
+                 else [] if interaction_names
+                 else list(SCREEN_SCENARIOS))
         for name in names:
             tab_index, point = SCREEN_SCENARIOS[name]
             capture_screen(
@@ -433,13 +451,12 @@ def main():
                 name, tab_index, point, args.settle_seconds,
                 args.representative,
             )
-        if args.interaction_states:
-            for name in INTERACTION_SCENARIOS:
-                capture_screen(
-                    qemu, flash, efuse, output_dir, temporary,
-                    name, None, None, args.settle_seconds,
-                    False, interaction=True,
-                )
+        for name in interaction_names:
+            capture_screen(
+                qemu, flash, efuse, output_dir, temporary,
+                name, None, None, args.settle_seconds,
+                False, interaction=True,
+            )
 
 
 if __name__ == "__main__":

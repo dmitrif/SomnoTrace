@@ -167,7 +167,7 @@ if not font_height_match:
     raise AssertionError("body font line height is unavailable")
 font_height = int(font_height_match.group(1))
 list_style = TOUCH_BSP.split(
-    "static void screen_timeout_list_ready_cb", 1)[1].split("\n}\n", 1)[0]
+    "static void manage_dropdown_list_ready_cb", 1)[1].split("\n}\n", 1)[0]
 line_spaces = [
     int(value) for value in re.findall(
         r"lv_obj_set_style_text_line_space\([^,]+,\s*(\d+)", list_style)
