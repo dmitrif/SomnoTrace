@@ -117,6 +117,45 @@ for page in ("Home", "History", "Manage"):
 for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
     require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
 
+# The QEMU build exercises the same content-sized header status capsule as the
+# panel. Protect its one-line geometry, centre alignment, and right-side inset.
+for pattern, description in (
+    (r"status_label_width.*?lv_txt_get_size\(&size,\s*lv_label_get_text\(label\),\s*"
+     r"FONT_BODY,\s*0,\s*0,\s*LV_COORD_MAX,\s*LV_TEXT_FLAG_NONE\).*?"
+     r"return\s+LV_MAX\(size\.x,\s*1\)",
+     "content-measured status labels"),
+    (r"layout_status_capsule.*?font_h\s*=\s*lv_font_get_line_height\(FONT_BODY\).*?"
+     r"label_y\s*=\s*\(STATUS_CAPSULE_H\s*-\s*font_h\)\s*/\s*2.*?"
+     r"dot_y\s*=\s*label_y\s*\+\s*"
+     r"\(font_h\s*-\s*STATUS_CAPSULE_DOT_SIZE\)\s*/\s*2",
+     "vertically centred status dots and labels"),
+    (r"layout_status_capsule.*?text_w\s*=\s*status_label_width\(labels\[i\]\).*?"
+     r"lv_label_set_long_mode\(labels\[i\],\s*"
+     r"LV_LABEL_LONG_CLIP\).*?lv_obj_set_size\(labels\[i\],\s*text_w,\s*font_h\)",
+     "single-line non-wrapping status labels"),
+    (r"#define\s+STATUS_CAPSULE_RIGHT\s+1006\b.*?"
+     r"#define\s+STATUS_CAPSULE_RIGHT_PAD\s+18\b.*?"
+     r"lv_obj_set_pos\(s_status_chevron,\s*cursor,.*?"
+     r"cursor\s*\+=\s*14\s*\+\s*STATUS_CAPSULE_RIGHT_PAD.*?"
+     r"lv_obj_set_pos\(s_status_capsule,\s*STATUS_CAPSULE_RIGHT\s*-\s*cursor,\s*7\).*?"
+     r"lv_obj_set_size\(s_status_capsule,\s*cursor,\s*STATUS_CAPSULE_H\)",
+     "right-anchored status capsule with chevron padding"),
+):
+    require(display, pattern, description)
+
+require(display,
+        r"static\s+bool\s+set_label_text_if_changed.*?"
+        r"strcmp\(current,\s*text\)\s*==\s*0\)\s*return\s+false;.*?"
+        r"lv_label_set_text\(label,\s*text\);\s*return\s+true;",
+        "status relayout change signal")
+require(display,
+        r"bool\s+status_capsule_layout_dirty\s*=\s*false;.*?"
+        r"status_capsule_layout_dirty\s*\|=.*?s_sd_label.*?"
+        r"status_capsule_layout_dirty\s*\|=.*?s_wifi_label.*?"
+        r"status_capsule_layout_dirty\s*\|=.*?s_ble_label.*?"
+        r"if\s*\(status_capsule_layout_dirty\)\s*layout_status_capsule\(\);",
+        "status capsule relayout only after visible text changes")
+
 # Protect the concrete bedside state vocabulary, not just the shell. These
 # literals correspond to visible controls or explicit loading/degraded states
 # in the handoff and must remain present in the firmware exercised by QEMU.

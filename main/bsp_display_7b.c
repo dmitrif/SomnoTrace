@@ -63,6 +63,16 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define UI_CONTENT_H 448
 #define UI_NAV_H 82
 
+#define STATUS_CAPSULE_RIGHT 1006
+#define STATUS_CAPSULE_H 56
+#define STATUS_CAPSULE_DOT_SIZE 9
+#define STATUS_CAPSULE_LEFT_PAD 18
+#define STATUS_CAPSULE_DOT_LABEL_GAP 9
+#define STATUS_CAPSULE_ITEM_GAP 18
+#define STATUS_CAPSULE_DIVIDER_GAP 14
+#define STATUS_CAPSULE_CHEVRON_GAP 14
+#define STATUS_CAPSULE_RIGHT_PAD 18
+
 #define COLOR_BASE       0x05070e
 #define COLOR_PANEL      0x181c29
 #define COLOR_CARD       0x101421
@@ -250,6 +260,8 @@ static lv_obj_t *s_wifi_dot;
 static lv_obj_t *s_ble_dot;
 static lv_obj_t *s_sd_dot;
 static lv_obj_t *s_status_capsule;
+static lv_obj_t *s_status_divider;
+static lv_obj_t *s_status_chevron;
 static lv_obj_t *s_status_scrim;
 static lv_obj_t *s_status_tray;
 static lv_obj_t *s_status_tray_as11;
@@ -744,16 +756,17 @@ static void set_style_ptr_if_changed(lv_obj_t *obj, lv_style_prop_t property,
     lv_obj_set_local_style_prop(obj, property, value, selector);
 }
 
-static void set_label_text_if_changed(lv_obj_t *label, const char *text)
+static bool set_label_text_if_changed(lv_obj_t *label, const char *text)
 {
-    if (!label) return;
+    if (!label) return false;
     if (!text) text = "";
     const char *current = lv_label_get_text(label);
-    if (current && strcmp(current, text) == 0) return;
+    if (current && strcmp(current, text) == 0) return false;
     lv_label_set_text(label, text);
+    return true;
 }
 
-static void set_label_text_fmt_if_changed(lv_obj_t *label, const char *format,
+static bool set_label_text_fmt_if_changed(lv_obj_t *label, const char *format,
                                           ...)
 {
     /* The largest call is title + attention (48 + 256 bytes plus framing). */
@@ -762,8 +775,8 @@ static void set_label_text_fmt_if_changed(lv_obj_t *label, const char *format,
     va_start(args, format);
     int written = vsnprintf(text, sizeof(text), format, args);
     va_end(args);
-    if (written < 0) return;
-    set_label_text_if_changed(label, text);
+    if (written < 0) return false;
+    return set_label_text_if_changed(label, text);
 }
 
 static void set_dot_tone(lv_obj_t *dot, uint32_t color, bool glow)
@@ -811,6 +824,47 @@ static lv_obj_t *make_down_chevron(lv_obj_t *parent, int x, int y)
                       LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(chevron, chevron_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
     return chevron;
+}
+
+static lv_coord_t status_label_width(lv_obj_t *label)
+{
+    lv_point_t size = {0};
+    lv_txt_get_size(&size, lv_label_get_text(label), FONT_BODY, 0, 0,
+                    LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return LV_MAX(size.x, 1);
+}
+
+static void layout_status_capsule(void)
+{
+    if (!s_status_capsule || !s_status_divider || !s_status_chevron) return;
+
+    lv_obj_t *dots[] = {s_ble_dot, s_sd_dot, s_wifi_dot};
+    lv_obj_t *labels[] = {s_ble_label, s_sd_label, s_wifi_label};
+    const lv_coord_t font_h = lv_font_get_line_height(FONT_BODY);
+    const lv_coord_t label_y = (STATUS_CAPSULE_H - font_h) / 2;
+    const lv_coord_t dot_y = label_y + (font_h - STATUS_CAPSULE_DOT_SIZE) / 2;
+    lv_coord_t cursor = STATUS_CAPSULE_LEFT_PAD;
+
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+        lv_coord_t text_w = status_label_width(labels[i]);
+        lv_obj_set_pos(dots[i], cursor, dot_y);
+        cursor += STATUS_CAPSULE_DOT_SIZE + STATUS_CAPSULE_DOT_LABEL_GAP;
+        lv_label_set_long_mode(labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_pos(labels[i], cursor, label_y);
+        lv_obj_set_size(labels[i], text_w, font_h);
+        cursor += text_w;
+        if (i + 1 < sizeof(labels) / sizeof(labels[0]))
+            cursor += STATUS_CAPSULE_ITEM_GAP;
+    }
+
+    cursor += STATUS_CAPSULE_DIVIDER_GAP;
+    lv_obj_set_pos(s_status_divider, cursor, (STATUS_CAPSULE_H - 20) / 2);
+    cursor += 1 + STATUS_CAPSULE_CHEVRON_GAP;
+    lv_obj_set_pos(s_status_chevron, cursor, (STATUS_CAPSULE_H - 10) / 2);
+    cursor += 14 + STATUS_CAPSULE_RIGHT_PAD;
+
+    lv_obj_set_pos(s_status_capsule, STATUS_CAPSULE_RIGHT - cursor, 7);
+    lv_obj_set_size(s_status_capsule, cursor, STATUS_CAPSULE_H);
 }
 
 static lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int w,
@@ -3556,7 +3610,7 @@ static void build_ui(void)
 #endif
                               130, 23, 330,
                               FONT_BODY, COLOR_SECONDARY);
-    s_status_capsule = make_touch_button(header, 725, 7, 281, 56, "",
+    s_status_capsule = make_touch_button(header, 725, 7, 281, STATUS_CAPSULE_H, "",
                                          COLOR_CAPSULE, status_tray_open_cb, 0);
     lv_obj_set_style_radius(s_status_capsule, 28, 0);
     lv_obj_set_style_bg_color(s_status_capsule, lv_color_hex(COLOR_CAPSULE), 0);
@@ -3570,9 +3624,10 @@ static void build_ui(void)
     s_wifi_dot = make_status_dot(s_status_capsule, 193, 24, 9);
     s_wifi_label = make_label(s_status_capsule, "Wi-Fi", 210, 18, 44,
                               FONT_BODY, COLOR_SECONDARY);
-    lv_obj_t *divider = make_inner_card(s_status_capsule, 259, 18, 1, 20, 0);
-    lv_obj_set_style_bg_color(divider, lv_color_hex(0x373d49), 0);
-    make_down_chevron(s_status_capsule, 268, 23);
+    s_status_divider = make_inner_card(s_status_capsule, 259, 18, 1, 20, 0);
+    lv_obj_set_style_bg_color(s_status_divider, lv_color_hex(0x373d49), 0);
+    s_status_chevron = make_down_chevron(s_status_capsule, 268, 23);
+    layout_status_capsule();
 
     for (int i = 0; i < 3; ++i) {
         s_pages[i] = make_plain_container(screen, 0, UI_CONTENT_Y,
@@ -5114,32 +5169,39 @@ static void update_ui(void)
                                 s_render_services->storage_free) * 100ULL) /
                               s_render_services->storage_total);
     }
+    bool status_capsule_layout_dirty = false;
     if (storage_fault) {
-        set_label_text_if_changed(s_sd_label, "Card fault");
+        status_capsule_layout_dirty |=
+            set_label_text_if_changed(s_sd_label, "Card fault");
     } else if (!state.sd_ready) {
-        set_label_text_if_changed(s_sd_label, "No card");
+        status_capsule_layout_dirty |=
+            set_label_text_if_changed(s_sd_label, "No card");
     } else if (state.storage_near_full && card_used_pct >= 0) {
-        set_label_text_fmt_if_changed(s_sd_label, "Card %d%%", card_used_pct);
+        status_capsule_layout_dirty |= set_label_text_fmt_if_changed(
+            s_sd_label, "Card %d%%", card_used_pct);
     } else if (state.storage_near_full) {
-        set_label_text_if_changed(s_sd_label, "Card low");
+        status_capsule_layout_dirty |=
+            set_label_text_if_changed(s_sd_label, "Card low");
     } else {
-        set_label_text_if_changed(s_sd_label, "Card");
+        status_capsule_layout_dirty |=
+            set_label_text_if_changed(s_sd_label, "Card");
     }
     set_style_color_if_changed(s_sd_label, LV_STYLE_TEXT_COLOR,
                                sd_tone == COLOR_LIVE ? COLOR_SECONDARY : sd_tone,
                                0);
-    set_label_text_if_changed(s_wifi_label,
-                              state.wifi ? "Wi-Fi" : "Offline");
+    status_capsule_layout_dirty |= set_label_text_if_changed(
+        s_wifi_label, state.wifi ? "Wi-Fi" : "Offline");
     set_style_color_if_changed(s_wifi_label, LV_STYLE_TEXT_COLOR,
                                state.wifi ? COLOR_SECONDARY : COLOR_AMBER, 0);
-    set_label_text_if_changed(s_ble_label,
-                              state.paired ? "AirSense" : "Unpaired");
+    status_capsule_layout_dirty |= set_label_text_if_changed(
+        s_ble_label, state.paired ? "AirSense" : "Unpaired");
     set_style_color_if_changed(s_ble_label, LV_STYLE_TEXT_COLOR,
                                as_tone == COLOR_LIVE ? COLOR_SECONDARY : as_tone,
                                0);
     set_dot_tone(s_sd_dot, sd_tone, true);
     set_dot_tone(s_wifi_dot, wifi_tone, true);
     set_dot_tone(s_ble_dot, as_tone, true);
+    if (status_capsule_layout_dirty) layout_status_capsule();
     uint32_t capsule_tone = storage_fault || airsense_stale ? 0x53151a :
                                 storage_degraded || !state.wifi || !state.paired
                                     ? 0x443817 : COLOR_CAPSULE;
