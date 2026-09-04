@@ -35,6 +35,7 @@ python3 scripts/therapy_alert_ack_contract_test.py
 python3 scripts/storage_notice_contract_test.py
 python3 scripts/storage_status_memory_contract_test.py
 python3 scripts/status_sd_cache_contract_test.py
+python3 scripts/upload_progress_snapshot_contract_test.py
 python3 scripts/psram_task_lifecycle_contract_test.py
 python3 scripts/history_storage_lifecycle_contract_test.py
 echo "All synthetic host tests passed"

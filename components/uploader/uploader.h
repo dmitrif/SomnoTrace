@@ -270,13 +270,15 @@ typedef struct {
     uploader_backend_progress_t backends[UPLOADER_PROGRESS_MAX_BACKENDS];
 } uploader_progress_snapshot_t;
 
-/* Populate a caller-owned, bounded snapshot without heap allocation.
- * Returns ESP_ERR_INVALID_STATE before uploader_init() has completed. */
+/* Populate a caller-owned, bounded RAM snapshot without heap allocation or
+ * SD/index traversal. Returns ESP_ERR_INVALID_STATE before uploader_init()
+ * has completed. */
 esp_err_t uploader_get_progress_snapshot(uploader_progress_snapshot_t *out);
 
 /* Compact upload progress for the web UI: one entry per backend with its
  * state, days done/total and, while uploading, the current day and unit.
- * Bounded in size regardless of how much history exists.
+ * Bounded in size regardless of how much history exists. Progress is
+ * serialized from the scheduler's RAM snapshot rather than the mutable index.
  * Returns ESP_ERR_INVALID_STATE before uploader_init() has completed.
  * Caller must free() the returned string. */
 esp_err_t uploader_get_progress_json(char **out_json);

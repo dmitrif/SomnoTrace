@@ -86,6 +86,11 @@ typedef struct {
     char     cur_day[12];
     int      cur_unit;
     int      n_units;
+    /* Aggregate upload-index progress is computed only by the scheduler and
+     * copied under s_lock.  API callers must not walk upload_index's mutable
+     * s_days array while a scan/reset is replacing it. */
+    int      days_done;
+    int      days_total;
 } backend_rt_t;
 
 static backend_rt_t s_rt[UPLOAD_MAX_BACKENDS];
@@ -109,6 +114,7 @@ static upload_sched_busy_fn_t s_busy_fn;
 static int64_t s_next_scan_us;
 static bool    s_scanning;
 static char    s_status[64] = "Starting up";
+static int     s_progress_max_days;
 /* Updated only by the scheduler after a leased reconciliation pass. Status
  * readers must never walk or mutate the card merely to render a badge. */
 static int     s_summary_pending;
@@ -237,6 +243,43 @@ static void set_scanning(bool scanning)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_scanning = scanning;
     xSemaphoreGive(s_lock);
+}
+
+/* upload_index is scheduler-owned after boot, but progress snapshots are read
+ * concurrently by the display, HTTP server, and WebSocket forwarder.  Keep
+ * the public path off the index entirely: the scheduler computes these small
+ * aggregates after each operation that can change the index, then publishes
+ * them under the same lock as the rest of the runtime snapshot. */
+static void refresh_index_progress_cache(void)
+{
+    int slots[UPLOAD_MAX_BACKENDS] = {0};
+    int done[UPLOAD_MAX_BACKENDS] = {0};
+    int total[UPLOAD_MAX_BACKENDS] = {0};
+    int n_runtime;
+    int max_days = uploader_max_days();
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    n_runtime = s_n_rt < UPLOAD_MAX_BACKENDS ? s_n_rt : UPLOAD_MAX_BACKENDS;
+    for (int i = 0; i < n_runtime; ++i) slots[i] = s_rt[i].slot;
+    xSemaphoreGive(s_lock);
+
+    for (int i = 0; i < n_runtime; ++i) {
+        upload_index_backend_progress(slots[i], max_days, &done[i], &total[i]);
+    }
+
+    bool changed = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_progress_max_days != max_days) changed = true;
+    s_progress_max_days = max_days;
+    for (int i = 0; i < n_runtime; ++i) {
+        if (s_rt[i].days_done != done[i] || s_rt[i].days_total != total[i])
+            changed = true;
+        s_rt[i].days_done = done[i];
+        s_rt[i].days_total = total[i];
+    }
+    xSemaphoreGive(s_lock);
+
+    if (changed) uploader_notify_progress_changed();
 }
 
 static void ox_mark_day_failed(upload_ox_ref_t *refs, int n_refs, int slot,
@@ -592,6 +635,7 @@ static void run_pass(void)
     int max_days = uploader_max_days();
 
     if (n == 0) {
+        refresh_index_progress_cache();
         set_summary_pending(0);
         set_status("No upload backend configured");
         return;
@@ -610,6 +654,8 @@ static void run_pass(void)
         set_status("Uploading to %s", bes[i]->label ? bes[i]->label : bes[i]->id);
         run_backend(r, max_days);
     }
+
+    refresh_index_progress_cache();
 
     /* Summarise for the UI. */
     int pending = 0;
@@ -647,6 +693,7 @@ static void reconcile_day_leased(uint32_t day)
         return;
     }
     upload_scan_reconcile_day(day);
+    refresh_index_progress_cache();
     uploader_lease_give();
 }
 
@@ -664,6 +711,7 @@ static void do_scan(void)
         if (r && r->slot >= 0) slots[n_slots++] = r->slot;
     }
     if (n_slots == 0) {
+        refresh_index_progress_cache();
         set_next_scan(now_us() + (int64_t)SCAN_INTERVAL_MS * 1000);
         return;
     }
@@ -683,6 +731,7 @@ static void do_scan(void)
         upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
         free(ox_refs);
     }
+    refresh_index_progress_cache();
     set_scanning(false);
     uploader_lease_give();
     set_next_scan(now_us() + (int64_t)SCAN_INTERVAL_MS * 1000);
@@ -732,6 +781,7 @@ static void sched_task(void *arg)
                 ESP_LOGW(TAG, "upload state reset — re-uploading newest %d day(s)",
                          uploader_max_days());
                 upload_index_clear();
+                refresh_index_progress_cache();
                 for (int i = 0; i < s_n_rt; i++) {
                     cooldown_reset(&s_rt[i]);
                     set_be_state(&s_rt[i], SB_IDLE);
@@ -784,6 +834,7 @@ esp_err_t upload_sched_init(void)
     const upload_backend_t *bes[UPLOAD_MAX_BACKENDS];
     int n = uploader_enabled_backends(bes, UPLOAD_MAX_BACKENDS);
     for (int i = 0; i < n; i++) rt_for(bes[i]);
+    refresh_index_progress_cache();
 
     StackType_t *stack = heap_caps_malloc(SCHED_TASK_STACK, MALLOC_CAP_SPIRAM);
     StaticTask_t *tcb  = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
@@ -848,6 +899,8 @@ typedef struct {
     char cur_day[sizeof(((backend_rt_t *)0)->cur_day)];
     int cur_unit;
     int n_units;
+    int days_done;
+    int days_total;
 } backend_rt_snapshot_t;
 
 esp_err_t upload_sched_progress_snapshot(uploader_progress_snapshot_t *out)
@@ -862,11 +915,13 @@ esp_err_t upload_sched_progress_snapshot(uploader_progress_snapshot_t *out)
     int n_runtime;
     int64_t next_scan_us;
     int64_t snapshot_us = now_us();
+    int progress_max_days;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     strlcpy(out->status, s_status, sizeof(out->status));
     out->scanning = s_scanning;
     next_scan_us = s_next_scan_us;
+    progress_max_days = s_progress_max_days;
     n_runtime = s_n_rt < UPLOAD_MAX_BACKENDS ? s_n_rt : UPLOAD_MAX_BACKENDS;
     for (int i = 0; i < n_runtime; ++i) {
         const backend_rt_t *src = &s_rt[i];
@@ -881,12 +936,14 @@ esp_err_t upload_sched_progress_snapshot(uploader_progress_snapshot_t *out)
         strlcpy(dst->cur_day, src->cur_day, sizeof(dst->cur_day));
         dst->cur_unit = src->cur_unit;
         dst->n_units = src->n_units;
+        dst->days_done = src->days_done;
+        dst->days_total = src->days_total;
     }
     xSemaphoreGive(s_lock);
 
     int64_t until = next_scan_us - snapshot_us;
     out->next_scan_s = until > 0 ? (uint32_t)(until / 1000000) : 0;
-    out->max_days = uploader_max_days();
+    out->max_days = progress_max_days;
 
     for (int i = 0; i < n_runtime; ++i) {
         const backend_rt_snapshot_t *src = &runtime[i];
@@ -903,8 +960,8 @@ esp_err_t upload_sched_progress_snapshot(uploader_progress_snapshot_t *out)
         dst->state = dst->configured ? public_state(src->state)
                                      : UPLOADER_BACKEND_DISABLED;
 
-        upload_index_backend_progress(src->slot, out->max_days,
-                                      &dst->days_done, &dst->days_total);
+        dst->days_done = src->days_done;
+        dst->days_total = src->days_total;
 
         dst->last_success_valid = src->last_ok_s != 0;
         dst->last_success_epoch_s = src->last_ok_s;
