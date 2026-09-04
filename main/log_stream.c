@@ -66,6 +66,18 @@ static const char *TAG = "log_stream";
 #define FLUSH_INTERVAL_MS   2000          /* flush at least every 2 s */
 #define FLUSH_THRESHOLD     4096          /* flush when buffer reaches 4 KB */
 
+/* The native UI retains complete logical lines independently of the byte ring
+ * drained by WebSocket/polling clients.  2,048 lines matches the Rev B screen
+ * contract and costs about 430 KiB with the bounded text prefix below.  A tiny
+ * internal-RAM fallback keeps diagnostics available on boards without usable
+ * PSRAM without jeopardising the display's internal-RAM budget. */
+#define RETAINED_CAPACITY_PSRAM          2048u
+#define RETAINED_CAPACITY_PSRAM_FALLBACK  512u
+#define RETAINED_CAPACITY_INTERNAL         32u
+#define RETAINED_SAVE_FILE         "touchscreen-visible.log"
+#define RETAINED_SAVE_TMP_FILE     RETAINED_SAVE_FILE ".tmp"
+#define RETAINED_SLOT_TRUNCATED    (1u << 0)
+
 static RingbufHandle_t s_ringbuf;
 static vprintf_like_t  s_orig_vprintf;
 
@@ -76,6 +88,33 @@ static size_t   s_writebuf_tail;     /* read position (from flush task) */
 static SemaphoreHandle_t s_writebuf_mutex;
 static TaskHandle_t s_flush_task;
 static bool s_sd_ready;              /* SD card is mounted and log dir created */
+
+typedef struct {
+    uint64_t sequence;
+    uint16_t length;
+    uint8_t level;
+    uint8_t flags;
+    char text[LOG_STREAM_RETAINED_TEXT_MAX];
+} retained_slot_t;
+
+typedef struct {
+    size_t head;
+    size_t count;
+    size_t capacity;
+    uint64_t generation;
+    uint64_t total_count;
+} retained_bounds_t;
+
+static retained_slot_t *s_retained_slots;
+static size_t s_retained_capacity;
+static size_t s_retained_head;
+static size_t s_retained_count;
+static uint64_t s_retained_generation;
+static uint64_t s_retained_total_count;
+static volatile uint32_t s_retained_dropped_count;
+static bool s_retained_in_psram;
+static esp_err_t s_retained_last_error = ESP_ERR_INVALID_STATE;
+static portMUX_TYPE s_retained_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /* ── WebSocket Live Tail ──────────────────────────────────────────── */
 #define MAX_WS_CLIENTS 4
@@ -90,6 +129,335 @@ static ws_client_t       s_ws_clients[MAX_WS_CLIENTS];
 static int               s_ws_client_count = 0;
 static SemaphoreHandle_t s_ws_mutex;
 static TaskHandle_t     s_ws_fwd_task;
+
+/* ── Native touchscreen retained feed ─────────────────────────────── */
+
+static uint8_t retained_level_for_line(const char *text, size_t length)
+{
+    size_t i = 0;
+    while (i < length && (text[i] == ' ' || text[i] == '\t')) i++;
+    if (i >= length) return LOG_STREAM_RETAINED_LEVEL_UNKNOWN;
+
+    switch (text[i]) {
+    case 'E': return LOG_STREAM_RETAINED_LEVEL_ERROR;
+    case 'W': return LOG_STREAM_RETAINED_LEVEL_WARN;
+    case 'I': return LOG_STREAM_RETAINED_LEVEL_INFO;
+    case 'D': return LOG_STREAM_RETAINED_LEVEL_DEBUG;
+    case 'V': return LOG_STREAM_RETAINED_LEVEL_VERBOSE;
+    default:  return LOG_STREAM_RETAINED_LEVEL_UNKNOWN;
+    }
+}
+
+static void retained_set_last_error(esp_err_t error)
+{
+    portENTER_CRITICAL(&s_retained_lock);
+    s_retained_last_error = error;
+    portEXIT_CRITICAL(&s_retained_lock);
+}
+
+static void retained_fill_info_locked(log_stream_retained_info_t *info)
+{
+    if (!info) return;
+    info->available = s_retained_slots != NULL;
+    info->in_psram = s_retained_in_psram;
+    info->capacity = s_retained_capacity;
+    info->retained_count = s_retained_count;
+    info->generation = s_retained_generation;
+    info->total_count = s_retained_total_count;
+    info->dropped_count = __atomic_load_n(&s_retained_dropped_count,
+                                          __ATOMIC_RELAXED);
+    info->last_error = s_retained_last_error;
+}
+
+static esp_err_t retained_read_bounds(retained_bounds_t *bounds,
+                                      log_stream_retained_info_t *info)
+{
+    esp_err_t result;
+    portENTER_CRITICAL(&s_retained_lock);
+    retained_fill_info_locked(info);
+    if (!s_retained_slots || s_retained_capacity == 0) {
+        result = s_retained_last_error == ESP_OK
+            ? ESP_ERR_INVALID_STATE : s_retained_last_error;
+    } else {
+        if (bounds) {
+            bounds->head = s_retained_head;
+            bounds->count = s_retained_count;
+            bounds->capacity = s_retained_capacity;
+            bounds->generation = s_retained_generation;
+            bounds->total_count = s_retained_total_count;
+        }
+        result = ESP_OK;
+    }
+    portEXIT_CRITICAL(&s_retained_lock);
+    return result;
+}
+
+static bool retained_copy_slot(size_t index,
+                               log_stream_retained_line_t *line)
+{
+    bool copied = false;
+    portENTER_CRITICAL(&s_retained_lock);
+    if (s_retained_slots && index < s_retained_capacity) {
+        const retained_slot_t *slot = &s_retained_slots[index];
+        uint16_t length = slot->length;
+        if (length >= LOG_STREAM_RETAINED_TEXT_MAX) {
+            length = LOG_STREAM_RETAINED_TEXT_MAX - 1;
+        }
+        line->sequence = slot->sequence;
+        line->length = length;
+        line->level = slot->level;
+        line->truncated = (slot->flags & RETAINED_SLOT_TRUNCATED) != 0;
+        memcpy(line->text, slot->text, length);
+        line->text[length] = '\0';
+        copied = true;
+    }
+    portEXIT_CRITICAL(&s_retained_lock);
+    return copied;
+}
+
+static bool retained_contains_case_insensitive(const char *haystack,
+                                               size_t haystack_len,
+                                               const char *needle)
+{
+    if (!needle || needle[0] == '\0') return true;
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return true;
+    if (needle_len > haystack_len) return false;
+
+    for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+        size_t j = 0;
+        while (j < needle_len) {
+            unsigned char a = (unsigned char)haystack[i + j];
+            unsigned char b = (unsigned char)needle[j];
+            if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+            if (a != b) break;
+            j++;
+        }
+        if (j == needle_len) return true;
+    }
+    return false;
+}
+
+/* ESP-IDF text logs are `I (timestamp) tag: message`.  Search intentionally
+ * excludes the severity/timestamp prefix so the touchscreen contract remains
+ * "tag + message", while gracefully falling back to the whole line for text
+ * written through the hook in a different format. */
+static const char *retained_search_start(const log_stream_retained_line_t *line,
+                                         size_t *search_length)
+{
+    for (size_t i = 0; i + 1 < line->length; i++) {
+        if (line->text[i] == ')' && line->text[i + 1] == ' ') {
+            *search_length = line->length - (i + 2);
+            return line->text + i + 2;
+        }
+    }
+    *search_length = line->length;
+    return line->text;
+}
+
+static bool retained_filter_matches(const log_stream_retained_line_t *line,
+                                    const log_stream_retained_filter_t *filter)
+{
+    if (!filter) return true;
+    uint32_t mask = filter->level_mask == 0
+        ? LOG_STREAM_RETAINED_LEVEL_ALL : filter->level_mask;
+    if ((mask & line->level) == 0) return false;
+    if (line->sequence <= filter->after_sequence) return false;
+
+    size_t search_length;
+    const char *search = retained_search_start(line, &search_length);
+    return retained_contains_case_insensitive(search, search_length,
+                                              filter->query);
+}
+
+static bool retained_line_is_in_bounds(const log_stream_retained_line_t *line,
+                                       const retained_bounds_t *bounds)
+{
+    if (bounds->count == 0 || bounds->total_count == 0) return false;
+    uint64_t first = bounds->total_count - bounds->count + 1;
+    return line->sequence >= first && line->sequence <= bounds->total_count;
+}
+
+static size_t retained_snapshot_from_bounds(
+    const retained_bounds_t *bounds,
+    log_stream_retained_line_t *lines,
+    size_t line_capacity,
+    const log_stream_retained_filter_t *filter,
+    bool *unstable)
+{
+    size_t copied = 0;
+    bool oldest_first = filter &&
+        filter->order == LOG_STREAM_RETAINED_OLDEST_FIRST;
+
+    if (unstable) *unstable = false;
+    for (size_t offset = 0;
+         offset < bounds->count && copied < line_capacity;
+         offset++) {
+        size_t index;
+        if (oldest_first) {
+            index = (bounds->head + bounds->capacity - bounds->count + offset)
+                % bounds->capacity;
+        } else {
+            index = (bounds->head + bounds->capacity - 1 - offset)
+                % bounds->capacity;
+        }
+
+        log_stream_retained_line_t candidate;
+        if (!retained_copy_slot(index, &candidate) ||
+            !retained_line_is_in_bounds(&candidate, bounds)) {
+            if (unstable) *unstable = true;
+            continue;
+        }
+        if (!retained_filter_matches(&candidate, filter)) continue;
+        lines[copied++] = candidate;
+    }
+    return copied;
+}
+
+static void retained_append_line(const char *text, size_t length,
+                                 bool source_truncated)
+{
+    if (!s_retained_slots || s_retained_capacity == 0) {
+        __atomic_fetch_add(&s_retained_dropped_count, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    if (length == 0) return;
+
+    /* Never wait in the global vprintf path.  A simultaneous snapshot read or
+     * Clear costs this line, which is counted and visible to the UI. */
+    if (portTRY_ENTER_CRITICAL(&s_retained_lock, 0) != pdTRUE) {
+        __atomic_fetch_add(&s_retained_dropped_count, 1, __ATOMIC_RELAXED);
+        return;
+    }
+
+    retained_slot_t *slot = &s_retained_slots[s_retained_head];
+    size_t copy_length = length;
+    bool truncated = source_truncated;
+    if (copy_length >= LOG_STREAM_RETAINED_TEXT_MAX) {
+        copy_length = LOG_STREAM_RETAINED_TEXT_MAX - 1;
+        truncated = true;
+    }
+    memcpy(slot->text, text, copy_length);
+    slot->text[copy_length] = '\0';
+    slot->length = (uint16_t)copy_length;
+    slot->level = retained_level_for_line(slot->text, copy_length);
+    slot->flags = truncated ? RETAINED_SLOT_TRUNCATED : 0;
+    slot->sequence = ++s_retained_total_count;
+
+    s_retained_head = (s_retained_head + 1) % s_retained_capacity;
+    if (s_retained_count < s_retained_capacity) s_retained_count++;
+    s_retained_generation++;
+    portEXIT_CRITICAL(&s_retained_lock);
+}
+
+static void retained_capture_text(const char *text, size_t length,
+                                  bool source_truncated)
+{
+    size_t start = 0;
+    while (start < length) {
+        size_t end = start;
+        while (end < length && text[end] != '\n') end++;
+        size_t line_end = end;
+        if (line_end > start && text[line_end - 1] == '\r') line_end--;
+        if (line_end > start) {
+            bool last_was_truncated = source_truncated && end == length;
+            retained_append_line(text + start, line_end - start,
+                                 last_was_truncated);
+        }
+        start = end < length ? end + 1 : length;
+    }
+}
+
+static void retained_init(void)
+{
+    size_t bytes = RETAINED_CAPACITY_PSRAM * sizeof(retained_slot_t);
+    s_retained_slots = heap_caps_calloc(1, bytes,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_retained_slots) {
+        s_retained_capacity = RETAINED_CAPACITY_PSRAM;
+        s_retained_in_psram = true;
+        s_retained_last_error = ESP_OK;
+        return;
+    }
+
+    /* A fragmented PSRAM heap may no longer have the roughly 430 KiB required
+     * for the full ring even though it can still retain a useful history. */
+    bytes = RETAINED_CAPACITY_PSRAM_FALLBACK * sizeof(retained_slot_t);
+    s_retained_slots = heap_caps_calloc(1, bytes,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_retained_slots) {
+        s_retained_capacity = RETAINED_CAPACITY_PSRAM_FALLBACK;
+        s_retained_in_psram = true;
+        s_retained_last_error = ESP_OK;
+        return;
+    }
+
+    bytes = RETAINED_CAPACITY_INTERNAL * sizeof(retained_slot_t);
+    s_retained_slots = heap_caps_calloc(1, bytes,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_retained_slots) {
+        s_retained_capacity = RETAINED_CAPACITY_INTERNAL;
+        s_retained_in_psram = false;
+        s_retained_last_error = ESP_OK;
+    } else {
+        s_retained_capacity = 0;
+        s_retained_in_psram = false;
+        s_retained_last_error = ESP_ERR_NO_MEM;
+    }
+}
+
+esp_err_t log_stream_retained_get_info(log_stream_retained_info_t *info)
+{
+    if (!info) return ESP_ERR_INVALID_ARG;
+    return retained_read_bounds(NULL, info);
+}
+
+esp_err_t log_stream_retained_snapshot(
+    log_stream_retained_line_t *lines,
+    size_t line_capacity,
+    const log_stream_retained_filter_t *filter,
+    size_t *line_count,
+    log_stream_retained_info_t *info)
+{
+    if (!line_count || (line_capacity > 0 && !lines) ||
+        (filter && filter->order != LOG_STREAM_RETAINED_NEWEST_FIRST &&
+         filter->order != LOG_STREAM_RETAINED_OLDEST_FIRST)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *line_count = 0;
+
+    retained_bounds_t bounds;
+    esp_err_t error = retained_read_bounds(&bounds, info);
+    if (error != ESP_OK || line_capacity == 0 || bounds.count == 0) {
+        return error;
+    }
+
+    /* Copying one bounded slot under the feed lock prevents torn PSRAM reads.
+     * A slot can still age out between the metadata snapshot and its copy;
+     * skip it rather than returning a newer line.  Generation lets the UI
+     * request again. */
+    *line_count = retained_snapshot_from_bounds(&bounds, lines, line_capacity,
+                                                filter, NULL);
+    return ESP_OK;
+}
+
+esp_err_t log_stream_retained_clear(void)
+{
+    portENTER_CRITICAL(&s_retained_lock);
+    if (!s_retained_slots || s_retained_capacity == 0) {
+        esp_err_t error = s_retained_last_error == ESP_OK
+            ? ESP_ERR_INVALID_STATE : s_retained_last_error;
+        portEXIT_CRITICAL(&s_retained_lock);
+        return error;
+    }
+    s_retained_head = 0;
+    s_retained_count = 0;
+    s_retained_generation++;
+    s_retained_last_error = ESP_OK;
+    portEXIT_CRITICAL(&s_retained_lock);
+    return ESP_OK;
+}
 
 /**
  * Custom vprintf hook installed via esp_log_set_vprintf().
@@ -117,14 +485,18 @@ static int log_vprintf_hook(const char *fmt, va_list args)
     char buf[LOG_LINE_MAX];
     va_list buf_args;
     va_copy(buf_args, args);
-    int len = vsnprintf(buf, sizeof(buf), fmt, buf_args);
+    int rendered_len = vsnprintf(buf, sizeof(buf), fmt, buf_args);
     va_end(buf_args);
-    if (len <= 0) {
+    if (rendered_len <= 0) {
         return ret;
     }
+    bool rendered_truncated = rendered_len >= (int)sizeof(buf);
+    int len = rendered_len;
     if (len >= (int)sizeof(buf)) {
         len = sizeof(buf) - 1;
     }
+
+    retained_capture_text(buf, (size_t)len, rendered_truncated);
 
     /* Push to SSE ring buffer (best-effort, drop if full). */
     if (s_ringbuf) {
@@ -285,6 +657,133 @@ static void log_flush_task(void *arg)
 
 /* ── Initialisation ───────────────────────────────────────────────── */
 
+esp_err_t log_stream_retained_save_to_sd(
+    const log_stream_retained_filter_t *filter,
+    char *saved_path,
+    size_t saved_path_size,
+    size_t *saved_line_count)
+{
+    if ((saved_path && saved_path_size == 0) ||
+        (!saved_path && saved_path_size != 0) ||
+        (filter && filter->order != LOG_STREAM_RETAINED_NEWEST_FIRST &&
+         filter->order != LOG_STREAM_RETAINED_OLDEST_FIRST)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (saved_path) saved_path[0] = '\0';
+    if (saved_line_count) *saved_line_count = 0;
+
+    const size_t final_path_len = strlen(LOG_DIR) + 1 +
+        strlen(RETAINED_SAVE_FILE);
+    if (saved_path && saved_path_size <= final_path_len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    log_stream_retained_info_t info;
+    esp_err_t error = log_stream_retained_get_info(&info);
+    if (error != ESP_OK) return error;
+    if (!sd_storage_is_ready()) {
+        retained_set_last_error(ESP_ERR_INVALID_STATE);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!sd_storage_lease_acquire(SD_LEASE_EXPORT, 5000)) {
+        retained_set_last_error(ESP_ERR_TIMEOUT);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    char final_path[96];
+    char tmp_path[100];
+    snprintf(final_path, sizeof(final_path), "%s/%s", LOG_DIR,
+             RETAINED_SAVE_FILE);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/%s", LOG_DIR,
+             RETAINED_SAVE_TMP_FILE);
+
+    FILE *file = NULL;
+    bool tmp_exists = false;
+    size_t written_lines = 0;
+
+    if (!sd_storage_is_ready()) {
+        error = ESP_ERR_INVALID_STATE;
+        goto done;
+    }
+    if ((mkdir(SD_APP_DIR, 0777) != 0 && errno != EEXIST) ||
+        (mkdir(LOG_DIR, 0777) != 0 && errno != EEXIST)) {
+        error = ESP_FAIL;
+        goto done;
+    }
+
+    retained_bounds_t bounds;
+    error = retained_read_bounds(&bounds, NULL);
+    if (error != ESP_OK) goto done;
+
+    /* A temporary sibling prevents a failed/partial write from replacing the
+     * last successful touchscreen export.  Capture remains available while
+     * FATFS is busy; if the bounded ring wraps over this exact snapshot, fail
+     * explicitly and let the UI offer Retry instead of publishing a partial
+     * file as complete. */
+    remove(tmp_path);
+    file = fopen(tmp_path, "wb");
+    if (!file) {
+        error = ESP_FAIL;
+        goto done;
+    }
+    tmp_exists = true;
+
+    log_stream_retained_filter_t chronological = {0};
+    if (filter) chronological = *filter;
+    chronological.order = LOG_STREAM_RETAINED_OLDEST_FIRST;
+
+    for (size_t offset = 0; offset < bounds.count; offset++) {
+        size_t index = (bounds.head + bounds.capacity - bounds.count + offset)
+            % bounds.capacity;
+        log_stream_retained_line_t line;
+        if (!retained_copy_slot(index, &line) ||
+            !retained_line_is_in_bounds(&line, &bounds)) {
+            error = ESP_ERR_INVALID_STATE;
+            goto done;
+        }
+        if (!retained_filter_matches(&line, &chronological)) continue;
+
+        if ((line.length > 0 &&
+             fwrite(line.text, 1, line.length, file) != line.length) ||
+            fwrite("\n", 1, 1, file) != 1) {
+            error = ESP_FAIL;
+            goto done;
+        }
+        written_lines++;
+    }
+
+    bool close_failed = fflush(file) != 0;
+    if (fclose(file) != 0) close_failed = true;
+    file = NULL;
+    if (close_failed) {
+        error = ESP_FAIL;
+        goto done;
+    }
+
+    if (remove(final_path) != 0 && errno != ENOENT) {
+        error = ESP_FAIL;
+        goto done;
+    }
+    if (rename(tmp_path, final_path) != 0) {
+        error = ESP_FAIL;
+        goto done;
+    }
+    tmp_exists = false;
+    error = ESP_OK;
+
+done:
+    if (file && fclose(file) != 0 && error == ESP_OK) error = ESP_FAIL;
+    if (tmp_exists) remove(tmp_path);
+    sd_storage_lease_release(SD_LEASE_EXPORT);
+    retained_set_last_error(error);
+
+    if (error == ESP_OK) {
+        if (saved_path) snprintf(saved_path, saved_path_size, "%s", final_path);
+        if (saved_line_count) *saved_line_count = written_lines;
+    }
+    return error;
+}
+
 void log_stream_init(void)
 {
     /* Prefer PSRAM (larger buffer) if available, else internal RAM. */
@@ -305,6 +804,8 @@ void log_stream_init(void)
         return;
     }
 
+    retained_init();
+
     /* Allocate SD write buffer in PSRAM. */
     s_writebuf = heap_caps_malloc(WRITEBUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!s_writebuf) {
@@ -321,10 +822,14 @@ void log_stream_init(void)
         ESP_LOGW(TAG, "failed to allocate write buffer, SD logging disabled");
     }
 
-    ESP_LOGI(TAG, "log stream init: %u-byte ring buffer (%s), %s SD logging",
+    ESP_LOGI(TAG, "log stream init: %u-byte ring buffer (%s), %s SD logging, "
+             "%u-line retained feed (%s)",
              (unsigned)buf_sz,
              buf_sz == RINGBUF_SIZE_PSRAM ? "PSRAM" : "internal",
-             s_writebuf ? "with" : "without");
+             s_writebuf ? "with" : "without",
+             (unsigned)s_retained_capacity,
+             s_retained_in_psram ? "PSRAM" :
+                 s_retained_slots ? "internal" : "unavailable");
 
     /* Install our hook; stash the original handler. */
     s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);

@@ -24,6 +24,11 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
 #include "esp_http_server.h"
 
 #ifdef __cplusplus
@@ -40,6 +45,104 @@ extern "C" {
  * Must be called once, before the HTTP server registers the log endpoints.
  */
 void log_stream_init(void);
+
+/* ── Native touchscreen retained log feed ─────────────────────────────────────
+ *
+ * This feed is deliberately independent of the WebSocket byte ring.  Reading
+ * it never consumes lines that a browser client is waiting for, and browser
+ * polling never removes lines from the touchscreen history.
+ */
+
+/* Includes the trailing NUL.  Longer rendered ESP_LOG lines are retained with
+ * a deterministic prefix and `truncated == true`. */
+#define LOG_STREAM_RETAINED_TEXT_MAX 192
+
+typedef enum {
+    LOG_STREAM_RETAINED_LEVEL_UNKNOWN = (1u << 0),
+    LOG_STREAM_RETAINED_LEVEL_ERROR   = (1u << 1),
+    LOG_STREAM_RETAINED_LEVEL_WARN    = (1u << 2),
+    LOG_STREAM_RETAINED_LEVEL_INFO    = (1u << 3),
+    LOG_STREAM_RETAINED_LEVEL_DEBUG   = (1u << 4),
+    LOG_STREAM_RETAINED_LEVEL_VERBOSE = (1u << 5),
+    LOG_STREAM_RETAINED_LEVEL_ALL     = ((1u << 6) - 1u),
+} log_stream_retained_level_t;
+
+typedef enum {
+    /* Zero is the UI-friendly default for a zero-initialised filter. */
+    LOG_STREAM_RETAINED_NEWEST_FIRST = 0,
+    LOG_STREAM_RETAINED_OLDEST_FIRST,
+} log_stream_retained_order_t;
+
+typedef struct {
+    uint64_t sequence; /* Monotonic for the lifetime of this boot. */
+    uint16_t length;   /* Bytes in text, excluding the trailing NUL. */
+    uint8_t level;     /* One log_stream_retained_level_t bit. */
+    bool truncated;
+    char text[LOG_STREAM_RETAINED_TEXT_MAX];
+} log_stream_retained_line_t;
+
+typedef struct {
+    /* Zero means all levels.  Otherwise OR log_stream_retained_level_t bits. */
+    uint32_t level_mask;
+    /* Optional case-insensitive substring matched against tag + message. */
+    const char *query;
+    /* Only return lines with sequence strictly greater than this value. */
+    uint64_t after_sequence;
+    log_stream_retained_order_t order;
+} log_stream_retained_filter_t;
+
+typedef struct {
+    bool available;
+    bool in_psram;
+    size_t capacity;
+    size_t retained_count;
+    /* Increments on every accepted line and Clear operation. */
+    uint64_t generation;
+    /* Accepted line count; Clear deliberately does not reset it. */
+    uint64_t total_count;
+    /* Lines dropped because capture storage was unavailable or contended. */
+    uint32_t dropped_count;
+    esp_err_t last_error;
+} log_stream_retained_info_t;
+
+/** Read retained-feed status without allocating. */
+esp_err_t log_stream_retained_get_info(log_stream_retained_info_t *info);
+
+/**
+ * Copy a filtered snapshot into caller-owned storage.  The call allocates
+ * nothing and never consumes either log ring.  A NULL filter selects all
+ * levels in newest-first order.  `line_capacity == 0` is valid with `lines`
+ * set to NULL and can be used to obtain metadata only.  The filter and its
+ * optional query string are borrowed only for the duration of the call.
+ */
+esp_err_t log_stream_retained_snapshot(
+    log_stream_retained_line_t *lines,
+    size_t line_capacity,
+    const log_stream_retained_filter_t *filter,
+    size_t *line_count,
+    log_stream_retained_info_t *info);
+
+/**
+ * Clear only the touchscreen-visible retained RAM ring.  The WebSocket ring,
+ * pending persistent-log write buffer, and files already on the card are not
+ * touched.  Generation and total_count remain monotonic.
+ */
+esp_err_t log_stream_retained_clear(void);
+
+/**
+ * Copy the current retained snapshot (optionally filtered) to the dedicated
+ * touchscreen-visible log file below SD_LOG_DIR.  The operation uses the SD
+ * export lease, writes through a temporary file, and publishes only a
+ * completed copy.  `saved_path` is optional; if supplied it receives the full
+ * mounted path.  This function may block on storage and must not run on the
+ * LVGL/touch handler or the vprintf hook.  The filter and query string must
+ * remain valid until the synchronous call returns.
+ */
+esp_err_t log_stream_retained_save_to_sd(
+    const log_stream_retained_filter_t *filter,
+    char *saved_path,
+    size_t saved_path_size,
+    size_t *saved_line_count);
 
 /**
  * Register the system WebSocket & log HTTP endpoints on the given server:
