@@ -436,25 +436,29 @@ require(update_source,
 require(history, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD", "leased history reads")
 require(history_header, r"TOUCH_HISTORY_TRACE_POINTS\s+48\b",
         "bounded native overnight trace")
-require(history_header, r"int16_t\s+flow_trace\[TOUCH_HISTORY_TRACE_POINTS\]",
-        "native flow trace storage")
-require(history_header, r"bool\s+has_flow_trace\s*;",
+require(history_header, r"int16_t\s+points\[TOUCH_HISTORY_TRACE_POINTS\]",
+        "compact selected-channel trace storage")
+require(history_header, r"int16_t\s+upper_points\[TOUCH_HISTORY_TRACE_POINTS\]",
+        "bounded parallel flow-envelope storage")
+require(history_header, r"bool\s+has_data\s*;",
         "truthful trace availability")
 require(history, r"terminal_session.*?completed.*?interrupted.*?timed_out.*?rotated.*?split",
         "trace excludes active and failed sessions")
-require(history, r"_flow_mm\.snt.*?_brp_mm\.snt",
+require(history, r"_flow_mm\.snt.*?_brp_mm\.snt.*?_pld\.snt",
         "v2 and legacy bounded overview sources")
-require(history, r"touch_history_load_flow_trace", "selection-driven trace API")
-require(history, r"FLOW_TRACE_MAX_RECORDS\s+\(24U\s*\*\s*60U\s*\*\s*60U\)",
+require(history, r"touch_history_load_trace", "selection-driven trace API")
+require(history, r"HISTORY_TRACE_MAX_RECORDS\s+\(24U\s*\*\s*60U\s*\*\s*60U\)",
         "one-day hard bound on trace input")
-require(history, r"FLOW_READ_RECORDS\s+128U", "bounded block-read buffer")
+require(history, r"HISTORY_READ_VALUES\s+512U", "bounded block-read buffer")
 require(history, r"fread\(records,.*?wanted.*?for\s*\(size_t r = 0; r < got;.*?processed \+= \(uint32_t\)got",
         "only complete buffered records populate trace bins")
+require(history, r"record\s*=\s*&records\[r\s*\*\s*best\.n_channels\]",
+        "channel-width-aware v2 record stride")
 require(history, r"fmt >= 2.*?channels = 2;.*?channels = 4;",
         "v2 flow pair and legacy v1 BRP channel semantics")
-assert "load_flow_trace(&days[i])" not in history, \
+assert "touch_history_load_trace(days[i]" not in history, \
        "trace must not be read eagerly for every history day"
-require(display, r"queue_history_trace_load\(selected_day\)",
+require(display, r"queue_history_trace_load\(selected_day,\s*s_history_channel\)",
         "trace loads only after a night is selected")
 
 history_trace_task_start = display.index("static void history_trace_task(void *arg)\n{")
@@ -462,7 +466,7 @@ history_trace_task_source = display[
     history_trace_task_start:
     display.index("static void queue_history_trace_load", history_trace_task_start)
 ]
-history_queue_start = display.index("static void queue_history_trace_load(const char *day)\n{")
+history_queue_start = display.index("static void queue_history_trace_load(const char *day,")
 history_queue_source = display[
     history_queue_start:display.index("static void history_task", history_queue_start)
 ]
@@ -529,7 +533,7 @@ require(history_refresh_source,
         r"s_history_selection\s*=\s*0;.*?"
         r"services->history\[0\]\.day.*?"
         r"if\s*\(metadata_changed\s*&&\s*s_history_selection\s*>=\s*0\)\s*"
-        r"queue_history_trace_load\(s_history_selected_day\)",
+        r"queue_history_trace_load\(s_history_selected_day,\s*s_history_channel\)",
         "completed non-empty metadata refresh selects and queues row zero")
 require(therapy_state_source,
         r"portENTER_CRITICAL\(&s_state_lock\);\s*"
@@ -543,24 +547,18 @@ require(therapy_state_source,
 require(history_row_source,
         r"selection\s*<\s*\(int\)s_render_services->history_count.*?"
         r"s_render_services->history\[selection\]\.day.*?"
-        r"queue_history_trace_load\(selected_day\)",
+        r"queue_history_trace_load\(selected_day,\s*s_history_channel\)",
         "History row taps resolve against the painted service snapshot")
 assert not re.search(r"\bs_services(?:\.|->)", history_row_source), \
        "History row taps must not resolve against mutable live services"
 require(history_trace_task_source,
-        r"if\s*\(already_loaded\)\s*\{.*?"
-        r"if\s*\(!s_history_trace_requested_day\[0\]\)\s*\{.*?"
-        r"s_services\.history_trace_result\s*=\s*ESP_OK;.*?"
-        r"s_services\.history_trace_busy\s*=\s*false;.*?\}\s*"
-        r"s_services\.history_version\+\+;.*?continue;",
-        "cached trace completion publishes and clears terminal busy state")
-require(history_trace_task_source,
-        r"touch_history_load_flow_trace\(&loaded\);.*?"
-        r"if\s*\(!s_history_trace_requested_day\[0\]\)\s*\{.*?"
+        r"touch_history_load_trace\(.*?requested_day,\s*requested_channel,\s*&loaded\);.*?"
+        r"if\s*\(request_generation\s*==\s*s_history_trace_request_generation\)\s*\{.*?"
+        r"s_services\.history_trace\s*=\s*loaded;.*?"
         r"s_services\.history_trace_result\s*=\s*result;.*?"
         r"s_services\.history_trace_busy\s*=\s*false;.*?\}\s*"
         r"s_services\.history_version\+\+;",
-        "every SD trace result publishes and clears terminal busy state")
+        "only the latest day/channel trace result publishes")
 require(history_queue_source,
         r"s_history_trace_requested_day\[0\]\s*=\s*'\\0';\s*"
         r"s_services\.history_trace_busy\s*=\s*false;\s*"
@@ -570,8 +568,8 @@ require(history_queue_source,
 require(history_refresh_source,
         r"trace_failed\s*=\s*trace_request_matches\s*&&\s*"
         r"!services->history_trace_busy\s*&&\s*"
-        r"services->history_trace_result\s*!=\s*ESP_OK;.*?"
-        r'"Flow trace temporarily unavailable - tap this night to retry"',
+        r"!trace->loaded\s*&&.*?"
+        r'"No O₂ Ring data for this night".*?"O₂ Ring data unavailable - tap SpO₂ to retry"',
         "terminal trace errors expose tap-to-retry guidance")
 for task, label in (
     ("history_task", "metadata"),
@@ -585,7 +583,7 @@ require(display, r"heap_caps_calloc\(.*?HISTORY_MAX_DAYS.*?MALLOC_CAP_SPIRAM",
         "expanded history model stays off the worker stack")
 require(display, r"lv_chart_set_all_value\(s_history_trace_chart.*?LV_CHART_POINT_NONE",
         "missing recorded samples remain chart gaps")
-require(display, r"day->has_flow_trace.*?day->flow_trace_count",
+require(display, r"trace->loaded.*?trace->has_data.*?trace->count",
         "physical History renders only available recorded trace data")
 require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
 require(history_header, r"int\s+mask_off_count\s*;",

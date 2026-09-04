@@ -6,6 +6,7 @@
 
 #include "bsp_display.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -169,6 +170,7 @@ typedef struct {
     bool history_busy;
     bool history_trace_busy;
     char history_trace_day[9];
+    touch_history_trace_t history_trace;
     esp_err_t history_trace_result;
     ui_device_result_t as11[DEVICE_RESULT_MAX];
     size_t as11_count;
@@ -235,6 +237,7 @@ static uint32_t s_backlight_write_errors;
 static int64_t s_backlight_retry_after_us;
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
 static bool s_qemu_first_frame_published;
+static uint8_t s_qemu_history_frame_pending_channel = UINT8_MAX;
 #endif
 static lv_coord_t s_last_touch_x;
 static lv_coord_t s_last_touch_y;
@@ -339,18 +342,46 @@ static lv_obj_t *s_history_event_bars[4];
 static lv_obj_t *s_history_event_values[4];
 static lv_obj_t *s_history_trace_chart;
 static lv_chart_series_t *s_history_trace_series;
+static lv_chart_series_t *s_history_trace_upper_series;
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
-static const int16_t s_qemu_history_trace[TOUCH_HISTORY_TRACE_POINTS] = {
-    8, 18, 20, 15, 9, 7, 10, 17, 26, 31, 29, 19,
-    5, -10, -23, -31, -29, -20, -8, 3, 11, 15, 14, 10,
-    7, 8, 14, 24, 34, 39, 34, 21, 6, -8, -17, -18,
-    -12, -3, 7, 15, 21, 20, 13, 3, -5, -6, 1, 12,
+static const int16_t s_qemu_history_traces
+    [TOUCH_HISTORY_CHANNEL_COUNT][TOUCH_HISTORY_TRACE_POINTS] = {
+    [TOUCH_HISTORY_CHANNEL_FLOW] = {
+        -31, -30, -28, -26, -24, -28, -36, -33, -29, -27, -25, -28,
+        -33, -35, -38, -37, -35, -33, -30, -29, -27, -29, -32, -31,
+        -29, -27, -25, -30, -37, -36, -34, -31, -28, -26, -24, -27,
+        -31, -33, -35, -34, -32, -29, -26, -28, -30, -31, -33, -32,
+    },
+    [TOUCH_HISTORY_CHANNEL_SPO2] = {
+        97, 97, 98, 98, 97, 97, 96, 96, 97, 98, 98, 97,
+        97, 96, 95, 96, 97, 97, 98, 98, 97, 97, 96, 96,
+        97, 97, 97, 98, 98, 97, 96, 94, 95, 96, 97, 97,
+        98, 98, 97, 97, 96, 95, 96, 97, 97, 98, 98, 97,
+    },
+    [TOUCH_HISTORY_CHANNEL_LEAK] = {
+        0, 0, 1, 1, 2, 1, 0, 0, 1, 2, 3, 2,
+        1, 0, 0, 1, 3, 5, 4, 2, 1, 0, 0, 1,
+        2, 4, 7, 6, 3, 2, 1, 0, 0, 2, 5, 8,
+        6, 3, 2, 1, 0, 0, 1, 2, 4, 3, 1, 0,
+    },
 };
+static const int16_t
+    s_qemu_history_flow_upper[TOUCH_HISTORY_TRACE_POINTS] = {
+        34, 36, 39, 35, 31, 37, 45, 42, 38, 36, 35, 38,
+        41, 44, 48, 46, 44, 42, 39, 37, 36, 39, 42, 40,
+        38, 36, 34, 40, 47, 46, 43, 40, 37, 35, 33, 37,
+        40, 42, 45, 43, 41, 38, 35, 37, 39, 41, 43, 40,
+    };
 #endif
 static lv_obj_t *s_history_trace_message;
 static lv_obj_t *s_history_trace_start;
 static lv_obj_t *s_history_trace_end;
+static lv_obj_t *s_history_trace_baseline;
+static lv_point_t s_history_trace_baseline_points[2] = {
+    { 0, 56 }, { 305, 56 }
+};
 static lv_obj_t *s_history_channel_buttons[3];
+static touch_history_channel_t s_history_channel = TOUCH_HISTORY_CHANNEL_FLOW;
 static lv_obj_t *s_history_empty;
 static lv_obj_t *s_history_empty_glyph;
 static lv_obj_t *s_history_empty_title;
@@ -444,6 +475,8 @@ static char s_history_selected_day[9];
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
 static bool s_history_trace_worker_running;
 static char s_history_trace_requested_day[9];
+static touch_history_channel_t s_history_trace_requested_channel;
+static uint32_t s_history_trace_request_generation;
 static TaskHandle_t s_history_worker_task;
 static TaskHandle_t s_history_trace_worker_task;
 static TaskHandle_t s_storage_worker_task;
@@ -571,6 +604,12 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
     if (lv_disp_flush_is_last(drv) && !s_qemu_first_frame_published) {
         s_qemu_first_frame_published = true;
         ESP_LOGI(TAG, "QEMU UI first frame published");
+    }
+    if (lv_disp_flush_is_last(drv) &&
+        s_qemu_history_frame_pending_channel < TOUCH_HISTORY_CHANNEL_COUNT) {
+        ESP_LOGI(TAG, "emulated history channel %u frame published",
+                 (unsigned)s_qemu_history_frame_pending_channel);
+        s_qemu_history_frame_pending_channel = UINT8_MAX;
     }
 #endif
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
@@ -1148,27 +1187,6 @@ static void screen_timeout_list_ready_cb(lv_event_t *event)
 }
 
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-static void copy_history_trace(touch_history_day_t *destination,
-                               const touch_history_day_t *source)
-{
-    memcpy(destination->flow_trace, source->flow_trace,
-           sizeof(destination->flow_trace));
-    destination->flow_trace_start_ms = source->flow_trace_start_ms;
-    destination->flow_trace_end_ms = source->flow_trace_end_ms;
-    destination->flow_trace_count = source->flow_trace_count;
-    destination->has_flow_trace = source->has_flow_trace;
-    destination->flow_trace_loaded = source->flow_trace_loaded;
-}
-
-static touch_history_day_t *history_day_locked(const char *day)
-{
-    for (size_t i = 0; i < s_services.history_count; ++i) {
-        if (!strcmp(s_services.history[i].day, day))
-            return &s_services.history[i];
-    }
-    return NULL;
-}
-
 static void history_trace_task(void *arg)
 {
     (void)arg;
@@ -1176,50 +1194,31 @@ static void history_trace_task(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         for (;;) {
             char requested_day[9];
-            bool already_loaded = false;
+            touch_history_channel_t requested_channel;
+            uint32_t request_generation;
             portENTER_CRITICAL(&s_state_lock);
             strlcpy(requested_day, s_history_trace_requested_day,
                     sizeof(requested_day));
+            requested_channel = s_history_trace_requested_channel;
+            request_generation = s_history_trace_request_generation;
             s_history_trace_requested_day[0] = '\0';
             if (!requested_day[0])
                 s_history_trace_worker_running = false;
             portEXIT_CRITICAL(&s_state_lock);
             if (!requested_day[0]) break;
 
-            portENTER_CRITICAL(&s_state_lock);
-            touch_history_day_t *cached = history_day_locked(requested_day);
-            already_loaded = cached && cached->flow_trace_loaded;
-            portEXIT_CRITICAL(&s_state_lock);
-            if (already_loaded) {
-                portENTER_CRITICAL(&s_state_lock);
-                if (!s_history_trace_requested_day[0]) {
-                    strlcpy(s_services.history_trace_day, requested_day,
-                            sizeof(s_services.history_trace_day));
-                    s_services.history_trace_result = ESP_OK;
-                    s_services.history_trace_busy = false;
-                }
-                s_services.history_version++;
-                portEXIT_CRITICAL(&s_state_lock);
-                continue;
-            }
-
-            touch_history_day_t loaded = {0};
-            strlcpy(loaded.day, requested_day, sizeof(loaded.day));
-            esp_err_t result = touch_history_load_flow_trace(&loaded);
+            touch_history_trace_t loaded = {0};
+            esp_err_t result = touch_history_load_trace(
+                requested_day, requested_channel, &loaded);
 
             portENTER_CRITICAL(&s_state_lock);
-            touch_history_day_t *destination = history_day_locked(requested_day);
-            /* A completed negative lookup is cached; a lease/recording error
-             * remains retryable on the next tap. */
-            if (destination && (result == ESP_OK || loaded.flow_trace_loaded))
-                copy_history_trace(destination, &loaded);
-            /* A newer request may have arrived while this file was being
-             * read.  Keep that request visibly busy; otherwise publish this
-             * result even when it is transient so the UI cannot say
-             * "Reading" forever and a tap can retry it. */
-            if (!s_history_trace_requested_day[0]) {
+            /* A later row or pill tap supersedes this read. Key completion by
+             * generation as well as day/channel so a slow SD response can
+             * never repaint the newly selected channel with stale data. */
+            if (request_generation == s_history_trace_request_generation) {
                 strlcpy(s_services.history_trace_day, requested_day,
                         sizeof(s_services.history_trace_day));
+                s_services.history_trace = loaded;
                 s_services.history_trace_result = result;
                 s_services.history_trace_busy = false;
             }
@@ -1229,20 +1228,30 @@ static void history_trace_task(void *arg)
     }
 }
 
-static void queue_history_trace_load(const char *day)
+static void queue_history_trace_load(const char *day,
+                                     touch_history_channel_t channel)
 {
     bool notify_worker = false;
     bool worker_unavailable = false;
-    if (!day || !day[0]) return;
+    if (!day || !day[0] || channel < TOUCH_HISTORY_CHANNEL_FLOW ||
+        channel >= TOUCH_HISTORY_CHANNEL_COUNT) return;
     portENTER_CRITICAL(&s_state_lock);
-    touch_history_day_t *cached = history_day_locked(day);
-    if (cached && !cached->flow_trace_loaded &&
-        (!s_services.history_trace_busy ||
-         strcmp(s_services.history_trace_day, day) != 0)) {
+    bool cached = s_services.history_trace.loaded &&
+                  !strcmp(s_services.history_trace_day, day) &&
+                  s_services.history_trace.channel == channel;
+    bool same_request = s_services.history_trace_busy &&
+                        !strcmp(s_services.history_trace_day, day) &&
+                        s_history_trace_requested_channel == channel;
+    if (!cached && !same_request) {
         strlcpy(s_history_trace_requested_day, day,
                 sizeof(s_history_trace_requested_day));
+        s_history_trace_requested_channel = channel;
+        s_history_trace_request_generation++;
         strlcpy(s_services.history_trace_day, day,
                 sizeof(s_services.history_trace_day));
+        s_services.history_trace.channel = channel;
+        s_services.history_trace.loaded = false;
+        s_services.history_trace.has_data = false;
         s_services.history_trace_busy = true;
         s_services.history_version++;
         if (!s_history_trace_worker_running) {
@@ -1261,7 +1270,7 @@ static void queue_history_trace_load(const char *day)
     portEXIT_CRITICAL(&s_state_lock);
     if (notify_worker) xTaskNotifyGive(s_history_trace_worker_task);
     if (worker_unavailable)
-        bsp_display_set_notice("Unable to read recorded flow");
+        bsp_display_set_notice("Unable to read recorded channel");
 }
 
 static void history_task(void *arg)
@@ -1278,15 +1287,17 @@ static void history_task(void *arg)
                                : ESP_ERR_NO_MEM;
         portENTER_CRITICAL(&s_state_lock);
         if (result == ESP_OK) {
-            /* A metadata refresh must not discard a trace that was loaded by
-             * the separate, selection-driven worker. */
-            for (size_t i = 0; i < count; ++i) {
-                touch_history_day_t *cached = history_day_locked(local[i].day);
-                if (cached && cached->flow_trace_loaded)
-                    copy_history_trace(&local[i], cached);
-            }
             memcpy(s_services.history, local, sizeof(s_services.history));
             s_services.history_count = count;
+            /* Metadata can represent a newly finalised session in an
+             * existing noon-day. Invalidate the one compact trace cache so
+             * the selected channel is never stale after Refresh. */
+            memset(&s_services.history_trace, 0,
+                   sizeof(s_services.history_trace));
+            s_services.history_trace_day[0] = '\0';
+            s_history_trace_requested_day[0] = '\0';
+            s_services.history_trace_busy = false;
+            s_history_trace_request_generation++;
         } else {
             /* Never present a cached list as if a failed refresh were
              * current; in particular, that could hide the night which just
@@ -2059,7 +2070,7 @@ static void history_row_cb(lv_event_t *event)
     }
     s_history_selection = selection;
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-    queue_history_trace_load(selected_day);
+    queue_history_trace_load(selected_day, s_history_channel);
 #endif
 }
 
@@ -2072,9 +2083,43 @@ static void refresh_cb(lv_event_t *event)
 static void history_channel_cb(lv_event_t *event)
 {
     int channel = (int)(intptr_t)lv_event_get_user_data(event);
-    bsp_display_set_notice(channel == 0
-                              ? "Showing the longest recorded flow session"
-                              : "This recorded channel opens in the browser dashboard");
+    if (channel < TOUCH_HISTORY_CHANNEL_FLOW ||
+        channel >= TOUCH_HISTORY_CHANNEL_COUNT) return;
+    s_history_channel = (touch_history_channel_t)channel;
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    /* A previous channel may have queued a frame which has not reached the
+     * virtual panel yet. This selection supersedes its acceptance signal. */
+    s_qemu_history_frame_pending_channel = UINT8_MAX;
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_history_selected_day[0]) {
+        strlcpy(s_services.history_trace_day, s_history_selected_day,
+                sizeof(s_services.history_trace_day));
+        s_services.history_trace.channel = s_history_channel;
+        memcpy(s_services.history_trace.points,
+               s_qemu_history_traces[s_history_channel],
+               sizeof(s_services.history_trace.points));
+        for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i)
+            s_services.history_trace.upper_points[i] =
+                TOUCH_HISTORY_TRACE_MISSING;
+        if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) {
+            memcpy(s_services.history_trace.upper_points,
+                   s_qemu_history_flow_upper,
+                   sizeof(s_services.history_trace.upper_points));
+        }
+        s_services.history_trace.count = TOUCH_HISTORY_TRACE_POINTS;
+        s_services.history_trace.start_ms = 0;
+        s_services.history_trace.end_ms = 0;
+        s_services.history_trace.has_data = true;
+        s_services.history_trace.loaded = true;
+        s_services.history_trace_result = ESP_OK;
+        s_services.history_trace_busy = false;
+        s_services.history_version++;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    ESP_LOGI(TAG, "emulated touch selected history channel %d", channel);
+#else
+    queue_history_trace_load(s_history_selected_day, s_history_channel);
+#endif
 }
 
 static void reboot_task(void *arg)
@@ -2719,6 +2764,11 @@ static void history_trace_draw_cb(lv_event_t *event)
         return;
     }
 
+    /* Flow has two independently connected series: the per-time-bin minimum
+     * and maximum. Do not apply the single-trace under-fill to either edge;
+     * doing so would visually merge them back into a fabricated waveform. */
+    if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) return;
+
     /* Match the handoff's translucent area beneath each trace segment. A line
      * mask keeps the fill below the waveform and a fade makes it disappear at
      * the bottom of the overnight card. */
@@ -2967,8 +3017,6 @@ static void build_history_page(lv_obj_t *history)
         if (i == 0) {
             lv_obj_set_style_text_color(lv_obj_get_child(s_history_channel_buttons[i], 0),
                                         lv_color_hex(COLOR_BASE), 0);
-        } else {
-            lv_obj_add_state(s_history_channel_buttons[i], LV_STATE_DISABLED);
         }
     }
     s_history_trace_chart = lv_chart_create(trace);
@@ -2989,21 +3037,34 @@ static void build_history_page(lv_obj_t *history)
     s_history_trace_series = lv_chart_add_series(
         s_history_trace_chart, lv_color_hex(0x54f7f5),
         LV_CHART_AXIS_PRIMARY_Y);
+    s_history_trace_upper_series = lv_chart_add_series(
+        s_history_trace_chart, lv_color_hex(0x54f7f5),
+        LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(s_history_trace_chart,
+                           s_history_trace_upper_series,
+                           LV_CHART_POINT_NONE);
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
-    for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i)
+    for (size_t i = 0; i < TOUCH_HISTORY_TRACE_POINTS; ++i) {
         lv_chart_set_next_value(s_history_trace_chart,
-                                s_history_trace_series, s_qemu_history_trace[i]);
+                                s_history_trace_series,
+                                s_qemu_history_traces
+                                    [TOUCH_HISTORY_CHANNEL_FLOW][i]);
+        lv_chart_set_next_value(s_history_trace_chart,
+                                s_history_trace_upper_series,
+                                s_qemu_history_flow_upper[i]);
+    }
 #endif
     lv_obj_set_style_line_width(s_history_trace_chart, 2, LV_PART_ITEMS);
     lv_obj_set_style_size(s_history_trace_chart, 0, LV_PART_INDICATOR);
-    static lv_point_t trace_baseline_points[] = { { 0, 80 }, { 305, 80 } };
-    lv_obj_t *trace_baseline = lv_line_create(s_history_trace_chart);
-    lv_line_set_points(trace_baseline, trace_baseline_points, 2);
-    lv_obj_set_style_line_color(trace_baseline, lv_color_hex(COLOR_CONTROL), 0);
-    lv_obj_set_style_line_width(trace_baseline, 1, 0);
-    lv_obj_set_style_line_dash_width(trace_baseline, 3, 0);
-    lv_obj_set_style_line_dash_gap(trace_baseline, 9, 0);
-    lv_obj_clear_flag(trace_baseline,
+    s_history_trace_baseline = lv_line_create(s_history_trace_chart);
+    lv_line_set_points(s_history_trace_baseline,
+                       s_history_trace_baseline_points, 2);
+    lv_obj_set_style_line_color(s_history_trace_baseline,
+                                lv_color_hex(COLOR_CONTROL), 0);
+    lv_obj_set_style_line_width(s_history_trace_baseline, 1, 0);
+    lv_obj_set_style_line_dash_width(s_history_trace_baseline, 3, 0);
+    lv_obj_set_style_line_dash_gap(s_history_trace_baseline, 9, 0);
+    lv_obj_clear_flag(s_history_trace_baseline,
                       LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     s_history_trace_message = make_label(trace,
                                          "No on-device flow trace for this night",
@@ -3995,6 +4056,7 @@ static void refresh_history_widgets(const ui_service_state_t *services)
     static bool rendered_busy;
     static int rendered_selection = -2;
     static size_t rendered_revealed;
+    static touch_history_channel_t rendered_channel = TOUCH_HISTORY_CHANNEL_COUNT;
     bool changed = services->history_version != s_seen_history_version;
     bool metadata_changed = services->history_metadata_version !=
                             s_seen_history_metadata_version;
@@ -4024,18 +4086,30 @@ static void refresh_history_widgets(const ui_service_state_t *services)
         }
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
         if (metadata_changed && s_history_selection >= 0)
-            queue_history_trace_load(s_history_selected_day);
+            queue_history_trace_load(s_history_selected_day, s_history_channel);
 #endif
     }
     if (render_valid && !changed && rendered_busy == services->history_busy &&
         rendered_selection == s_history_selection &&
-        rendered_revealed == s_history_revealed) {
+        rendered_revealed == s_history_revealed &&
+        rendered_channel == s_history_channel) {
         return;
     }
     render_valid = true;
     rendered_busy = services->history_busy;
     rendered_selection = s_history_selection;
     rendered_revealed = s_history_revealed;
+    rendered_channel = s_history_channel;
+
+    for (int i = 0; i < TOUCH_HISTORY_CHANNEL_COUNT; ++i) {
+        bool active = i == s_history_channel;
+        set_button_surface(s_history_channel_buttons[i],
+                           active ? COLOR_INVERSE : COLOR_CONTROL,
+                           LV_OPA_COVER);
+        lv_obj_set_style_text_color(
+            lv_obj_get_child(s_history_channel_buttons[i], 0),
+            lv_color_hex(active ? COLOR_BASE : COLOR_SECONDARY), 0);
+    }
 
     bool not_loaded = services->history_version == 0 && !services->history_busy;
     bool card_busy = !services->history_busy && services->history_count == 0 &&
@@ -4164,10 +4238,15 @@ static void refresh_history_widgets(const ui_service_state_t *services)
                           "%d session%s · 23:04 – 06:16",
                           day->sessions, day->sessions == 1 ? "" : "s");
 #else
-    if (day->has_flow_trace && day->sessions > 1) {
-        lv_label_set_text_fmt(s_history_detail_subtitle,
-                              "%d sessions · longest flow session shown",
-                              day->sessions);
+    if (day->sessions > 1) {
+        if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
+            lv_label_set_text_fmt(s_history_detail_subtitle,
+                                  "%d sessions · O₂ Ring overnight track",
+                                  day->sessions);
+        else
+            lv_label_set_text_fmt(s_history_detail_subtitle,
+                                  "%d sessions · longest session shown",
+                                  day->sessions);
     } else {
         lv_label_set_text_fmt(s_history_detail_subtitle, "%d session%s",
                               day->sessions, day->sessions == 1 ? "" : "s");
@@ -4229,30 +4308,81 @@ static void refresh_history_widgets(const ui_service_state_t *services)
 
     lv_chart_set_all_value(s_history_trace_chart, s_history_trace_series,
                            LV_CHART_POINT_NONE);
-    if (day->has_flow_trace && day->flow_trace_count > 1) {
-        int range = 30;
-        for (size_t i = 0; i < day->flow_trace_count; ++i) {
-            int value = day->flow_trace[i];
-            if (value == TOUCH_HISTORY_TRACE_MISSING) continue;
-            int magnitude = value < 0 ? -value : value;
-            if (magnitude > range) range = magnitude;
+    lv_chart_set_all_value(s_history_trace_chart,
+                           s_history_trace_upper_series,
+                           LV_CHART_POINT_NONE);
+    const touch_history_trace_t *trace = &services->history_trace;
+    bool trace_request_matches =
+        !strcmp(services->history_trace_day, day->day) &&
+        trace->channel == s_history_channel;
+    bool trace_available = trace_request_matches && trace->loaded &&
+                           trace->has_data && trace->count > 1;
+    if (trace_available) {
+        int range_min = 0;
+        int range_max = 0;
+        if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) {
+            int range = 30;
+            for (size_t i = 0; i < trace->count; ++i) {
+                const int values[] = {
+                    trace->points[i], trace->upper_points[i]
+                };
+                for (size_t edge = 0; edge < 2; ++edge) {
+                    int value = values[edge];
+                    if (value == TOUCH_HISTORY_TRACE_MISSING) continue;
+                    int magnitude = value < 0 ? -value : value;
+                    if (magnitude > range) range = magnitude;
+                }
+            }
+            range = ((range + 19) / 20) * 20;
+            if (range > 300) range = 300;
+            range_min = -range;
+            range_max = range;
+            s_history_trace_baseline_points[0].y = 56;
+            s_history_trace_baseline_points[1].y = 56;
+        } else {
+            int minimum = INT_MAX;
+            int maximum = INT_MIN;
+            for (size_t i = 0; i < trace->count; ++i) {
+                int value = trace->points[i];
+                if (value == TOUCH_HISTORY_TRACE_MISSING) continue;
+                if (value < minimum) minimum = value;
+                if (value > maximum) maximum = value;
+            }
+            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2) {
+                range_min = minimum > 52 ? minimum - 2 : 50;
+                range_max = maximum < 99 ? 100 : maximum + 1;
+            } else {
+                range_min = 0;
+                range_max = maximum < 10 ? 10 : ((maximum + 9) / 10) * 10;
+                if (range_max > 300) range_max = 300;
+            }
+            s_history_trace_baseline_points[0].y = 110;
+            s_history_trace_baseline_points[1].y = 110;
         }
-        range = ((range + 19) / 20) * 20;
-        if (range > 300) range = 300;
+        lv_line_set_points(s_history_trace_baseline,
+                           s_history_trace_baseline_points, 2);
         lv_chart_set_range(s_history_trace_chart, LV_CHART_AXIS_PRIMARY_Y,
-                           -range, range);
-        for (size_t i = 0; i < day->flow_trace_count; ++i) {
+                           range_min, range_max);
+        for (size_t i = 0; i < trace->count; ++i) {
+            int value = trace->points[i];
             lv_chart_set_next_value(
                 s_history_trace_chart, s_history_trace_series,
-                day->flow_trace[i] == TOUCH_HISTORY_TRACE_MISSING
-                    ? LV_CHART_POINT_NONE : day->flow_trace[i]);
+                value == TOUCH_HISTORY_TRACE_MISSING
+                    ? LV_CHART_POINT_NONE : value);
+            if (s_history_channel == TOUCH_HISTORY_CHANNEL_FLOW) {
+                int upper = trace->upper_points[i];
+                lv_chart_set_next_value(
+                    s_history_trace_chart, s_history_trace_upper_series,
+                    upper == TOUCH_HISTORY_TRACE_MISSING
+                        ? LV_CHART_POINT_NONE : upper);
+            }
         }
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
         lv_label_set_text(s_history_trace_start, "23:04");
         lv_label_set_text(s_history_trace_end, "06:16");
 #else
-        time_t start = (time_t)(day->flow_trace_start_ms / 1000);
-        time_t end = (time_t)(day->flow_trace_end_ms / 1000);
+        time_t start = (time_t)(trace->start_ms / 1000);
+        time_t end = (time_t)(trace->end_ms / 1000);
         struct tm start_tm, end_tm;
         char start_text[8] = "--:--", end_text[8] = "--:--";
         if (localtime_r(&start, &start_tm))
@@ -4268,28 +4398,63 @@ static void refresh_history_widgets(const ui_service_state_t *services)
         lv_label_set_text(s_history_trace_start, "--:--");
         lv_label_set_text(s_history_trace_end, "--:--");
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-        bool trace_request_matches =
-            !strcmp(services->history_trace_day, day->day);
         bool trace_failed = trace_request_matches &&
                             !services->history_trace_busy &&
+                            !trace->loaded &&
                             services->history_trace_result != ESP_OK;
-        const char *trace_message =
-            day->flow_trace_loaded
-                ? "No on-device flow trace for this night"
-            : trace_request_matches && services->history_trace_busy
-                ? "Reading recorded flow..."
-            : trace_failed
-                ? "Flow trace temporarily unavailable - tap this night to retry"
-            : sd_storage_recording_active()
-                ? "Available after recording stops"
-            : !sd_storage_is_ready()
-                ? "microSD card unavailable"
-                : "Reading recorded flow...";
+        static const char *channel_names[] = { "flow", "SpO₂", "leak" };
+        const char *channel_name = channel_names[s_history_channel];
+        char trace_message[96];
+        if (trace_request_matches && trace->loaded && !trace->has_data) {
+            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
+                strlcpy(trace_message, "No O₂ Ring data for this night",
+                        sizeof(trace_message));
+            else
+                snprintf(trace_message, sizeof(trace_message),
+                         "No recorded %s samples for this session", channel_name);
+        } else if (trace_request_matches && services->history_trace_busy) {
+            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
+                strlcpy(trace_message, "Reading O₂ Ring data...",
+                        sizeof(trace_message));
+            else
+                snprintf(trace_message, sizeof(trace_message),
+                         "Reading recorded %s...", channel_name);
+        } else if (trace_failed) {
+            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
+                strlcpy(trace_message,
+                        "O₂ Ring data unavailable - tap SpO₂ to retry",
+                        sizeof(trace_message));
+            else
+                snprintf(trace_message, sizeof(trace_message),
+                         "%s temporarily unavailable - tap %s to retry",
+                         channel_name, channel_name);
+        } else if (sd_storage_recording_active()) {
+            strlcpy(trace_message, "Available after recording stops",
+                    sizeof(trace_message));
+        } else if (!sd_storage_is_ready()) {
+            strlcpy(trace_message, "microSD card unavailable",
+                    sizeof(trace_message));
+        } else {
+            if (s_history_channel == TOUCH_HISTORY_CHANNEL_SPO2)
+                strlcpy(trace_message, "Reading O₂ Ring data...",
+                        sizeof(trace_message));
+            else
+                snprintf(trace_message, sizeof(trace_message),
+                         "Reading recorded %s...", channel_name);
+        }
         lv_label_set_text(s_history_trace_message, trace_message);
 #endif
         lv_obj_clear_flag(s_history_trace_message, LV_OBJ_FLAG_HIDDEN);
     }
     lv_chart_refresh(s_history_trace_chart);
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
+    /* A channel selection can repaint once with an older 250 ms service
+     * snapshot before its matching simulated data reaches the renderer. Only
+     * arm acceptance signalling for a populated, matching trace. flush_cb()
+     * reports when that exact LVGL frame has reached QEMU's virtual panel. */
+    if (trace_available)
+        s_qemu_history_frame_pending_channel = (uint8_t)s_history_channel;
+#endif
 }
 
 static void refresh_device_dropdown(bool oxygen, const ui_service_state_t *services)
@@ -6297,11 +6462,19 @@ void bsp_display_qemu_seed_demo(void)
     };
     portENTER_CRITICAL(&s_state_lock);
     memcpy(s_services.history, demo_history, sizeof(demo_history));
-    memcpy(s_services.history[0].flow_trace, s_qemu_history_trace,
-           sizeof(s_qemu_history_trace));
-    s_services.history[0].flow_trace_count = TOUCH_HISTORY_TRACE_POINTS;
-    s_services.history[0].has_flow_trace = true;
-    s_services.history[0].flow_trace_loaded = true;
+    strlcpy(s_services.history_trace_day, demo_history[0].day,
+            sizeof(s_services.history_trace_day));
+    memcpy(s_services.history_trace.points,
+           s_qemu_history_traces[TOUCH_HISTORY_CHANNEL_FLOW],
+           sizeof(s_services.history_trace.points));
+    memcpy(s_services.history_trace.upper_points,
+           s_qemu_history_flow_upper,
+           sizeof(s_services.history_trace.upper_points));
+    s_services.history_trace.count = TOUCH_HISTORY_TRACE_POINTS;
+    s_services.history_trace.channel = TOUCH_HISTORY_CHANNEL_FLOW;
+    s_services.history_trace.has_data = true;
+    s_services.history_trace.loaded = true;
+    s_services.history_trace_result = ESP_OK;
     s_services.history_count = sizeof(demo_history) / sizeof(demo_history[0]);
     s_services.history_result = ESP_OK;
     s_services.history_version++;

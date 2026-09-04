@@ -35,7 +35,7 @@ post_task = function_body(WRITER, "sw_post_task")
 storage_task = function_body(WRITER, "sw_storage_task")
 start_session = function_body(WRITER, "session_writer_start")
 history_load = function_body(HISTORY, "touch_history_load")
-history_trace = function_body(HISTORY, "touch_history_load_flow_trace")
+history_trace = function_body(HISTORY, "touch_history_load_trace")
 
 # `active` stops producers immediately, but the global recording claim remains
 # held until all seven FILE*s and the terminal manifest are durable.

@@ -10,6 +10,30 @@
 #define TOUCH_HISTORY_TRACE_POINTS 48
 #define TOUCH_HISTORY_TRACE_MISSING INT16_MIN
 
+typedef enum {
+    TOUCH_HISTORY_CHANNEL_FLOW = 0,
+    TOUCH_HISTORY_CHANNEL_SPO2,
+    TOUCH_HISTORY_CHANNEL_LEAK,
+    TOUCH_HISTORY_CHANNEL_COUNT,
+} touch_history_channel_t;
+
+/* Only the currently selected night/channel trace is retained by the UI.
+ * Keeping this separate from touch_history_day_t avoids multiplying the
+ * trace storage by 30 nights and three channels in scarce internal RAM. */
+typedef struct {
+    int16_t points[TOUCH_HISTORY_TRACE_POINTS];
+    /* Flow is rendered as two parallel time series.  upper_points contains
+     * the per-bin maximum while points contains the per-bin minimum; other
+     * channels leave upper_points missing. */
+    int16_t upper_points[TOUCH_HISTORY_TRACE_POINTS];
+    int64_t start_ms;
+    int64_t end_ms;
+    uint8_t count;
+    touch_history_channel_t channel;
+    bool has_data;
+    bool loaded;
+} touch_history_trace_t;
+
 typedef struct {
     char day[9];
     int sessions;
@@ -22,10 +46,6 @@ typedef struct {
     float rera;
     float pressure_p95;
     float leak_p95;
-    int16_t flow_trace[TOUCH_HISTORY_TRACE_POINTS];
-    int64_t flow_trace_start_ms;
-    int64_t flow_trace_end_ms;
-    uint8_t flow_trace_count;
     bool has_summary;
     bool has_mask_off_count;
     bool has_usage;
@@ -36,8 +56,6 @@ typedef struct {
     bool has_rera;
     bool has_pressure_p95;
     bool has_leak_p95;
-    bool has_flow_trace;
-    bool flow_trace_loaded;
 } touch_history_day_t;
 
 /* Returns newest days first, capped at TOUCH_HISTORY_MAX_DAYS. Safe to call
@@ -46,7 +64,11 @@ typedef struct {
 esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
                              size_t *count);
 
-/* Loads only the longest terminal session's 1 Hz flow overview for day->day.
- * The function owns an upload/read lease and is intended for a worker task;
- * missing samples remain explicit gaps. */
-esp_err_t touch_history_load_flow_trace(touch_history_day_t *day);
+/* Loads one bounded overview for the given noon-day. Flow uses the longest
+ * terminal session's 1 Hz min/max sidecar, Leak its 0.5 Hz PLD track, and
+ * SpO2 the ready canonical O2 Ring vitals track with the greatest valid-sample
+ * coverage. The function owns an upload/read lease and is intended for a
+ * worker task; gaps remain explicit. */
+esp_err_t touch_history_load_trace(const char *day,
+                                   touch_history_channel_t channel,
+                                   touch_history_trace_t *trace);

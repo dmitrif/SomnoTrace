@@ -11,7 +11,8 @@ opens three full-size screens:
 - **Home** — live breathing waveform, therapy state, current metrics, elapsed
   time, and one-tap Start/Stop therapy
 - **History** — up to 30 newest recorded nights from microSD, revealed seven at
-  a time, with a selected-night summary and bounded overnight flow overview
+  a time, with a selected-night summary and touch-selectable Flow, SpO2, and
+  Leak overviews
 - **Manage** — a single settings area with Devices, Connectivity, Display,
   Alerts, Storage, and System sections
 
@@ -99,9 +100,10 @@ dist/somnotrace-waveshare-7b-test-full.bin
    and tap **Pair**. Enter the four-digit code shown on the AirSense using the
    on-screen keypad, then tap **Confirm code**.
 9. Open **History**. It automatically refreshes, selects the newest available
-   night, and lazily loads that night's summary and overnight flow overview
-   without blocking touch input. A new night appears after the first completed
-   therapy session.
+   night, and lazily loads that night's summary and selected overnight channel
+   without blocking touch input. **Flow** and **Leak** use AirSense recordings;
+   **SpO2** uses a paired O2 Ring recording when one exists. A new night appears
+   after the first completed therapy session.
 
 ## Quick acceptance checklist
 
@@ -129,8 +131,8 @@ dist/somnotrace-waveshare-7b-test-full.bin
   four-digit code entirely on the touchscreen.
 - **History** remains responsive while reading the card, lists newest nights
   first, selects the newest night automatically, loads seven more on request up
-  to 30, and shows the selected night's flow overview after it becomes
-  available.
+  to 30, and switches among distinct Flow, SpO2, and Leak overviews for the
+  selected night.
 - After a therapy cycle, repeatedly switching among **History**, every
   **Manage** section, and the three bottom tabs for several minutes causes no
   restart, progressive slowdown, or SD read failure.
