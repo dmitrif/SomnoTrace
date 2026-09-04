@@ -34,6 +34,7 @@ fonts = source("main/somnotrace_fonts.h")
 board_defaults = source("sdkconfig.7b.defaults")
 history = source("main/touch_history.c")
 history_header = source("main/touch_history.h")
+edf = source("main/edf_gen.c")
 main = source("main/main.c")
 as11 = source("main/as11_ble.c")
 device_settings = source("main/device_settings.c")
@@ -587,6 +588,20 @@ require(display, r"lv_chart_set_all_value\(s_history_trace_chart.*?LV_CHART_POIN
 require(display, r"day->has_flow_trace.*?day->flow_trace_count",
         "physical History renders only available recorded trace data")
 require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
+require(history_header, r"int\s+mask_off_count\s*;",
+        "nightly mask-off count value")
+require(history_header, r"bool\s+has_mask_off_count\s*;",
+        "nightly mask-off availability")
+require(history, r'has_mask_off_count\s*=\s*\n?\s*json_number\(root,\s*"mask_off_count"',
+        "summary-backed mask-off parsing")
+require(edf, r'cJSON_AddNumberToObject\(root,\s*"mask_off_count",\s*ctx->n_session_entries\)',
+        "one mask-off endpoint per Summary session entry")
+require(display, r'"Mask on/off · %d".*?day->mask_off_count',
+        "History mask on/off badge")
+require(display, r'"Mask on/off · —"',
+        "truthful unavailable mask on/off state")
+require(display, r'\.mask_off_count\s*=\s*12.*?\.has_mask_off_count\s*=\s*true',
+        "two-digit QEMU mask-off layout fixture")
 require(history_header, r"#define\s+TOUCH_HISTORY_MAX_DAYS\s+30\b",
         "bounded 30-night native history model")
 for metric in ("oai", "cai", "hi", "rera"):

@@ -407,6 +407,10 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
         if (!root) continue;
         float number = 0.0f;
         if (json_number(root, "sessions", &number)) days[i].sessions = (int)number;
+        days[i].has_mask_off_count =
+            json_number(root, "mask_off_count", &number);
+        if (days[i].has_mask_off_count)
+            days[i].mask_off_count = (int)number;
         days[i].has_usage = json_number(root, "usage_min", &number);
         if (days[i].has_usage) days[i].usage_min = (int)number;
         days[i].has_ahi = json_number(root, "ahi", &days[i].ahi);

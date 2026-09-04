@@ -79,7 +79,7 @@
  *                    already NTP-timestamped and needs no adjustment.
  */
 /* Build a per-noon-day JSON summary (AHI/indices, usage, leak/pressure/EPAP/
- * resp-rate percentiles, session count) from that day's Summary spool, in
+ * resp-rate percentiles, session and mask-off counts) from that day's Summary spool, in
  * physical units matching STR.edf/OSCAR. On success returns ESP_OK and sets
  * *out_json to a malloc'd string (caller frees). Returns ESP_ERR_NOT_FOUND if
  * the day has no spool. noon_day is "YYYYMMDD". */

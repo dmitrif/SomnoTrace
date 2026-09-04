@@ -328,8 +328,8 @@ static lv_obj_t *s_history_refresh_label;
 static lv_obj_t *s_history_detail_content;
 static lv_obj_t *s_history_detail_title;
 static lv_obj_t *s_history_detail_subtitle;
-static lv_obj_t *s_history_usage_badge;
-static lv_obj_t *s_history_usage_dot;
+static lv_obj_t *s_history_mask_badge;
+static lv_obj_t *s_history_mask_dot;
 static lv_obj_t *s_history_usage_label;
 static lv_obj_t *s_history_ahi_label;
 static lv_obj_t *s_history_pressure_label;
@@ -2889,11 +2889,11 @@ static void build_history_page(lv_obj_t *history)
     lv_obj_t *badge = make_card(s_history_detail_content, 444, 17, 176, 38);
     lv_obj_set_style_radius(badge, 19, 0);
     lv_obj_set_style_pad_all(badge, 0, 0);
-    s_history_usage_dot = make_status_dot(badge, 14, 15, 8);
-    set_dot_tone(s_history_usage_dot, COLOR_DISABLED, false);
-    s_history_usage_badge = make_label(badge, "Usage unavailable", 32, 9, 132,
-                                       FONT_BODY_SMALL, COLOR_SECONDARY);
-    lv_obj_set_style_text_align(s_history_usage_badge, LV_TEXT_ALIGN_LEFT, 0);
+    s_history_mask_dot = make_status_dot(badge, 14, 15, 8);
+    set_dot_tone(s_history_mask_dot, COLOR_DISABLED, false);
+    s_history_mask_badge = make_label(badge, "Mask on/off · —", 32, 9, 132,
+                                      FONT_BODY_SMALL, COLOR_SECONDARY);
+    lv_obj_set_style_text_align(s_history_mask_badge, LV_TEXT_ALIGN_LEFT, 0);
 
     make_history_metric(s_history_detail_content, 24, "USAGE", "h",
                         &s_history_usage_label, &s_history_metric_units[0]);
@@ -4160,15 +4160,18 @@ static void refresh_history_widgets(const ui_service_state_t *services)
 #endif
 
     char formatted[24];
+    if (day->has_mask_off_count) {
+        lv_label_set_text_fmt(s_history_mask_badge, "Mask on/off · %d",
+                              day->mask_off_count);
+        set_dot_tone(s_history_mask_dot, COLOR_LIVE, true);
+    } else {
+        lv_label_set_text(s_history_mask_badge, "Mask on/off · —");
+        set_dot_tone(s_history_mask_dot, COLOR_DISABLED, false);
+    }
     if (day->has_usage) {
         snprintf(formatted, sizeof(formatted), "%.1f", day->usage_min / 60.0f);
-        lv_label_set_text_fmt(s_history_usage_badge, "%d h %02d m recorded",
-                              day->usage_min / 60, day->usage_min % 60);
-        set_dot_tone(s_history_usage_dot, COLOR_LIVE, true);
     } else {
         strlcpy(formatted, "n/a", sizeof(formatted));
-        lv_label_set_text(s_history_usage_badge, "Usage unavailable");
-        set_dot_tone(s_history_usage_dot, COLOR_DISABLED, false);
     }
     history_set_metric(s_history_usage_label, s_history_metric_units[0],
                        day->has_usage, formatted);
@@ -6212,30 +6215,38 @@ void bsp_display_qemu_seed_demo(void)
     qemu_upload_progress(&upload_progress);
     static const touch_history_day_t demo_history[] = {
         {
-            .day = "20260901", .sessions = 1, .usage_min = 438,
+            .day = "20260901", .sessions = 1, .mask_off_count = 1,
+            .usage_min = 438,
             .ahi = 1.7f, .oai = 0.6f, .cai = 0.2f, .hi = 0.9f,
             .rera = 0.4f, .pressure_p95 = 10.4f, .leak_p95 = 7.8f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_summary = true, .has_mask_off_count = true,
+            .has_usage = true, .has_ahi = true,
             .has_oai = true, .has_cai = true, .has_hi = true, .has_rera = true,
             .has_pressure_p95 = true, .has_leak_p95 = true,
         },
         {
-            .day = "20260831", .sessions = 2, .usage_min = 401,
+            .day = "20260831", .sessions = 2, .mask_off_count = 2,
+            .usage_min = 401,
             .ahi = 2.2f, .pressure_p95 = 10.8f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_summary = true, .has_mask_off_count = true,
+            .has_usage = true, .has_ahi = true,
             .has_pressure_p95 = true, .has_leak_p95 = false,
         },
         {
-            .day = "20260830", .sessions = 1, .usage_min = 462,
+            .day = "20260830", .sessions = 1, .mask_off_count = 1,
+            .usage_min = 462,
             .ahi = 1.3f, .pressure_p95 = 9.9f, .leak_p95 = 5.1f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_summary = true, .has_mask_off_count = true,
+            .has_usage = true, .has_ahi = true,
             .has_pressure_p95 = true, .has_leak_p95 = true,
         },
         {
-            .day = "20260829", .sessions = 1, .usage_min = 302,
+            .day = "20260829", .sessions = 1, .mask_off_count = 12,
+            .usage_min = 302,
             .ahi = 2.8f, .oai = 1.2f, .cai = 0.3f, .hi = 1.3f,
             .rera = 0.5f, .pressure_p95 = 11.2f, .leak_p95 = 9.4f,
-            .has_summary = true, .has_usage = true, .has_ahi = true,
+            .has_summary = true, .has_mask_off_count = true,
+            .has_usage = true, .has_ahi = true,
             .has_oai = true, .has_cai = true, .has_hi = true, .has_rera = true,
             .has_pressure_p95 = true, .has_leak_p95 = true,
         },

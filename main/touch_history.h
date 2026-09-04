@@ -13,6 +13,7 @@
 typedef struct {
     char day[9];
     int sessions;
+    int mask_off_count;
     int usage_min;
     float ahi;
     float oai;
@@ -26,6 +27,7 @@ typedef struct {
     int64_t flow_trace_end_ms;
     uint8_t flow_trace_count;
     bool has_summary;
+    bool has_mask_off_count;
     bool has_usage;
     bool has_ahi;
     bool has_oai;
