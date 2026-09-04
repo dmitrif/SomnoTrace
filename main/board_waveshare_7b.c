@@ -98,12 +98,13 @@ static esp_err_t init_rgb_panel(void)
     esp_lcd_rgb_panel_config_t cfg = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
-            /* Raise the continuous panel scan enough to reduce visible
-             * shimmer while retaining margin below the 24 MHz setting that
-             * shifted lower rows during heavy touch redraws. Keep the proven
-             * 20-line bounce buffers and 80 MHz PSRAM unchanged so this is a
-             * single-variable hardware A/B candidate. */
-            .pclk_hz = 22000000,
+            /* Keep enough PSRAM-to-bounce-buffer margin while LVGL is
+             * actively repainting a 1024x600 view.  The board is stable at
+             * 24 MHz for static frames, but physical scrolling/touch tests
+             * can still starve scanout and shift the lower part of a frame.
+             * 18 MHz remains effectively a 20 fps panel with these porches,
+             * matching the UI's 20 Hz live-chart presentation ceiling. */
+            .pclk_hz = 18000000,
             .h_res = WAVESHARE_7B_H_RES,
             .v_res = WAVESHARE_7B_V_RES,
             .hsync_pulse_width = 162,
