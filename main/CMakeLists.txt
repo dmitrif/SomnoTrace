@@ -20,6 +20,7 @@ endif()
 if(CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B OR CONFIG_SOMNOTRACE_BOARD_QEMU)
     list(APPEND SOMNOTRACE_BSP_SRCS
         "first_run_setup_ui.c"
+        "timezone_catalog.c"
         "../assets/fonts/generated/somnotrace_space_grotesk_medium_13.c"
         "../assets/fonts/generated/somnotrace_space_grotesk_medium_15.c"
         "../assets/fonts/generated/somnotrace_space_grotesk_medium_17.c"

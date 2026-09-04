@@ -12,5 +12,6 @@ typedef int32_t esp_err_t;
 #define ESP_ERR_INVALID_STATE     0x103
 #define ESP_ERR_INVALID_SIZE      0x104
 #define ESP_ERR_INVALID_VERSION   0x10A
+#define ESP_ERR_NOT_FOUND         0x105
 #define ESP_ERR_NVS_BASE          0x1100
 #define ESP_ERR_NVS_NOT_FOUND    (ESP_ERR_NVS_BASE + 0x02)

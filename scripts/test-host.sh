@@ -33,6 +33,12 @@ cc -std=c11 -Wall -Wextra \
     -o "${TEST_DIR}/first_run_setup_test"
 "${TEST_DIR}/first_run_setup_test"
 
+cc -std=c11 -Wall -Wextra -DTIMEZONE_CATALOG_HOST_TEST \
+    -I scripts/test_include -I main \
+    scripts/timezone_catalog_test.c main/timezone_catalog.c \
+    -o "${TEST_DIR}/timezone_catalog_test"
+"${TEST_DIR}/timezone_catalog_test"
+
 cc -std=c11 -Wall -Wextra -DTOUCH_HISTORY_MODEL_TEST \
     -I scripts/test_include -I main \
     scripts/touch_history_model_test.c main/touch_history.c -lm \
@@ -56,6 +62,7 @@ python3 scripts/rapid_session_lifecycle_contract_test.py
 python3 scripts/clock_snapshot_contract_test.py
 python3 scripts/live_flow_units_contract_test.py
 python3 scripts/first_run_setup_contract_test.py
+python3 scripts/timezone_catalog_contract_test.py
 python3 scripts/log_stream_retained_contract_test.py
 python3 scripts/logs_touch_ui_contract_test.py
 echo "All synthetic host tests passed"
