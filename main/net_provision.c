@@ -36,7 +36,11 @@
 #include "device_settings.h"
 #include "session_graph.h"
 #include "oximetry_http.h"
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+#include "board_waveshare_7b.h"
+#endif
 
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -3152,6 +3156,41 @@ static esp_err_t actions_handler(httpd_req_t *req)
             xSemaphoreGive(s_format_mtx);
             err = ESP_ERR_NO_MEM;
         }
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
+    } else if (strcmp(action, "display-pclk") == 0) {
+        /* Temporary, non-persistent A/B diagnostic. Reusing /api/actions
+         * avoids consuming a 61st URI slot on the memory-constrained 7B. */
+        cJSON *hz_item = cJSON_GetObjectItem(root, "hz");
+        if (!cJSON_IsNumber(hz_item) ||
+            (hz_item->valuedouble != 18000000.0 &&
+             hz_item->valuedouble != 30850000.0)) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "hz must be 18000000 or 30850000");
+            return ESP_FAIL;
+        }
+
+        uint32_t hz = (uint32_t)hz_item->valuedouble;
+        err = waveshare_7b_set_panel_pclk(hz);
+        cJSON_Delete(root);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "display PCLK diagnostic failed: %s",
+                     esp_err_to_name(err));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+
+        /* Current porch totals are 1386 x 661 pixels per frame. */
+        double frame_hz = (double)hz / (1386.0 * 661.0);
+        char response[160];
+        snprintf(response, sizeof(response),
+                 "{\"ok\":true,\"pclk_hz\":%" PRIu32
+                 ",\"nominal_frame_hz\":%.4f,\"boot_default_hz\":18000000}",
+                 hz, frame_hz);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+#endif
     } else {
         cJSON_Delete(root);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown action");

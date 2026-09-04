@@ -38,6 +38,7 @@ edf = source("main/edf_gen.c")
 main = source("main/main.c")
 as11 = source("main/as11_ble.c")
 device_settings = source("main/device_settings.c")
+net_provision = source("main/net_provision.c")
 
 expected_scalars = {
     r"#define\s+I2C_SDA\s+GPIO_NUM_8\b": "I2C SDA GPIO8",
@@ -100,6 +101,19 @@ require(device_settings,
         r"CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B\s*\|\|\s*"
         r"CONFIG_SOMNOTRACE_BOARD_QEMU.*?DEFAULT_BRIGHTNESS\s+200",
         "7-inch default is 100 percent steady backlight")
+require(board,
+        r"waveshare_7b_set_panel_pclk\s*\(uint32_t\s+hz\).*?"
+        r"hz\s*!=\s*18000000U\s*&&\s*hz\s*!=\s*30850000U.*?"
+        r"esp_lcd_rgb_panel_set_pclk\(s_panel,\s*hz\)",
+        "runtime PCLK diagnostic restricted to the two A/B clocks")
+require(net_provision,
+        r'strcmp\(action,\s*"display-pclk"\)\s*==\s*0.*?'
+        r'hz_item->valuedouble\s*!=\s*18000000\.0.*?'
+        r'hz_item->valuedouble\s*!=\s*30850000\.0.*?'
+        r'waveshare_7b_set_panel_pclk\(hz\)',
+        "non-persistent display PCLK action with a strict two-clock allowlist")
+assert '"/api/diagnostics/display-pclk"' not in net_provision, \
+       "PCLK diagnostic must reuse /api/actions without consuming a URI slot"
 
 require(display, r"\.on_frame_buf_complete\s*=\s*on_vsync", "frame-buffer handoff")
 require(display, r"display_driver\.hor_res\s*=\s*WAVESHARE_7B_H_RES", "LVGL width")

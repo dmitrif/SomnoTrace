@@ -8,6 +8,7 @@
 
 #include "board_waveshare_7b.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -227,6 +228,21 @@ esp_err_t waveshare_7b_set_brightness(uint8_t percent)
     if (attenuation > 97) attenuation = 97;
     uint8_t pwm = (uint8_t)(attenuation * 255U / 100U);
     return iox_write(IOX_REG_PWM, pwm);
+}
+
+esp_err_t waveshare_7b_set_panel_pclk(uint32_t hz)
+{
+    /* Keep this deliberately narrow: 18 MHz is SomnoTrace's redraw-safe
+     * clock, while 30.85 MHz comes from Waveshare's older 7B LVGL examples.
+     * The diagnostic endpoint must not become an arbitrary clock control. */
+    if (hz != 18000000U && hz != 30850000U) return ESP_ERR_INVALID_ARG;
+    if (!s_panel) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t err = esp_lcd_rgb_panel_set_pclk(s_panel, hz);
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "diagnostic RGB pixel clock requested: %" PRIu32 " Hz", hz);
+    }
+    return err;
 }
 
 esp_err_t waveshare_7b_prepare_sd(void)

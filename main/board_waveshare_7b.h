@@ -18,4 +18,5 @@ esp_err_t waveshare_7b_init(esp_lcd_panel_handle_t *panel,
                             esp_lcd_touch_handle_t *touch);
 esp_err_t waveshare_7b_set_backlight(bool on);
 esp_err_t waveshare_7b_set_brightness(uint8_t percent);
+esp_err_t waveshare_7b_set_panel_pclk(uint32_t hz);
 esp_err_t waveshare_7b_prepare_sd(void);
