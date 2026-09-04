@@ -28,7 +28,9 @@ SomnoTrace is the **first and only** open-source project that delivers:
 
 - **No more daily SD card swapping:** Therapy data is pulled wirelessly from your CPAP machine over Bluetooth — **no SD card needed in the machine at all**. Files are saved automatically to SomnoTrace's onboard MicroSD card.
 - **Automatic uploads:** Sends your completed sleep sessions directly to your local computer / NAS share (SMB) and [SleepHQ](https://sleephq.com) as soon as therapy stops.
-- **Built-in color screen & live breathing graphs:** View real-time airflow graphs, Wi-Fi status, battery level, and clock directly on the bedside device.
+- **Full bedside touch UI:** The 7-inch profile provides live therapy status and
+  breathing, card-backed History, setup, logs, and routine device controls on
+  the 1024x600 panel.
 - **Easy-to-use Web Dashboard:** Connect from your phone, tablet, or computer browser to see interactive sleep charts, AHI metrics, leak rates, and device settings.
 - **Camping Mode (Temporary Offline Use):** SomnoTrace can record therapy data without any internet connection — all you need is the AirSense 11 nearby. See the [Camping Mode guide](#camping-mode-offline-use) below for details.
 
@@ -36,21 +38,25 @@ SomnoTrace is the **first and only** open-source project that delivers:
 
 ## Hardware
 
-<img src="https://www.waveshare.com/media/catalog/product/cache/1/image/560x560/9df78eab33525d08d6e5fb8d27136e95/e/s/esp32-s3-touch-lcd-1.54-1.jpg" alt="Waveshare ESP32-S3 Touch LCD 1.54 Front" width="260" align="right" />
+The Rev B3 bedside profile targets the
+**Waveshare ESP32-S3-Touch-LCD-7B (SKU 31726)**:
 
-SomnoTrace runs on a compact, affordable, all-in-one development board:
-
-- **Hardware Board:** **[Waveshare ESP32-S3-Touch-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm?sku=33869)**  
-  *(The **touch variant with battery** is strongly recommended for portable bedside use).*
-- **Display:** 1.54" round-corner color screen with touch control.
-- **Storage:** MicroSD card slot for saving high-resolution sleep data and EDF files.
-- **Audio:** Onboard speaker for therapy alerts and status tones.
-- **Power:** USB Type-C or internal rechargeable battery with smart charging.
+- **Display:** Native 1024x600 landscape RGB565 panel with GT911 touch. The UI
+  is pure touch; no GPIO buttons are required for normal use.
+- **Processor and memory:** ESP32-S3-WROOM-1-N16R8 with 16 MB flash and 8 MB
+  octal PSRAM.
+- **Storage:** Onboard microSD slot for high-resolution recordings and EDF
+  files.
+- **Power:** Stable USB-C power is required for overnight recording; this board
+  profile does not rely on a battery.
+- **Alerts:** Visual and push alerts work. The 7B has no compatible onboard
+  alert speaker, so audible escalation reports unavailable on this target.
 
 **Additional accessories required:**
-- micro-SDHC card (8 GB minimum, 16 GB+ recommended; U1 or U3 speed class)
-  - goes inside the WaveShare board for internal file storage
-- USB-C data cable (for initial flashing and charging)
+
+- Reputable 16 GB or 32 GB microSDHC card, formatted as one FAT32 volume with
+  an MBR partition table; U1 is sufficient.
+- USB-C data cable for initial flashing.
 - USB-C charger (for overnight power)
 
 ---
@@ -69,42 +75,9 @@ SomnoTrace runs on a compact, affordable, all-in-one development board:
     - LOOKEE O2Ring
     - SleepHQ O2 Ring (non-Pro)
 
-<br clear="right"/>
-
-<details>
-<summary><b>🔋 Battery & Power Guidelines — important, please read</b></summary>
-
-> SomnoTrace is designed to run on **stable USB-C power**. The internal battery is a safety net, not a primary power source.
-
-**Always connect USB-C power** during overnight therapy recording. The battery exists for **power outage protection only** — if your electricity drops mid-session, the battery keeps the device alive long enough to finish writing data and shut down safely.
-
-**Running an entire night on battery is strongly discouraged** and may result in data loss. If the battery dies mid-session, the current recording may be incomplete or corrupted. SomnoTrace does its best to flush and close files on low battery, but a sudden power loss during active Bluetooth streaming can still lose the last few seconds of data.
-
-**Battery life (emergency use only):**
-
-| Screen Brightness | Approximate Runtime |
-|---|---|
-| Medium brightness | 2–3 hours |
-| LCD screen off | Up to 11 hours |
-
-These figures are **not** a recommendation to run unplugged overnight.
-
-</details>
-
-<details>
-<summary><b>🔘 Button Controls</b></summary>
-
-The board has three physical buttons on the side. Here's what each one does:
-
-| Button | Action | What It Does |
-|---|---|---|
-| **BOOT** (left) | Hold 5 seconds | Enters Wi-Fi setup mode (AP hotspot) for initial configuration or network changes. |
-| **POWER** (middle) | Hold 10 seconds | Powers off the device. |
-| **POWER** (middle) | Hold 2 seconds | Powers on the device (when off). |
-| **PLUS** (right) | Single click | Acknowledges and silences an interrupted therapy alert (if enabled). |
-| **PLUS** (right) | Double click | Starts or stops therapy on the AirSense 11 (toggle — same as pressing the machine's own button). |
-
-</details>
+The screen, including alert acknowledgement and therapy Start/Stop, is operated
+entirely by touch. The BOOT and RESET controls are needed only for flashing and
+hardware recovery.
 
 <details>
 <summary><b>🏕️ Camping Mode (Offline Use)</b></summary>
@@ -121,7 +94,7 @@ Camping mode is **not available out of the box**. The following must be true:
 ### How to Use It
 
 1. **Turn on your AirSense 11 first**, and wait for it to be ready (screen on, not in a startup/error state).
-2. **Then power on SomnoTrace** (plug in USB-C or hold the POWER button for 2 seconds).
+2. **Then power on SomnoTrace** by connecting stable USB-C power.
 3. SomnoTrace will detect that Wi-Fi is unavailable, connect to the AirSense 11 over Bluetooth, and estimate the current time using the stored clock drift.
 4. The screen will show an **"Estimated time"** notice — this is normal. Recording proceeds as usual.
 5. Therapy data is saved to the MicroSD card. If you have a local NAS/SMB share on a network without internet, uploads to that share will still work.
@@ -182,6 +155,10 @@ mouse as touch input to move between the persistent Home, History and Manage
 screens; the preview does not auto-cycle. Bluetooth, GT911 and SD hardware
 remain board-only tests.
 
+The preview includes the resumable six-step first-run checklist, rich
+eight-channel History, and the lazy retained Logs viewer. These exercise the
+same LVGL surfaces as the board, using simulated devices and card data.
+
 ```sh
 ./scripts/run-qemu-ui.sh --build
 ```
@@ -215,15 +192,29 @@ If you prefer building from source code, Docker is the only dependency:
 ./scripts/idf.sh -p /dev/ttyACM0 flash monitor
 ```
 
-For the experimental **Waveshare ESP32-S3-Touch-LCD-7B (1024x600)** profile,
-use `./scripts/build-7b.sh` and follow the
-[7B bring-up and test guide](docs/hardware/waveshare-7b.md). This profile uses
-the whole landscape display for three persistent screens: Home, History and
-Manage. Manage provides six local sections—Devices, Connectivity, Display,
-Alerts, Storage and System—for pairing and routine bedside controls. History
-also provides a bounded overnight flow overview for the selected night; deeper
-multi-channel zooming and advanced administration remain in the browser
-dashboard.
+For the **Waveshare ESP32-S3-Touch-LCD-7B (1024x600)** profile, use
+`./scripts/build-7b.sh` and follow the
+[7B bring-up and test guide](docs/hardware/waveshare-7b.md). Persistent Home,
+History, and Manage navigation uses the whole landscape display. Manage has
+eight destinations: Devices, Connectivity, Alerts, Uploads, Storage, System,
+Logs, and Advanced. Brightness, screen timeout, and therapy display behavior
+are part of System rather than a separate Display destination.
+
+History addresses the complete card index in seven-row pages and supports the
+available Flow, Pressure, Leak, Flow limit, Snore, SpO₂, Pulse, and Motion
+signals. It provides respiratory-event markers, a touch cursor, source-derived
+statistics for the visible window, Fit, pan, and stepped zoom through a
+night-quarter, 90-, 22-, 10-, and 5-minute views. Flow range reads prefer raw
+25 Hz data at 22 minutes or less, or whenever the view is no larger than one
+quarter of the night, and identify the 1 Hz envelope fallback when raw samples
+are not available for every contributing session.
+
+The 7B boots at the physically accepted 30.85 MHz RGB pixel clock with two
+PSRAM framebuffers and ten lines of DMA bounce buffering. The 18 MHz mode is
+retained only as a diagnostic A/B fallback. Integration credentials, OTA,
+card formatting, destructive recording operations, and other high-impact
+administration remain in the browser where the native UI does not yet expose
+them.
 
 ---
 
@@ -258,7 +249,7 @@ Connect with any FTP client (e.g., FileZilla) to `ftp://somnotrace.local`.
 | **SMB / NAS Network Upload** | ✅ Implemented | Direct file transfer to Windows, macOS, and Linux/Samba shared folders. |
 | **SleepHQ Cloud Upload** | ✅ Implemented | Direct HTTPS upload to SleepHQ with fast retry handling. |
 | **Web Dashboard & Mobile UI** | ✅ Implemented | Interactive sleep charts, AHI breakdown, status telemetry, and easy setup. |
-| **LCD & Audio Alert System** | ✅ Implemented | Bedside color screen, live flow graph, and speaker alert sounds. |
+| **Bedside Display & Alert System** | ✅ Implemented | Bedside touch UI, live flow graph, and visual/push alerts. Audible alerts remain board-dependent and are unavailable on the 7B. |
 | **Sub-Second NTP Clock Sync** | ✅ Implemented | Internet time sync eliminating AirSense 11 clock drift for pulse oximeter alignment. |
 | **Therapy Interruption Alarm** | ✅ Implemented | Push notifications via ntfy (phone/smartwatch/bed shaker) and escalating audio buzzer. |
 | **BLE → Wi-Fi RPC Proxy** | ✅ Implemented | Local HTTP endpoint for remote machine queries and smart home control. |
