@@ -2400,8 +2400,8 @@ static void action_task(void *arg)
         portENTER_CRITICAL(&s_state_lock);
         s_therapy_command_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
-        bsp_display_set_notice(result == ESP_OK ? "Therapy command sent" :
-                                                  "Therapy command failed");
+        if (result != ESP_OK)
+            bsp_display_set_notice("Therapy command failed");
     }
     vTaskDelete(NULL);
 }

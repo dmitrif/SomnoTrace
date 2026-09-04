@@ -381,6 +381,12 @@ require(as11, r"as11_ble_get_values.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response
 require(as11, r"therapy_command.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response\(\)",
         "serialized therapy RPC")
 require(display, r"s_therapy_command_busy", "single-flight therapy control")
+assert '"Therapy command sent"' not in display, \
+       "successful start/stop must not raise a redundant confirmation notice"
+require(display,
+        r"if\s*\(result\s*!=\s*ESP_OK\)\s*"
+        r"bsp_display_set_notice\(\"Therapy command failed\"\)",
+        "therapy command failures remain visible")
 require(display, r"s_wake_overlay.*?LV_EVENT_PRESSED", "wake-only touch interception")
 require(display, r"s_backlight_requested", "sticky backlight desired state")
 require(display, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD,\s*250\)",
