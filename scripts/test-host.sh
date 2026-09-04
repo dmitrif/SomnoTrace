@@ -27,6 +27,12 @@ cc -std=c11 -Wall -Wextra -D_DARWIN_C_SOURCE \
     -o "${TEST_DIR}/as11_time_test"
 "${TEST_DIR}/as11_time_test"
 
+cc -std=c11 -Wall -Wextra \
+    -I scripts/test_include -I main \
+    scripts/first_run_setup_test.c main/first_run_setup_model.c \
+    -o "${TEST_DIR}/first_run_setup_test"
+"${TEST_DIR}/first_run_setup_test"
+
 python3 scripts/waveshare_7b_contract_test.py
 python3 scripts/qemu_ui_contract_test.py
 python3 scripts/font_asset_contract_test.py
@@ -42,4 +48,5 @@ python3 scripts/history_trace_channels_contract_test.py
 python3 scripts/rapid_session_lifecycle_contract_test.py
 python3 scripts/clock_snapshot_contract_test.py
 python3 scripts/live_flow_units_contract_test.py
+python3 scripts/first_run_setup_contract_test.py
 echo "All synthetic host tests passed"

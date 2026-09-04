@@ -48,6 +48,7 @@ endif()
 idf_component_register(SRCS ${SOMNOTRACE_MAIN_SRC} ${SOMNOTRACE_BSP_SRCS} "net_provision.c" "as11_ble.c"
                            "sd_storage.c" "session_writer.c" "time_sync.c"
                            "post_therapy.c" "edf_gen.c" "log_stream.c" "device_settings.c"
+                           "first_run_setup.c" "first_run_setup_model.c"
                            "psram_task.c" "session_graph.c" "nvs_writer.c"
                            "as11_time.c"
                            "crash_diag.c"
