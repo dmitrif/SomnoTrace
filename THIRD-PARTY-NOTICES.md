@@ -117,6 +117,24 @@ copyrightable material is ever determined to have been incorporated.
 - **Used for:** Display UI typeface
 - **License:** SIL Open Font License 1.1 (OFL)
 
+## Space Grotesk Font
+
+- **Project:** Space Grotesk
+- **Source:** https://github.com/google/fonts/tree/205859f680703e449fe05dce0f792cc041d6dc89/ofl/spacegrotesk
+- **Used for:** Waveshare 7-inch bedside UI text and display values
+- **License:** SIL Open Font License 1.1 (OFL)
+- **Notes:** The pinned variable source, exact OFL text, and generated subset
+  provenance are retained under `assets/fonts/`.
+
+## IBM Plex Mono Font
+
+- **Project:** IBM Plex Mono
+- **Source:** https://github.com/google/fonts/tree/205859f680703e449fe05dce0f792cc041d6dc89/ofl/ibmplexmono
+- **Used for:** Waveshare 7-inch bedside UI labels, axes, and tabular data
+- **License:** SIL Open Font License 1.1 (OFL)
+- **Notes:** The pinned Medium and SemiBold sources, exact OFL text, and
+  generated subset provenance are retained under `assets/fonts/`.
+
 ## esp-idf-ftpServer
 
 - **Project:** esp-idf-ftpServer

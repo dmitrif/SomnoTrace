@@ -17,6 +17,34 @@ elseif(CONFIG_SOMNOTRACE_BOARD_QEMU)
     list(APPEND SOMNOTRACE_DISPLAY_REQUIRES esp_lcd_qemu_rgb)
 endif()
 
+if(CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B OR CONFIG_SOMNOTRACE_BOARD_QEMU)
+    list(APPEND SOMNOTRACE_BSP_SRCS
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_13.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_15.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_17.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_19.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_23.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_29.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_medium_34.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_13.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_15.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_17.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_19.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_23.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_29.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_32.c"
+        "../assets/fonts/generated/somnotrace_space_grotesk_semibold_34.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_medium_11.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_medium_13.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_medium_15.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_semibold_11.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_semibold_13.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_semibold_15.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_semibold_26.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_semibold_29.c"
+        "../assets/fonts/generated/somnotrace_ibm_plex_mono_semibold_34.c")
+endif()
+
 idf_component_register(SRCS ${SOMNOTRACE_MAIN_SRC} ${SOMNOTRACE_BSP_SRCS} "net_provision.c" "as11_ble.c"
                            "sd_storage.c" "session_writer.c" "time_sync.c"
                            "post_therapy.c" "edf_gen.c" "log_stream.c" "device_settings.c"
