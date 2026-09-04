@@ -1832,7 +1832,15 @@ session_writer_t *session_writer_start(void)
     }
 
     s->active = true;
-    sd_storage_recording_begin();
+    if (!sd_storage_recording_begin()) {
+        ESP_LOGW(TAG, "cannot start session: microSD reader or maintenance active");
+        s->active = false;
+        xSemaphoreGive(s_active_mutex);
+        batch_pool_destroy(s);
+        vSemaphoreDelete(s->fill_mutex);
+        free(s);
+        return NULL;
+    }
     s->recording_claim_held = true;
     sw_cmd_t cmd = { .type = SW_CMD_OPEN, .s = s };
     if (!storage_queue_send_open(&cmd, 100)) {

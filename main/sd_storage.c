@@ -91,6 +91,7 @@ static SemaphoreHandle_t s_lease_mutex = NULL;   /* guards the counters  */
 static SemaphoreHandle_t s_export_sem = NULL;    /* EXPORT/DESTRUCTIVE   */
 static volatile int s_recording = 0;
 static volatile int s_uploading = 0;
+static volatile int s_destructive = 0;
 
 static void lease_init_once(void)
 {
@@ -303,13 +304,18 @@ bool sd_storage_reserve_for_recording(void)
 
 /* ── Arbitration ──────────────────────────────────────────────────── */
 
-void sd_storage_recording_begin(void)
+bool sd_storage_recording_begin(void)
 {
     lease_init_once();
-    if (!s_lease_mutex) { s_recording++; return; }
+    if (!s_lease_mutex) return false;
     xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
+    if (s_uploading > 0 || s_destructive > 0) {
+        xSemaphoreGive(s_lease_mutex);
+        return false;
+    }
     s_recording++;
     xSemaphoreGive(s_lease_mutex);
+    return true;
 }
 
 void sd_storage_recording_end(void)
@@ -334,24 +340,23 @@ bool sd_storage_lease_acquire(sd_lease_t role, uint32_t timeout_ms)
 
     switch (role) {
     case SD_LEASE_DESTRUCTIVE:
-        /* Never destroy data while it is being produced or consumed. */
-        if (s_recording > 0) {
-            ESP_LOGW(TAG, "destructive op refused: recording in progress");
-            return false;
-        }
-        if (s_uploading > 0) {
-            ESP_LOGW(TAG, "destructive op refused: upload in progress");
-            return false;
-        }
+        /* Take the file-operation gate first, then publish the destructive
+         * claim under the same mutex used by recording_begin(). This closes
+         * the old check-then-act window where recording could begin after the
+         * final check but before destructive I/O started. */
         if (xSemaphoreTakeRecursive(s_export_sem, wait) != pdTRUE) {
             ESP_LOGW(TAG, "destructive op refused: export in progress");
             return false;
         }
-        if (s_recording > 0) {   /* re-check after acquiring */
+        xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
+        if (s_recording > 0 || s_uploading > 0 || s_destructive > 0) {
+            xSemaphoreGive(s_lease_mutex);
             xSemaphoreGiveRecursive(s_export_sem);
-            ESP_LOGW(TAG, "destructive op refused: recording started");
+            ESP_LOGW(TAG, "destructive op refused: card owner active");
             return false;
         }
+        s_destructive++;
+        xSemaphoreGive(s_lease_mutex);
         return true;
 
     case SD_LEASE_EXPORT:
@@ -365,13 +370,20 @@ bool sd_storage_lease_acquire(sd_lease_t role, uint32_t timeout_ms)
         return true;
 
     case SD_LEASE_UPLOAD:
-        /* Held for the duration of the upload so a day can never be read
-         * while it is being replaced by a rebuild. */
+        /* The reader claim and recording claim are mutually exclusive under
+         * s_lease_mutex. Whichever publishes first wins; there is no gap in
+         * which a session can start after History's readiness check. */
         if (xSemaphoreTakeRecursive(s_export_sem, wait) != pdTRUE) {
             ESP_LOGW(TAG, "upload lease busy (export in progress)");
             return false;
         }
         xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
+        if (s_recording > 0 || s_destructive > 0) {
+            xSemaphoreGive(s_lease_mutex);
+            xSemaphoreGiveRecursive(s_export_sem);
+            ESP_LOGW(TAG, "upload lease refused: recording in progress");
+            return false;
+        }
         s_uploading++;
         xSemaphoreGive(s_lease_mutex);
         return true;
@@ -385,7 +397,12 @@ void sd_storage_lease_release(sd_lease_t role)
 
     switch (role) {
     case SD_LEASE_EXPORT:
+        xSemaphoreGiveRecursive(s_export_sem);
+        break;
     case SD_LEASE_DESTRUCTIVE:
+        xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
+        if (s_destructive > 0) s_destructive--;
+        xSemaphoreGive(s_lease_mutex);
         xSemaphoreGiveRecursive(s_export_sem);
         break;
     case SD_LEASE_UPLOAD:

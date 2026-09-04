@@ -100,7 +100,8 @@ bool sd_storage_reserve_for_recording(void);
  *   DESTRUCTIVE — recreate/delete/reset/format.  Refused while recording
  *                 or while an export or upload is in progress.
  *   UPLOAD      — reads a day folder.  Excluded from concurrent EXPORT so
- *                 it can never read a day that is being replaced.
+ *                 it can never read a day that is being replaced, and from
+ *                 recording so a long reader cannot contend with raw writes.
  */
 typedef enum {
     SD_LEASE_EXPORT = 0,
@@ -108,9 +109,10 @@ typedef enum {
     SD_LEASE_UPLOAD,
 } sd_lease_t;
 
-/* Mark a therapy recording as active/inactive (called by the session
- * writer).  Destructive operations are refused while this is non-zero. */
-void sd_storage_recording_begin(void);
+/* Atomically claim/release the card for a therapy recording (called by the
+ * session writer). The begin claim fails while an UPLOAD reader or
+ * DESTRUCTIVE operation owns the card; callers may retry after it finishes. */
+bool sd_storage_recording_begin(void);
 void sd_storage_recording_end(void);
 bool sd_storage_recording_active(void);
 
