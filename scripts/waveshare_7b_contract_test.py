@@ -383,6 +383,9 @@ require(as11, r"therapy_command.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response\(\)
 require(display, r"s_therapy_command_busy", "single-flight therapy control")
 assert '"Therapy command sent"' not in display, \
        "successful start/stop must not raise a redundant confirmation notice"
+for toast in ('"Starting therapy..."', '"Stopping therapy..."'):
+    assert toast not in display, \
+           "therapy progress belongs in the hero card, not a toast"
 require(display,
         r"if\s*\(result\s*!=\s*ESP_OK\)\s*"
         r"bsp_display_set_notice\(\"Therapy command failed\"\)",

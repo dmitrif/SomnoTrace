@@ -2428,7 +2428,6 @@ static void action_cb(lv_event_t *event)
             set_manage_section(0);
             return;
         }
-        bsp_display_set_notice(start ? "Starting therapy..." : "Stopping therapy...");
         if (xTaskCreate(action_task, "ui_therapy", 4096,
                         (void *)(intptr_t)(start ? 5 : 6), 4, NULL) != pdPASS) {
             portENTER_CRITICAL(&s_state_lock);
