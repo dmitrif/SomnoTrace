@@ -58,11 +58,23 @@ python3 scripts/psram_task_lifecycle_contract_test.py
 python3 scripts/history_storage_lifecycle_contract_test.py
 python3 scripts/history_trace_channels_contract_test.py
 python3 scripts/touch_history_service_contract_test.py
+python3 scripts/touch_history_ui_contract_test.py
+python3 scripts/touch_history_controller_contract_test.py
 python3 scripts/rapid_session_lifecycle_contract_test.py
+python3 scripts/sd_recording_arbitration_contract_test.py
 python3 scripts/clock_snapshot_contract_test.py
 python3 scripts/live_flow_units_contract_test.py
 python3 scripts/first_run_setup_contract_test.py
+python3 scripts/first_run_setup_ui_contract_test.py
+python3 scripts/first_run_setup_runtime_contract_test.py
+python3 scripts/first_run_setup_lifecycle_contract_test.py
 python3 scripts/timezone_catalog_contract_test.py
+python3 scripts/netprov_scan_contract_test.py
+python3 scripts/oximetry_contract_test.py
 python3 scripts/log_stream_retained_contract_test.py
+python3 scripts/log_stream_recent_contract_test.py
+python3 scripts/log_stream_resilience_contract_test.py
 python3 scripts/logs_touch_ui_contract_test.py
+python3 scripts/touch_logs_ui_contract_test.py
+python3 scripts/manage_detail_lifecycle_contract_test.py
 echo "All synthetic host tests passed"

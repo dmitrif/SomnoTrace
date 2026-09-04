@@ -56,7 +56,7 @@ for removed in ("s_scan_running", "s_scan_done", "s_scan_json"):
     if removed in SOURCE:
         raise AssertionError(f"legacy racy/one-shot scan state remains: {removed}")
 
-require(r"make_touch_button\(section,\s*594,\s*14,\s*134,\s*48,"
+require(r"make_touch_button\(section,\s*616,\s*14,\s*134,\s*48,"
         r"\s*\"Scan\"", UI, "Connectivity header Scan geometry changed")
 require(r"s_wifi_scan_row.*?LV_OBJ_FLAG_HIDDEN", UI,
         "nearby-network row must be absent from the initial frame")

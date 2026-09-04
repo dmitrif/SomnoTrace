@@ -37,10 +37,9 @@ for destination in (
 assert "build_logs_section" not in BSP, "legacy Logs builder remains compiled"
 assert "refresh_logs_widgets" not in BSP, "legacy Logs refresh remains compiled"
 assert not re.search(r"\bs_logs_", BSP), "legacy Logs widget globals remain"
-require(rail,
-        r"s_manage_scrolls\[MANAGE_LOGS\]\s*=\s*"
-        r"s_manage_sections\[MANAGE_LOGS\]",
-        "placeholder section is safe for shared scrolling checks")
+require(BSP,
+        r"s_manage_scrolls\[MANAGE_LOGS\]\s*=\s*destination",
+        "lazy Logs destination is safe for shared scrolling checks")
 
 # Both hardware targets compile the presentation and controller, while the
 # compact-board build remains unchanged.
@@ -56,19 +55,27 @@ for source in ("touch_logs_ui.c", "touch_logs_controller.c"):
 active = function_body(BSP, "set_active_page", "nav_cb")
 manage = function_body(BSP, "set_manage_section", "manage_section_cb")
 require(active,
-        r"page\s*==\s*2.*?MANAGE_LOGS.*?touch_logs_controller_show.*?"
-        r"else\s*\{\s*touch_logs_controller_hide",
+        r"if\s*\(page\s*==\s*2\)\s*ensure_manage_destination\(\);\s*"
+        r"else\s+touch_logs_controller_hide\(\);",
         "bottom-navigation show/hide lifecycle")
 require(manage,
-        r"s_active_manage_section\s*==\s*MANAGE_LOGS.*?"
-        r"touch_logs_controller_hide.*?section\s*==\s*MANAGE_LOGS.*?"
-        r"s_active_page\s*==\s*2.*?touch_logs_controller_show",
-        "Manage-destination show/hide lifecycle")
+        r"teardown_rendered_manage_destination\(\).*?"
+        r"s_active_manage_section\s*=\s*section.*?"
+        r"ensure_manage_destination\(\)",
+        "Manage-destination teardown/build lifecycle")
+require(BSP,
+        r"build_manage_destination.*?case\s+MANAGE_LOGS:.*?"
+        r"touch_logs_controller_show\(destination\)",
+        "lazy destination creates and shows Logs")
+require(BSP,
+        r"teardown_rendered_manage_destination.*?"
+        r"section\s*==\s*MANAGE_LOGS.*?touch_logs_controller_hide\(\)",
+        "destination teardown hides Logs before release")
 assert "touch_logs_controller_show" not in rail, (
     "Logs surface must not be constructed by build_manage_page"
 )
 require(BSP,
-        r"if\s*\(s_active_manage_section\s*==\s*MANAGE_LOGS\)\s*\{\s*"
+        r"if\s*\(section\s*==\s*MANAGE_LOGS\)\s*\{\s*"
         r"touch_logs_controller_refresh\(state->sd_ready\);\s*return;",
         "refresh is routed only for the visible Logs destination")
 require(CONTROLLER,

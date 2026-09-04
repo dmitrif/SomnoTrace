@@ -93,9 +93,17 @@ self_deleting = {
 assert self_deleting <= created, "self-deleting task missing from helper audit"
 for filename, task_name in sorted(self_deleting):
     body = function_body(sources[filename], task_name)
-    assert "psram_task_delete(NULL)" in body, (
-        f"{filename}:{task_name} has no reclaiming self-delete path"
-    )
+    if (filename, task_name) == ("log_stream.c", "ws_forwarder_task"):
+        exit_helper = function_body(
+            sources[filename], "ws_forwarder_exit"
+        )
+        assert "ws_forwarder_exit()" in body
+        assert "ws_forwarder_clear_current()" in exit_helper
+        assert "psram_task_delete(NULL)" in exit_helper
+    else:
+        assert "psram_task_delete(NULL)" in body, (
+            f"{filename}:{task_name} has no reclaiming self-delete path"
+        )
 
 # OTA workers use ordinary xTaskCreate and must retain ordinary deletion.
 for task_name in ("ota_flash_task", "ota_url_task"):
