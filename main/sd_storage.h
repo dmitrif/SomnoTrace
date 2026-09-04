@@ -24,6 +24,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #define SD_MOUNT_POINT   "/somnotrace"
@@ -69,6 +70,13 @@ bool sd_storage_is_ready(void);
  * endpoint caches its copy for 10 minutes, which is far too stale to gate
  * a therapy recording on. */
 esp_err_t sd_storage_get_free(uint64_t *free_bytes, uint64_t *total_bytes);
+
+/* Return the last successful free-space query without touching FATFS or the
+ * SDMMC driver. Intended for frequently-polled status surfaces, where a card
+ * read would contend with recording/export and may require scarce DMA memory.
+ * Returns false until the first successful query, and after unmount/format
+ * invalidates the cached sample. */
+bool sd_storage_get_cached_free(uint64_t *free_bytes, uint64_t *total_bytes);
 
 /* Space policy for raw capture.  Raw session data is the source of truth;
  * SDCARD/ is derived and regenerable, so derived output is reclaimed before

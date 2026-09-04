@@ -32,11 +32,9 @@
 #include "therapy_alert.h"
 #include "edf_gen.h"
 #include "sd_storage.h"
-#include "ff.h"
 #include "log_stream.h"
 #include "device_settings.h"
 #include "session_graph.h"
-#include "session_writer.h"
 #include "oximetry_http.h"
 
 #include <string.h>
@@ -902,19 +900,13 @@ static esp_err_t favicon_get_handler(httpd_req_t *req)
 }
 
 /* ── Cached status data ────────────────────────────────────────────
- * These values rarely change but are expensive to query (SD I/O for
- * f_getfree, flash I/O for NVS).  Caching avoids contending with large
- * file downloads on the shared SD bus during 3-second status polls. */
+ * Flash-backed configuration changes rarely. SD capacity has its own
+ * producer-maintained cache in sd_storage; this frequently-polled endpoint
+ * must never turn a missing/stale sample into synchronous card I/O. */
 
-#define STATUS_CACHE_SD_MS    600000  /* refresh SD free space every 10 min */
 #define STATUS_CACHE_NVS_MS   120000  /* refresh NVS-backed settings every 2 min */
 
 static struct {
-    /* SD card */
-    uint64_t sd_total;
-    uint64_t sd_free;
-    bool     sd_valid;
-    TickType_t sd_tick;
     /* NVS config */
     struct netprov_config cfg;
     bool     cfg_valid;
@@ -924,24 +916,6 @@ static struct {
     char     ntp_srv[64];
     TickType_t tz_tick;
 } s_status_cache;
-
-static void status_cache_refresh_sd(void)
-{
-    if (!sd_storage_is_ready()) {
-        s_status_cache.sd_valid = false;
-        return;
-    }
-    FATFS *fs = NULL;
-    DWORD free_clst = 0;
-    if (f_getfree("0:", &free_clst, &fs) == FR_OK && fs) {
-        s_status_cache.sd_total = (uint64_t)fs->n_fatent * fs->csize * fs->ssize;
-        s_status_cache.sd_free  = (uint64_t)free_clst * fs->csize * fs->ssize;
-        s_status_cache.sd_valid = true;
-    } else {
-        s_status_cache.sd_valid = false;
-    }
-    s_status_cache.sd_tick = xTaskGetTickCount();
-}
 
 static void status_cache_refresh_nvs(void)
 {
@@ -955,12 +929,6 @@ cJSON *netprov_build_status_json(void)
 {
     TickType_t now = xTaskGetTickCount();
     uint32_t ms = portTICK_PERIOD_MS;
-
-    /* Refresh SD free space at most once per STATUS_CACHE_SD_MS */
-    if (!s_status_cache.sd_valid ||
-        (uint32_t)((now - s_status_cache.sd_tick) * ms) >= STATUS_CACHE_SD_MS) {
-        status_cache_refresh_sd();
-    }
 
     /* Refresh NVS-backed settings at most once per STATUS_CACHE_NVS_MS */
     if (!s_status_cache.cfg_valid ||
@@ -1101,16 +1069,6 @@ cJSON *netprov_build_status_json(void)
     cJSON *alert = cJSON_AddObjectToObject(resp, "alert");
     cJSON_AddStringToObject(alert, "state", therapy_alert_state_str(therapy_alert_get_state()));
 
-    {
-        char *pending = NULL;
-        if (session_writer_pending_export_json(&pending) == ESP_OK && pending) {
-            cJSON *parsed = cJSON_Parse(pending);
-            if (parsed) {
-                cJSON_AddItemToObject(resp, "pending_export", parsed);
-            }
-            free(pending);
-        }
-    }
     cJSON_AddNumberToObject(resp, "ih_min", (double)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(resp, "ih_lfb", (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(resp, "ps_free", (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -1118,10 +1076,12 @@ cJSON *netprov_build_status_json(void)
     cJSON_AddNumberToObject(resp, "ps_lfb", (double)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     cJSON_AddNumberToObject(resp, "tasks", (double)uxTaskGetNumberOfTasks());
 
-    /* SD card free space (from cache — no SD I/O on every poll) */
-    if (s_status_cache.sd_valid) {
-        cJSON_AddNumberToObject(resp, "sd_total", (double)s_status_cache.sd_total);
-        cJSON_AddNumberToObject(resp, "sd_free", (double)s_status_cache.sd_free);
+    /* A producer-owned snapshot: this call is bounded RAM access only. */
+    uint64_t sd_total = 0;
+    uint64_t sd_free = 0;
+    if (sd_storage_get_cached_free(&sd_free, &sd_total)) {
+        cJSON_AddNumberToObject(resp, "sd_total", (double)sd_total);
+        cJSON_AddNumberToObject(resp, "sd_free", (double)sd_free);
     }
 
     return resp;

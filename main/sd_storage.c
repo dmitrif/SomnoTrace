@@ -46,6 +46,29 @@ static const char *TAG = "sd_storage";
 
 static bool s_mounted = false;
 static sdmmc_card_t *s_card = NULL;
+/* Capacity is sampled by explicit storage work, never by a status request.
+ * Keep the pair behind one critical section: uint64_t reads/writes can tear on
+ * the ESP32-S3's 32-bit cores. */
+static portMUX_TYPE s_capacity_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint64_t s_cached_free_bytes;
+static uint64_t s_cached_total_bytes;
+static bool s_capacity_cache_valid;
+
+static void capacity_cache_invalidate(void)
+{
+    portENTER_CRITICAL(&s_capacity_lock);
+    s_capacity_cache_valid = false;
+    portEXIT_CRITICAL(&s_capacity_lock);
+}
+
+static void capacity_cache_store(uint64_t free_bytes, uint64_t total_bytes)
+{
+    portENTER_CRITICAL(&s_capacity_lock);
+    s_cached_free_bytes = free_bytes;
+    s_cached_total_bytes = total_bytes;
+    s_capacity_cache_valid = true;
+    portEXIT_CRITICAL(&s_capacity_lock);
+}
 
 /* ── Space policy thresholds ──────────────────────────────────────────
  * A night of raw stream data is ~3-4 MB, plus derived EDFs.  The reserve
@@ -116,6 +139,7 @@ static void sdmmc_config_default(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
 
 esp_err_t sd_storage_init(void)
 {
+    capacity_cache_invalidate();
 #if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
     esp_err_t prep = waveshare_7b_prepare_sd();
     if (prep != ESP_OK) {
@@ -182,6 +206,11 @@ esp_err_t sd_storage_init(void)
     mkdir(SD_SDCARD_DATALOG, 0775);
     mkdir(SD_SDCARD_SETTINGS, 0775);
 
+    uint64_t initial_free = 0;
+    uint64_t initial_total = 0;
+    if (sd_storage_get_free(&initial_free, &initial_total) != ESP_OK)
+        ESP_LOGW(TAG, "initial free-space query failed");
+
     ESP_LOGI(TAG, "SD mounted at %s, directory tree ready", SD_MOUNT_POINT);
 
     return ESP_OK;
@@ -204,11 +233,25 @@ esp_err_t sd_storage_get_free(uint64_t *free_bytes, uint64_t *total_bytes)
     if (f_getfree("0:", &free_clst, &fs) != FR_OK || !fs) {
         return ESP_FAIL;
     }
-    if (total_bytes)
-        *total_bytes = (uint64_t)fs->n_fatent * fs->csize * fs->ssize;
-    if (free_bytes)
-        *free_bytes = (uint64_t)free_clst * fs->csize * fs->ssize;
+    uint64_t total = (uint64_t)fs->n_fatent * fs->csize * fs->ssize;
+    uint64_t free = (uint64_t)free_clst * fs->csize * fs->ssize;
+    capacity_cache_store(free, total);
+    if (total_bytes) *total_bytes = total;
+    if (free_bytes) *free_bytes = free;
     return ESP_OK;
+}
+
+bool sd_storage_get_cached_free(uint64_t *free_bytes, uint64_t *total_bytes)
+{
+    bool valid;
+    portENTER_CRITICAL(&s_capacity_lock);
+    valid = s_capacity_cache_valid;
+    if (valid) {
+        if (free_bytes) *free_bytes = s_cached_free_bytes;
+        if (total_bytes) *total_bytes = s_cached_total_bytes;
+    }
+    portEXIT_CRITICAL(&s_capacity_lock);
+    return valid;
 }
 
 /* Reclaim derived (regenerable) output so raw capture can proceed.
@@ -355,6 +398,7 @@ void sd_storage_lease_release(sd_lease_t role)
 esp_err_t sd_storage_format(void)
 {
     ESP_LOGW(TAG, "format: formatting SD card — ALL DATA WILL BE LOST");
+    capacity_cache_invalidate();
 
     /* Report the card as unavailable for the whole operation: the volume is
      * unmounted while f_mkfs runs, and other subsystems (log flush, oximetry
@@ -447,6 +491,11 @@ esp_err_t sd_storage_format(void)
     mkdir(SD_SDCARD_DATALOG, 0775);
     mkdir(SD_SDCARD_SETTINGS, 0775);
 
+    uint64_t formatted_free = 0;
+    uint64_t formatted_total = 0;
+    if (sd_storage_get_free(&formatted_free, &formatted_total) != ESP_OK)
+        ESP_LOGW(TAG, "format: initial free-space query failed");
+
     ESP_LOGI(TAG, "format: SD card formatted and directory tree recreated");
     bsp_display_set_sd_ready(true);
     return ESP_OK;
@@ -454,6 +503,7 @@ esp_err_t sd_storage_format(void)
 
 void sd_storage_deinit(void)
 {
+    capacity_cache_invalidate();
     if (!s_mounted || !s_card) return;
 
     /* The VFS unmount runs f_unmount, which syncs the FAT window and issues a
