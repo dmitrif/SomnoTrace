@@ -562,10 +562,31 @@ require(history_task_source,
         r"s_services\.history_result\s*=\s*result;",
         "failed History metadata refresh clears stale rows")
 require(history_task_source,
-        r"s_services\.history_busy\s*=\s*false;\s*"
+        r"s_services\.history_busy\s*=\s*rerun;\s*"
         r"s_services\.history_version\+\+;\s*"
         r"s_services\.history_metadata_version\+\+;",
         "metadata completion publishes its own version")
+require(display,
+        r"static\s+unsigned\s+s_history_refresh_generation\s*=\s*1;.*?"
+        r"static\s+unsigned\s+s_history_refresh_started_generation;.*?"
+        r"static\s+unsigned\s+s_history_refresh_completed_generation;",
+        "boot starts with a stale History metadata generation")
+require(history_load_source,
+        r"refresh_required\s*=\s*s_history_refresh_generation\s*!=\s*"
+        r"s_history_refresh_completed_generation;.*?"
+        r"refresh_required\s*&&\s*s_history_worker_task.*?"
+        r"s_history_refresh_started_generation\s*=\s*"
+        r"s_history_refresh_generation;",
+        "History page entry only starts a stale metadata generation")
+require(history_load_source,
+        r"static void request_history_refresh\(void\).*?"
+        r"s_history_refresh_generation\+\+;.*?start_history_load\(\);",
+        "manual History refresh forces a new metadata generation")
+require(history_task_source,
+        r"s_history_refresh_completed_generation\s*=\s*load_generation;.*?"
+        r"bool\s+rerun\s*=\s*s_history_refresh_generation\s*!=\s*"
+        r"load_generation.*?xTaskNotifyGive\(s_history_worker_task\);",
+        "metadata worker preserves a stale generation requested in flight")
 require(history_refresh_source,
         r"metadata_changed\s*=\s*services->history_metadata_version\s*!=\s*"
         r"s_seen_history_metadata_version;.*?"
@@ -589,7 +610,9 @@ require(therapy_state_source,
         r"portENTER_CRITICAL\(&s_state_lock\);\s*"
         r"bool\s+changed\s*=\s*s_state\.therapy\s*!=\s*active;.*?"
         r"s_state\.therapy\s*=\s*active;.*?"
-        r"bool\s+refresh_history\s*=\s*changed\s*&&\s*!active\s*&&\s*"
+        r"therapy_finished\s*=\s*changed\s*&&\s*!active;.*?"
+        r"if\s*\(therapy_finished\)\s*s_history_refresh_generation\+\+;.*?"
+        r"bool\s+refresh_history\s*=\s*therapy_finished\s*&&\s*"
         r"s_active_page\s*==\s*1;\s*"
         r"portEXIT_CRITICAL\(&s_state_lock\);.*?"
         r"if\s*\(refresh_history\)\s*start_history_load\(\);",

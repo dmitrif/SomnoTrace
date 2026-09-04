@@ -481,6 +481,12 @@ static unsigned s_seen_ox_version;
 static int s_history_selection = -1;
 static char s_history_selected_day[9];
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
+/* Generation 1 is the boot-time cold cache. Page entry only starts a worker
+ * when this generation has not completed, so revisiting History is an
+ * immediate cached page switch rather than another microSD directory scan. */
+static unsigned s_history_refresh_generation = 1;
+static unsigned s_history_refresh_started_generation;
+static unsigned s_history_refresh_completed_generation;
 static bool s_history_trace_worker_running;
 static char s_history_trace_requested_day[9];
 static touch_history_channel_t s_history_trace_requested_channel;
@@ -1301,6 +1307,10 @@ static void history_task(void *arg)
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        unsigned load_generation;
+        portENTER_CRITICAL(&s_state_lock);
+        load_generation = s_history_refresh_started_generation;
+        portEXIT_CRITICAL(&s_state_lock);
         touch_history_day_t *local = heap_caps_calloc(
             HISTORY_MAX_DAYS, sizeof(*local), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!local) local = calloc(HISTORY_MAX_DAYS, sizeof(*local));
@@ -1312,6 +1322,7 @@ static void history_task(void *arg)
         if (result == ESP_OK) {
             memcpy(s_services.history, local, sizeof(s_services.history));
             s_services.history_count = count;
+            s_history_refresh_completed_generation = load_generation;
             /* Metadata can represent a newly finalised session in an
              * existing noon-day. Invalidate the one compact trace cache so
              * the selected channel is never stale after Refresh. */
@@ -1328,11 +1339,23 @@ static void history_task(void *arg)
             s_services.history_count = 0;
         }
         s_services.history_result = result;
-        s_services.history_busy = false;
+        /* A therapy stop can make metadata stale while this read is still in
+         * flight. Queue exactly one follow-up generation rather than either
+         * losing the new night or spinning retries after an ordinary error. */
+        bool rerun = s_history_refresh_generation != load_generation &&
+                     s_history_refresh_generation !=
+                         s_history_refresh_completed_generation &&
+                     !s_state.therapy && s_history_worker_task;
+        if (rerun) {
+            s_history_refresh_started_generation =
+                s_history_refresh_generation;
+        }
+        s_services.history_busy = rerun;
         s_services.history_version++;
         s_services.history_metadata_version++;
         portEXIT_CRITICAL(&s_state_lock);
         free(local);
+        if (rerun) xTaskNotifyGive(s_history_worker_task);
     }
 }
 #endif
@@ -1348,7 +1371,9 @@ static void start_history_load(void)
     bool recording_active = bsp_display_is_therapy_active();
     portENTER_CRITICAL(&s_state_lock);
     bool busy = s_services.history_busy;
-    if (!busy && recording_active) {
+    bool refresh_required = s_history_refresh_generation !=
+                            s_history_refresh_completed_generation;
+    if (!busy && refresh_required && recording_active) {
         /* Never wait through an active therapy session. Keep an existing
          * cached list visible; on a first visit publish the truthful busy
          * state immediately and let the next post-stop entry refresh it. */
@@ -1357,10 +1382,11 @@ static void start_history_load(void)
             s_services.history_version++;
             s_services.history_metadata_version++;
         }
-    } else if (!busy && s_history_worker_task) {
+    } else if (!busy && refresh_required && s_history_worker_task) {
         s_services.history_busy = true;
+        s_history_refresh_started_generation = s_history_refresh_generation;
         notify_worker = true;
-    } else if (!busy) {
+    } else if (!busy && refresh_required) {
         s_services.history_result = ESP_ERR_NO_MEM;
         s_services.history_version++;
         s_services.history_metadata_version++;
@@ -1371,6 +1397,16 @@ static void start_history_load(void)
     if (worker_unavailable)
         bsp_display_set_notice("Unable to start history refresh");
 #endif
+}
+
+static void request_history_refresh(void)
+{
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+    portENTER_CRITICAL(&s_state_lock);
+    s_history_refresh_generation++;
+    portEXIT_CRITICAL(&s_state_lock);
+#endif
+    start_history_load();
 }
 
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
@@ -2100,7 +2136,7 @@ static void history_row_cb(lv_event_t *event)
 static void refresh_cb(lv_event_t *event)
 {
     (void)event;
-    start_history_load();
+    request_history_refresh();
 }
 
 static void history_channel_cb(lv_event_t *event)
@@ -6276,7 +6312,11 @@ void bsp_display_set_therapy_active(bool active)
     bool changed = s_state.therapy != active;
     s_state.therapy = active;
     if (!active) s_state.leak = NAN;
-    bool refresh_history = changed && !active && s_active_page == 1;
+    bool therapy_finished = changed && !active;
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+    if (therapy_finished) s_history_refresh_generation++;
+#endif
+    bool refresh_history = therapy_finished && s_active_page == 1;
     portEXIT_CRITICAL(&s_state_lock);
     if (changed) bsp_display_restart_idle_timeout();
     bsp_display_apply_backlight_policy(false);
