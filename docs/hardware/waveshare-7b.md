@@ -98,9 +98,10 @@ dist/somnotrace-waveshare-7b-test-full.bin
 8. Open **Manage > Devices**, tap **Scan** for AirSense 11, choose the machine,
    and tap **Pair**. Enter the four-digit code shown on the AirSense using the
    on-screen keypad, then tap **Confirm code**.
-9. Open **History** and tap **Refresh history**. A new night appears after the
-   first completed therapy session. Selecting it shows the night's summary and
-   lazily loads its overnight flow overview without blocking touch input.
+9. Open **History**. It automatically refreshes, selects the newest available
+   night, and lazily loads that night's summary and overnight flow overview
+   without blocking touch input. A new night appears after the first completed
+   therapy session.
 
 ## Quick acceptance checklist
 
@@ -119,14 +120,20 @@ dist/somnotrace-waveshare-7b-test-full.bin
 - All three bottom tabs open distinct full-screen pages and remain easy to tap.
 - Home's primary Start/Stop therapy action responds in one tap and does not
   open another screen.
+- Ten consecutive Start/Stop cycles neither reboot the board nor produce an SD
+  write error. After the final stop, **History** opens without a manual refresh.
 - **Manage > Display** brightness changes immediately and survives a restart.
 - Wi-Fi credentials can be entered and saved on the panel; the device restarts
   only after the separate confirmation and reconnects to that network.
 - An AirSense scan runs without freezing tab navigation; pairing accepts the
   four-digit code entirely on the touchscreen.
 - **History** remains responsive while reading the card, lists newest nights
-  first, loads seven more on request up to 30, and shows the selected night's
-  flow overview after it becomes available.
+  first, selects the newest night automatically, loads seven more on request up
+  to 30, and shows the selected night's flow overview after it becomes
+  available.
+- After a therapy cycle, repeatedly switching among **History**, every
+  **Manage** section, and the three bottom tabs for several minutes causes no
+  restart, progressive slowdown, or SD read failure.
 - During therapy, the setup hotspot is refused so the board cannot accidentally
   disconnect from the AirSense and interrupt recording.
 - The status bar changes to `Wi-Fi OK` after setup.
