@@ -29,6 +29,7 @@ display = source("main/bsp_display_7b.c")
 demo = source("main/main_qemu.c")
 defaults = source("sdkconfig.qemu.defaults")
 setup = source("scripts/setup-qemu-macos.sh")
+build_qemu = source("scripts/build-qemu.sh")
 run = source("scripts/run-qemu-ui.sh")
 smoke = source("scripts/test-qemu-ui.sh")
 touch_smoke = source("scripts/test-qemu-touch.py")
@@ -246,6 +247,13 @@ require(touch_smoke, r"x\s*=\s*round\(512\s*\*\s*32767\s*/\s*1023\)",
         "synthetic click uses History pill horizontal centre")
 require(touch_smoke, r"y\s*=\s*round\(559\s*\*\s*32767\s*/\s*599\)",
         "synthetic click uses History pill vertical centre")
+require(build_qemu,
+        r"SDKCONFIG_DEFAULTS=.*?reconfigure.*?SDKCONFIG_DEFAULTS=.*?build",
+        "QEMU firmware refreshes its git-derived version before building")
+for driver in (touch_smoke, capture_smoke):
+    require(driver,
+            r'"button":\s*"left",\s*"down":\s*False.*?time\.sleep\(0\.08\)',
+            "scripted touch release is sampled before the next press")
 for contract, description in (
     ('"-display", "sdl,show-cursor=off"', "cursor-free capture input backend"),
     ('"screendump"', "QMP framebuffer capture"),

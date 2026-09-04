@@ -118,6 +118,9 @@ def click(process, log_path, stream, x, y):
         qmp_command(stream, "input-send-event", {"events": [
             {"type": "btn", "data": {"button": "left", "down": False}},
         ]})
+    # Let LVGL sample the release before another scripted press. Page redraws
+    # can otherwise make two adjacent clicks look like one held gesture.
+    time.sleep(0.08)
 
 
 def interaction_sequence(name):

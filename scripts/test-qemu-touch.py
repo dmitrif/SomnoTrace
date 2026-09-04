@@ -140,6 +140,9 @@ def main():
                 "command-line": "xp /2wx 0x2100001c",
             })
             print(f"Touch registers after synthetic click: {registers.strip()}")
+            # The guest must sample the release before the next scripted tap;
+            # a navigation redraw can delay that poll on slower hosts.
+            time.sleep(0.08)
             click_latency = time.monotonic() - click_started
             if click_latency > 1.5:
                 raise AssertionError(
