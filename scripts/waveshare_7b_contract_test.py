@@ -28,16 +28,21 @@ display = source("main/bsp_display_7b.c")
 storage = source("main/sd_storage.c")
 defaults = source("sdkconfig.7b.defaults")
 cmake = source("main/CMakeLists.txt")
+root_cmake = source("CMakeLists.txt")
+lvgl_allocator = source("main/somnotrace_lvgl_psram.h")
+fonts = source("main/somnotrace_fonts.h")
+board_defaults = source("sdkconfig.7b.defaults")
 history = source("main/touch_history.c")
 history_header = source("main/touch_history.h")
 main = source("main/main.c")
 as11 = source("main/as11_ble.c")
+device_settings = source("main/device_settings.c")
 
 expected_scalars = {
     r"#define\s+I2C_SDA\s+GPIO_NUM_8\b": "I2C SDA GPIO8",
     r"#define\s+I2C_SCL\s+GPIO_NUM_9\b": "I2C SCL GPIO9",
     r"#define\s+IOX_ADDR\s+0x24\b": "CH422G address 0x24",
-    r"\.pclk_hz\s*=\s*30850000\b": "30.85 MHz pixel clock",
+    r"\.pclk_hz\s*=\s*18000000\b": "redraw-safe 18 MHz pixel clock",
     r"\.hsync_pulse_width\s*=\s*162\b": "HSYNC pulse",
     r"\.hsync_back_porch\s*=\s*152\b": "HSYNC back porch",
     r"\.hsync_front_porch\s*=\s*48\b": "HSYNC front porch",
@@ -49,8 +54,8 @@ expected_scalars = {
     r"\.de_gpio_num\s*=\s*GPIO_NUM_5\b": "DE GPIO5",
     r"\.pclk_gpio_num\s*=\s*GPIO_NUM_7\b": "PCLK GPIO7",
     r"\.num_fbs\s*=\s*2\b": "double framebuffer",
-    r"\.bounce_buffer_size_px\s*=\s*WAVESHARE_7B_H_RES\s*\*\s*10\b":
-        "ten-line bounce buffer",
+    r"\.bounce_buffer_size_px\s*=\s*WAVESHARE_7B_H_RES\s*\*\s*20\b":
+        "twenty-line bounce buffer",
     r"\.flags\.fb_in_psram\s*=\s*true\b": "PSRAM framebuffers",
     r"\.flags\.pclk_active_neg\s*=\s*true\b": "negative PCLK edge",
 }
@@ -80,16 +85,53 @@ require(storage, r"s\.cmd\s*=\s*GPIO_NUM_11", "TF CMD GPIO11")
 require(storage, r"s\.d0\s*=\s*GPIO_NUM_13", "TF D0 GPIO13")
 require(storage, r"s\.width\s*=\s*1", "TF one-bit SDMMC mode")
 require(board, r"iox_output\(IOX_SD_CS,\s*true\)", "TF DAT3/CS held high")
+require(board,
+        r"attenuation\s*=\s*\(uint8_t\)\(100U\s*-\s*percent\).*?"
+        r"attenuation\s*>\s*97.*?IOX_REG_PWM,\s*pwm",
+        "active-low backlight PWM mapping with vendor attenuation limit")
+require(display,
+        r"physical_brightness.*?tenth_percent\s*\+\s*1U\)\s*/\s*2U",
+        "7B legacy brightness range mapped to 1-100 percent")
+require(display, r'waveshare_7b_set_brightness\(100\)',
+        "steady full-brightness display initialization")
+require(display, r'"100% - steady"', "steady endpoint identified in touch UI")
+require(device_settings,
+        r"CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B\s*\|\|\s*"
+        r"CONFIG_SOMNOTRACE_BOARD_QEMU.*?DEFAULT_BRIGHTNESS\s+200",
+        "7-inch default is 100 percent steady backlight")
 
-require(display, r"\.on_bounce_frame_finish\s*=\s*on_vsync", "bounce-frame handoff")
+require(display, r"\.on_frame_buf_complete\s*=\s*on_vsync", "frame-buffer handoff")
 require(display, r"display_driver\.hor_res\s*=\s*WAVESHARE_7B_H_RES", "LVGL width")
 require(display, r"display_driver\.ver_res\s*=\s*WAVESHARE_7B_V_RES", "LVGL height")
-require(display, r"display_driver\.full_refresh\s*=\s*1", "tear-free full refresh")
+require(display, r"esp_lcd_rgb_panel_get_frame_buffer\(s_panel,\s*2,\s*&fb1,\s*&fb2\)",
+        "two panel-owned framebuffers")
+require(display, r"display_driver\.direct_mode\s*=\s*1", "dirty-region direct rendering")
+require(display, r"if\s*\(!lv_disp_flush_is_last\(drv\)\).*?lv_disp_flush_ready\(drv\).*?return",
+        "one panel handoff after the final dirty area")
+require(display,
+        r"ulTaskNotifyTake\(pdTRUE,\s*0\).*?esp_lcd_panel_draw_bitmap.*?"
+        r"ulTaskNotifyTake\(pdTRUE,\s*pdMS_TO_TICKS\(100\)\)",
+        "clear-before-submit frame-boundary wait")
+require(root_cmake, r"LV_MEM_CUSTOM_ALLOC=somnotrace_lvgl_alloc",
+        "7-inch LVGL allocator override")
+require(lvgl_allocator, r"heap_caps_malloc_prefer.*?MALLOC_CAP_SPIRAM.*?MALLOC_CAP_INTERNAL",
+        "LVGL PSRAM-first allocation with internal fallback")
+require(lvgl_allocator, r"heap_caps_realloc_prefer", "matched LVGL reallocator")
+require(lvgl_allocator, r"heap_caps_free", "matched LVGL free")
+require(board_defaults, r"CONFIG_LV_USE_FONT_COMPRESSED=y",
+        "compressed custom-font renderer")
+require(display, r'#include\s+"somnotrace_fonts\.h"', "custom bedside fonts")
+for family in ("space_grotesk", "ibm_plex_mono"):
+    assert family in fonts, f"missing {family} font declarations"
 
 for setting in (
     "CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B=y",
     "CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y",
+    "CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y",
+    "CONFIG_SPIRAM_RODATA=y",
     "CONFIG_LV_COLOR_DEPTH_16=y",
+    "CONFIG_LV_INDEV_DEF_READ_PERIOD=10",
+    "CONFIG_LV_DISP_DEF_REFR_PERIOD=16",
     "CONFIG_LV_SPRINTF_USE_FLOAT=y",
     "CONFIG_LV_USE_CHART=y",
     "CONFIG_LV_USE_MSGBOX=y",
@@ -119,6 +161,144 @@ for page in ("Home", "History", "Manage"):
 for section_label in ("Devices", "Connectivity", "Display", "Alerts", "Storage", "System"):
     require(display, rf'"{section_label}"', f"{section_label} Manage rail label")
 
+# Pure destination navigation responds at touch-down; operational controls keep
+# the generic completed-click behavior so a drag/cancel cannot trigger them.
+require(display,
+        r"make_destination_button.*?lv_obj_remove_event_cb_with_user_data.*?"
+        r"lv_obj_add_event_cb\(button,\s*callback,\s*LV_EVENT_PRESSED",
+        "pressed-event destination button factory")
+require(display,
+        r"lv_obj_add_event_cb\(button,\s*callback,\s*LV_EVENT_CLICKED",
+        "completed-click generic action button factory")
+require(display, r"s_nav_buttons\[i\]\s*=\s*make_destination_button",
+        "immediate bottom navigation")
+require(display, r"s_manage_buttons\[i\]\s*=\s*make_destination_button",
+        "immediate Manage section rail")
+for control, description in (
+    ("s_therapy_button", "therapy command"),
+    ("s_alert_ack_button", "alert acknowledgement"),
+    ("s_reboot_button", "restart command"),
+):
+    require(display, rf"{control}\s*=\s*make_touch_button",
+            f"{description} remains completed-click")
+require(display, r"static\s+int\s+s_active_page\s*=\s*-1",
+        "unselected page sentinel for first render")
+require(display, r"static\s+int\s+s_active_manage_section\s*=\s*-1",
+        "unselected Manage-section sentinel for first render")
+require(display, r"if\s*\(page\s*==\s*s_active_page\)\s*return",
+        "current-page navigation no-op")
+require(display,
+        r"if\s*\(section\s*==\s*s_active_manage_section\)\s*return",
+        "current Manage-section navigation no-op")
+active_page_start = display.index("static void set_active_page(int page)\n{")
+active_page_source = display[
+    active_page_start:display.index("static void nav_cb", active_page_start)
+]
+manage_section_start = display.index("static void set_manage_section(int section)\n{")
+manage_section_source = display[
+    manage_section_start:
+    display.index("static void manage_section_cb", manage_section_start)
+]
+for selection_source, description in (
+    (active_page_source, "page navigation"),
+    (manage_section_source, "Manage section navigation"),
+):
+    assert "lv_obj_set_style_" not in selection_source, \
+           f"{description} bypasses changed-only style helpers"
+    assert "lv_obj_add_flag(" not in selection_source and \
+           "lv_obj_clear_flag(" not in selection_source, \
+           f"{description} bypasses changed-only visibility helper"
+require(display,
+        r"s_storage_refresh_button\s*=\s*make_touch_button.*?storage_refresh_cb",
+        "storage refresh remains a distinct completed-click action")
+require(display,
+        r'xTaskCreatePinnedToCore\(lvgl_task,\s*"display_7b",\s*12288,\s*'
+        r"NULL,\s*5,\s*&s_lvgl_task,\s*1\)",
+        "responsive priority-5 display task with measured stack headroom")
+
+# QEMU keeps the full-fidelity handoff, while the physical build compiles out
+# large software-blurred shadows and expensive flow fill/glow layers.
+require(display,
+        r"#if\s+CONFIG_SOMNOTRACE_BOARD_QEMU.*?"
+        r"UI_DECORATIVE_SHADOW_WIDTH\(pixels\)\s+\(pixels\).*?"
+        r"FLOW_RENDER_POINTS\s+FLOW_POINTS.*?#else.*?"
+        r"UI_DECORATIVE_SHADOW_WIDTH\(pixels\).*?,\s*0\).*?"
+        r"UI_DECORATIVE_SHADOW_OPA\(opacity\).*?LV_OPA_TRANSP\).*?"
+        r"FLOW_RENDER_POINTS\s+150.*?FLOW_RENDER_FILL\s+0.*?"
+        r"FLOW_RENDER_GLOW\s+0",
+        "physical low-cost rendering profile")
+for target, description in (
+    ("card", "generic cards"),
+    ("s_ambient_glow", "ambient glow"),
+    ("s_alert_banner", "alert banner"),
+    ("s_keyboard_sheet", "keyboard sheet"),
+    ("s_history_rows\\[i\\]", "selected History row"),
+):
+    require(display,
+            rf"lv_obj_set_style_shadow_width\(\s*{target}.*?"
+            r"UI_DECORATIVE_SHADOW_WIDTH",
+            f"physical shadow suppression for {description}")
+for target, description in (
+    ("s_nav_buttons\\[i\\]", "selected navigation"),
+    ("s_manage_buttons\\[i\\]", "selected Manage rail"),
+    ("s_therapy_hero", "therapy hero"),
+    ("s_therapy_orb", "therapy orb"),
+    ("s_therapy_button", "therapy action"),
+):
+    require(display,
+            rf"{target},\s*LV_STYLE_SHADOW_WIDTH,.*?"
+            r"UI_DECORATIVE_SHADOW_WIDTH",
+            f"physical dynamic shadow suppression for {description}")
+require(display, r"lv_point_t\s+points\[FLOW_RENDER_POINTS\]",
+        "bounded physical flow point array")
+require(display,
+        r"source_index\s*=.*?FLOW_POINTS\s*-\s*1.*?"
+        r"FLOW_RENDER_POINTS\s*-\s*1",
+        "endpoint-preserving physical flow downsampling")
+
+# Concrete state/component coverage from the bedside handoff. Keeping this in
+# the hardware contract ensures the native build cannot silently regress to a
+# three-tab mock with none of the real loading, empty, fault, or pairing states.
+for literal, description in (
+    ("Therapy active", "active therapy state"),
+    ("Therapy stopped", "stopped therapy state"),
+    ("Starting...", "therapy start busy state"),
+    ("Stopping...", "therapy stop busy state"),
+    ("Pair a device", "unpaired primary state"),
+    ("Therapy stopped unexpectedly", "interruption alert state"),
+    ("Acknowledge", "interruption acknowledgement control"),
+    ("History not loaded", "History initial state"),
+    ("Reading history...", "History busy state"),
+    ("Load 7 more", "bounded History pagination"),
+    ("No completed sessions yet", "History empty state"),
+    ("Could not read the card", "History error state"),
+    ("microSD is busy", "History card-busy state"),
+    ("Select a night", "History unselected state"),
+    ("Retry", "History error recovery action"),
+    ("For trend review. Not a diagnosis or a prescription.", "History safety copy"),
+    ("Searching for nearby machines", "AirSense scanning state"),
+    ("Connecting securely", "AirSense connecting state"),
+    ("Enter the 4-digit code shown on your AirSense", "AirSense passcode state"),
+    ("Confirming the code", "AirSense confirmation state"),
+    ("Pairing failed · enable pairing mode first", "actionable AirSense pairing error state"),
+    ("First on AirSense: More › MyAir App › OK, downloaded › Connect",
+     "machine-first AirSense pairing prerequisite"),
+    ("AirSense is ready", "explicit AirSense pairing-mode acknowledgement"),
+    ("Safe to save now · restart will be deferred", "Wi-Fi deferred-restart state"),
+    ("Wi-Fi saved; restart deferred while recording", "saved Wi-Fi deferred notice"),
+    ("Send test push", "alert test control"),
+    ("microSD capacity and upload queue", "storage summary"),
+    ("Advanced diagnostics", "system disclosure row"),
+):
+    assert literal in display, f"missing bedside state: {description}"
+require(display, r'"Waiting for (?:therapy|breathing) data(?:\.\.\.|…)?"',
+        "first-sample loading state")
+require(display, r"flow_count\s*>=\s*FLOW_READY_POINTS",
+        "valid sample threshold before chart becomes live")
+require(display, r'"(?:No recent flow sample|Live data delayed)"', "stale flow state")
+for metric in ("AHI", "PRESSURE 95%", "LEAK 95%", "EVENTS PER HOUR"):
+    assert metric in display, f"missing History component: {metric}"
+
 # Home has one contextual therapy action.  Administration and acknowledgement
 # live in Manage or transient banners, never in a permanent Home utility row.
 home_match = re.search(
@@ -133,6 +313,9 @@ for forbidden in ('"Wi-Fi setup"', '"Acknowledge"', '"Screen off"'):
 require(display, r"xTaskCreate\(device_scan_task", "non-blocking BLE scan worker")
 require(display, r"as11_ble_start_pair\(job->addr\)", "native AirSense pairing action")
 require(display, r"as11_ble_confirm_pair\(job->passkey\)", "native AirSense passkey action")
+require(display,
+        r"action\s*==\s*DEVICE_PAIR_AS11\s*&&\s*!pairing_mode_confirmed",
+        "AirSense connect is gated on machine pairing-mode acknowledgement")
 require(display, r"oximeter_pair\(job->addr,\s*OX_DRIVER_AUTO\)",
         "auto-detected native O2 pairing action")
 require(display, r"device_settings_set_brightness", "native brightness control")
@@ -152,9 +335,78 @@ require(as11, r"therapy_command.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response\(\)
         "serialized therapy RPC")
 require(display, r"s_therapy_command_busy", "single-flight therapy control")
 require(display, r"s_wake_overlay.*?LV_EVENT_PRESSED", "wake-only touch interception")
+require(display, r"s_backlight_requested", "sticky backlight desired state")
+require(display, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD,\s*250\)",
+        "leased UI free-space query")
+require(display, r"flow_sample_us\s*=\s*esp_timer_get_time\(\)",
+        "flow freshness uses source arrival time")
+require(display, r"sd_storage_recording_active\(\)",
+        "Home recording copy follows writer state")
 require(display, r"sd_storage_deinit\(\);\s*esp_restart\(\)",
         "clean SD unmount before UI restart")
+
+# The physical RGB panel is sensitive to large redundant redraws: unchanged
+# Home presentation state must not invalidate labels, visibility, or styles on
+# every 500 ms pass. Keep these checks close to the hardware contracts because
+# this is also a panel-stability requirement, not just a rendering optimization.
+require(display,
+        r"set_label_text_if_changed.*?lv_label_get_text.*?strcmp.*?"
+        r"lv_label_set_text",
+        "state-aware label updates")
+require(display,
+        r"set_hidden.*?lv_obj_has_flag\(obj,\s*LV_OBJ_FLAG_HIDDEN\)\s*==\s*hidden",
+        "state-aware visibility updates")
+require(display, r"lv_obj_get_local_style_prop",
+        "exact local-style comparison before Home style mutation")
+update_start = display.index("static void update_ui(void)")
+update_end = display.index("static void lvgl_task(void", update_start)
+update_source = display[update_start:update_end]
+assert "lv_label_set_text(" not in update_source, \
+       "update_ui must use state-aware label setters"
+assert "lv_label_set_text_fmt(" not in update_source, \
+       "update_ui must use state-aware formatted label setters"
+assert "lv_obj_set_style_" not in update_source, \
+       "update_ui must compare Home style values before mutation"
+assert "lv_obj_add_flag(" not in update_source and \
+       "lv_obj_clear_flag(" not in update_source, \
+       "update_ui must compare visibility before mutation"
+require(update_source,
+        r"lv_bar_get_value\(s_metric_bars\[i\]\)\s*!=\s*bar_values\[i\]",
+        "state-aware Home metric bars")
+require(update_source,
+        r"alert_visibility_changed\s*=\s*set_hidden\(s_alert_banner",
+        "state-aware alert banner visibility")
 require(history, r"sd_storage_lease_acquire\(SD_LEASE_UPLOAD", "leased history reads")
+require(history_header, r"TOUCH_HISTORY_TRACE_POINTS\s+48\b",
+        "bounded native overnight trace")
+require(history_header, r"int16_t\s+flow_trace\[TOUCH_HISTORY_TRACE_POINTS\]",
+        "native flow trace storage")
+require(history_header, r"bool\s+has_flow_trace\s*;",
+        "truthful trace availability")
+require(history, r"terminal_session.*?completed.*?interrupted.*?timed_out.*?rotated.*?split",
+        "trace excludes active and failed sessions")
+require(history, r"_flow_mm\.snt.*?_brp_mm\.snt",
+        "v2 and legacy bounded overview sources")
+require(history, r"touch_history_load_flow_trace", "selection-driven trace API")
+require(history, r"FLOW_TRACE_MAX_RECORDS\s+\(24U\s*\*\s*60U\s*\*\s*60U\)",
+        "one-day hard bound on trace input")
+require(history, r"FLOW_READ_RECORDS\s+128U", "bounded block-read buffer")
+require(history, r"fread\(records,.*?wanted.*?for\s*\(size_t r = 0; r < got;.*?processed \+= \(uint32_t\)got",
+        "only complete buffered records populate trace bins")
+require(history, r"fmt >= 2.*?channels = 2;.*?channels = 4;",
+        "v2 flow pair and legacy v1 BRP channel semantics")
+assert "load_flow_trace(&days[i])" not in history, \
+       "trace must not be read eagerly for every history day"
+require(display, r"queue_history_trace_load\(selected_day\)",
+        "trace loads only after a night is selected")
+require(display, r'xTaskCreate\(history_trace_task,\s*"ui_hist_trace"',
+        "trace file I/O stays off the LVGL thread")
+require(display, r"heap_caps_calloc\(.*?HISTORY_MAX_DAYS.*?MALLOC_CAP_SPIRAM",
+        "expanded history model stays off the worker stack")
+require(display, r"lv_chart_set_all_value\(s_history_trace_chart.*?LV_CHART_POINT_NONE",
+        "missing recorded samples remain chart gaps")
+require(display, r"day->has_flow_trace.*?day->flow_trace_count",
+        "physical History renders only available recorded trace data")
 require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
 require(history_header, r"#define\s+TOUCH_HISTORY_MAX_DAYS\s+30\b",
         "bounded 30-night native history model")
@@ -168,9 +420,16 @@ require(history, r"capacity\s*<\s*TOUCH_HISTORY_MAX_DAYS.*?capacity\s*:\s*TOUCH_
 require(display, r"TOUCH_HISTORY_MAX_DAYS", "touch UI consumes the 30-night history bound")
 for event_label in ("Obstructive", "Central", "Hypopnea", "RERA"):
     require(display, rf'"{event_label}"', f"{event_label} History event label")
-require(display, r"Device-reported AHI", "clinical provenance label")
+require(display, r'"AHI"', "handoff AHI metric label")
+require(display, r"s_keyboard_sheet.*?keyboard_sheet_action_cb",
+        "explicit touch keyboard sheet with completion actions")
+require(display, r"s_text_keyboard_lower_map.*?\"q\".*?\"p\".*?LV_SYMBOL_BACKSPACE.*?LV_SYMBOL_UP.*?\"123\".*?\"@\".*?\"space\".*?\"-\".*?\"_\"",
+        "five-row handoff text keyboard")
+require(display, r"lv_obj_set_align\(s_keyboard,\s*LV_ALIGN_TOP_LEFT\)",
+        "visible top-aligned keyboard geometry")
 require(display, r"lv_textarea_set_text\(s_wifi_password,\s*\"\"\)",
         "stored Wi-Fi password excluded from LVGL")
 assert "CONFIG_COMPILER_STACK_CHECK_MODE_STRONG=y" in defaults
+assert "CONFIG_ESP_MAIN_TASK_STACK_SIZE=14336" in defaults
 
 print("Waveshare 7B hardware contract passed")

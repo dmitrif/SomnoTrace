@@ -17,7 +17,7 @@ CACHE_BASE="${XDG_CACHE_HOME:-${HOME}/Library/Caches}/SomnoTrace"
 SOURCE_DIR="${CACHE_BASE}/qemu-${RELEASE}-rgb1024-source"
 BUILD_DIR="${SOURCE_DIR}/build-rgb1024-${ARCH}"
 QEMU_BIN="${BUILD_DIR}/qemu-system-xtensa"
-PATCH_REVISION="3"
+PATCH_REVISION="4"
 PATCH_STAMP="${BUILD_DIR}/.somnotrace-patch-revision"
 if [ -x "${QEMU_BIN}" ] && [ -f "${PATCH_STAMP}" ] && \
         [ "$(<"${PATCH_STAMP}")" = "${PATCH_REVISION}" ]; then
@@ -56,6 +56,8 @@ if [ ! -d "${SOURCE_DIR}/.git" ]; then
     fi
     git -C "${TEMP_DIR}/source" apply "${SCRIPT_DIR}/qemu-rgb-1024.patch"
     git -C "${TEMP_DIR}/source" apply "${SCRIPT_DIR}/qemu-touch.patch"
+    git -C "${TEMP_DIR}/source" apply --unidiff-zero \
+        "${SCRIPT_DIR}/qemu-emulator-stability.patch"
     mv "${TEMP_DIR}/source" "${SOURCE_DIR}"
 fi
 
@@ -92,6 +94,29 @@ if ! grep -q '"esp-rgb-touch"' "${SOURCE_DIR}/hw/display/esp_rgb.c" || \
         ! grep -q 'A_RGB_TOUCH_STATUS' \
             "${SOURCE_DIR}/include/hw/display/esp_rgb.h"; then
     echo "Cached QEMU source does not contain the touch patch" >&2
+    exit 1
+fi
+
+if grep -q 'SomnoTrace: an SDL expose must preserve' \
+        "${SOURCE_DIR}/hw/display/esp_rgb.c" && \
+        grep -q 'touch_press_latched' \
+        "${SOURCE_DIR}/include/hw/display/esp_rgb.h"; then
+    :
+elif ! git -C "${SOURCE_DIR}" apply --unidiff-zero --check \
+        "${SCRIPT_DIR}/qemu-emulator-stability.patch"; then
+    echo "Cached QEMU source has an unexpected emulator stability patch state" >&2
+    exit 1
+else
+    git -C "${SOURCE_DIR}" apply --unidiff-zero \
+        "${SCRIPT_DIR}/qemu-emulator-stability.patch"
+fi
+if ! grep -q 'SomnoTrace: an SDL expose must preserve' \
+        "${SOURCE_DIR}/hw/display/esp_rgb.c" || \
+        ! grep -q 'SomnoTrace: retain a complete short click' \
+            "${SOURCE_DIR}/hw/display/esp_rgb.c" || \
+        ! grep -q 'touch_press_latched' \
+            "${SOURCE_DIR}/include/hw/display/esp_rgb.h"; then
+    echo "Cached QEMU source does not contain the emulator stability patch" >&2
     exit 1
 fi
 

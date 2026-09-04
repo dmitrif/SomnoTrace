@@ -8,6 +8,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "main/net_provision.h").read_text(encoding="utf-8")
 SOURCE = (ROOT / "main/net_provision.c").read_text(encoding="utf-8")
+UI = (ROOT / "main/bsp_display_7b.c").read_text(encoding="utf-8")
 
 
 def require(pattern: str, text: str, description: str) -> None:
@@ -54,5 +55,29 @@ require(r'"\{\\"scanning\\":true\}"', SOURCE,
 for removed in ("s_scan_running", "s_scan_done", "s_scan_json"):
     if removed in SOURCE:
         raise AssertionError(f"legacy racy/one-shot scan state remains: {removed}")
+
+require(r"make_touch_button\(section,\s*594,\s*14,\s*134,\s*48,"
+        r"\s*\"Scan\"", UI, "Connectivity header Scan geometry changed")
+require(r"s_wifi_scan_row.*?LV_OBJ_FLAG_HIDDEN", UI,
+        "nearby-network row must be absent from the initial frame")
+require(r"NETPROV_SCAN_RUNNING.*?NETPROV_SCAN_READY", UI,
+        "QEMU async scan fixture is missing")
+require(r"netprov_scan_get_snapshot\(snapshot\)", UI,
+        "hardware UI must consume a copied netprov snapshot")
+require(r"wifi_scan_use_cb.*?lv_textarea_set_text\(s_wifi_ssid,\s*network->ssid\)"
+        r".*?open_keyboard_sheet\(s_wifi_password", UI,
+        "Use must populate SSID and open secure-network password editing")
+require(r"layout_connectivity_rows.*?s_keyboard_target == s_wifi_password.*?return;",
+        UI, "periodic scan layout must preserve keyboard editing geometry")
+if "esp_wifi_scan_" in UI:
+    raise AssertionError("LVGL layer must not call the ESP Wi-Fi scan driver")
+
+use_body = re.search(r"static void wifi_scan_use_cb\([^)]*\)\s*\{(.*?)\n\}",
+                     UI, re.MULTILINE | re.DOTALL)
+if not use_body:
+    raise AssertionError("Wi-Fi scan Use callback missing")
+for forbidden in ("netprov_save_config", "esp_wifi_connect", "esp_restart"):
+    if forbidden in use_body.group(1):
+        raise AssertionError(f"Wi-Fi scan Use must not invoke {forbidden}")
 
 print("netprov async scan contracts: PASS")

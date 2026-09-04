@@ -29,6 +29,8 @@ cc -std=c11 -Wall -Wextra -D_DARWIN_C_SOURCE \
 
 python3 scripts/waveshare_7b_contract_test.py
 python3 scripts/qemu_ui_contract_test.py
+python3 scripts/font_asset_contract_test.py
+python3 scripts/screen_timeout_contract_test.py
 python3 scripts/therapy_alert_ack_contract_test.py
 python3 scripts/storage_notice_contract_test.py
 echo "All synthetic host tests passed"
