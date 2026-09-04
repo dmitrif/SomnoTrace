@@ -16,6 +16,10 @@ elif [ "$#" -ne 0 ]; then
     exit 2
 fi
 
+# Refresh git-derived PROJECT_VER even when the source tree is otherwise unchanged.
+"${SCRIPT_DIR}/idf.sh" -B "${BUILD_DIR}" \
+    -D "SDKCONFIG=${SDKCONFIG}" \
+    -D "SDKCONFIG_DEFAULTS=${DEFAULTS}" reconfigure
 "${SCRIPT_DIR}/idf.sh" -B "${BUILD_DIR}" \
     -D "SDKCONFIG=${SDKCONFIG}" \
     -D "SDKCONFIG_DEFAULTS=${DEFAULTS}" build
