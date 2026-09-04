@@ -40,6 +40,7 @@ snapshot_core = function_body(SOURCE, "retained_snapshot_from_bounds")
 clear = function_body(SOURCE, "log_stream_retained_clear")
 retry = function_body(SOURCE, "log_stream_retained_retry")
 save = function_body(SOURCE, "log_stream_retained_save_to_sd")
+publish = function_body(SOURCE, "retained_publish_snapshot")
 
 # The public API is caller-owned and reports both monotonic change tokens and
 # degradation. A zero-initialised filter is useful without special setup.
@@ -154,10 +155,10 @@ assert "LOG_FILE_PREFIX" not in save
 lease_at = save.find("sd_storage_lease_acquire(SD_LEASE_EXPORT")
 mkdir_at = save.find("mkdir(LOG_DIR")
 open_at = save.find('fopen(tmp_path, "wb")')
-rename_at = save.find("rename(tmp_path, final_path)")
+publish_at = save.find("retained_publish_snapshot(tmp_path, final_path, backup_path)")
 release_at = save.rfind("sd_storage_lease_release(SD_LEASE_EXPORT)")
-assert -1 not in (lease_at, mkdir_at, open_at, rename_at, release_at)
-assert lease_at < mkdir_at < open_at < rename_at < release_at
+assert -1 not in (lease_at, mkdir_at, open_at, publish_at, release_at)
+assert lease_at < mkdir_at < open_at < publish_at < release_at
 assert "chronological.order = LOG_STREAM_RETAINED_OLDEST_FIRST" in save
 assert "retained_filter_matches" in save
 assert "progress_fn(0, bounds.count, progress_ctx)" in save
@@ -167,6 +168,10 @@ assert "tmp_exists" in save and "remove(tmp_path)" in save
 assert "bool close_failed = fflush(file) != 0" in save
 assert "if (fclose(file) != 0) close_failed = true" in save
 assert "retained_set_last_error(error)" in save
+assert "remove(final_path)" not in save
+assert "rename(final_path, backup_path)" in publish
+assert "rename(temporary_path, final_path)" in publish
+assert "rename(backup_path, final_path)" in publish
 for preserved in ("s_retained_head =", "s_retained_count =", "s_ringbuf"):
     assert preserved not in save, f"Save mutates retained/browser state: {preserved}"
 

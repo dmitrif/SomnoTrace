@@ -44,7 +44,10 @@ extern "C" {
  * installs a custom vprintf hook so every ESP_LOGx() call is captured.
  * Must be called once, before the HTTP server registers the log endpoints.
  */
-void log_stream_init(void);
+/* Returns ESP_OK when all live-stream primitives are available.  A degraded
+ * capture may still retain or persist logs after a non-OK result, but every
+ * public endpoint remains safe to call.  Repeated calls are idempotent. */
+esp_err_t log_stream_init(void);
 
 /* ── Native touchscreen retained log feed ─────────────────────────────────────
  *
