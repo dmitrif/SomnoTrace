@@ -100,6 +100,11 @@ typedef struct {
  * the SD upgrade fallback) if not already resident.  Returns out->available. */
 bool time_sync_get_drift_snapshot(time_drift_snapshot_t *out);
 
+/* RAM-only variant for latency-sensitive paths such as therapy stop.  It
+ * never opens NVS or scans the SD card; false means the persisted snapshot
+ * has not been loaded yet. */
+bool time_sync_peek_drift_snapshot(time_drift_snapshot_t *out);
+
 /* Persist the most recent valid clock drift to NVS for use by the
  * degraded-mode fallback.  Called at session stop when clock_drift_valid.
  * drift_ms: NTP_epoch_ms - AS11_epoch_ms (positive = AS11 is behind).

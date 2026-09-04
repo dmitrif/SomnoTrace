@@ -143,9 +143,58 @@ static uint16_t s_mtu = 23;
 
 /* AS11 device clock captured before stream starts (epoch ms).
  * Used to compute clock_drift_ms at session stop without sending
- * RPCs during active streaming (which congests BLE buffers). */
-static int64_t s_as11_clock_ms = 0;
-static int64_t s_as11_clock_capture_ntp_ms = 0;
+ * RPCs during active streaming (which congests BLE buffers).  The two
+ * 64-bit timestamps and their wall-clock provenance are one atomic snapshot:
+ * readers must never observe fields from different reconnect attempts. */
+typedef struct {
+    int64_t as11_ms;
+    int64_t wall_ms;
+    time_source_t wall_source;
+    bool available;
+} as11_clock_capture_t;
+
+static as11_clock_capture_t s_as11_clock_capture = {
+    .wall_source = TIME_SRC_NONE,
+};
+static uint32_t s_as11_clock_generation;
+static portMUX_TYPE s_as11_clock_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static uint32_t as11_clock_capture_invalidate(void)
+{
+    portENTER_CRITICAL(&s_as11_clock_lock);
+    uint32_t generation = ++s_as11_clock_generation;
+    s_as11_clock_capture.as11_ms = 0;
+    s_as11_clock_capture.wall_ms = 0;
+    s_as11_clock_capture.wall_source = TIME_SRC_NONE;
+    s_as11_clock_capture.available = false;
+    portEXIT_CRITICAL(&s_as11_clock_lock);
+    return generation;
+}
+
+static bool as11_clock_capture_store(uint32_t generation, int64_t as11_ms,
+                                     int64_t wall_ms,
+                                     time_source_t wall_source)
+{
+    portENTER_CRITICAL(&s_as11_clock_lock);
+    bool stored = generation == s_as11_clock_generation;
+    if (stored) {
+        s_as11_clock_capture.as11_ms = as11_ms;
+        s_as11_clock_capture.wall_ms = wall_ms;
+        s_as11_clock_capture.wall_source = wall_source;
+        s_as11_clock_capture.available = true;
+    }
+    portEXIT_CRITICAL(&s_as11_clock_lock);
+    return stored;
+}
+
+static as11_clock_capture_t as11_clock_capture_load(void)
+{
+    as11_clock_capture_t capture;
+    portENTER_CRITICAL(&s_as11_clock_lock);
+    capture = s_as11_clock_capture;
+    portEXIT_CRITICAL(&s_as11_clock_lock);
+    return capture;
+}
 
 /* Handles for characteristics discovered during full GATT scan.
  * The AS11 btmon trace shows BlueZ reads these by handle (ATT Read Request
@@ -859,7 +908,7 @@ static void handle_notify(const uint8_t *data, int len)
             /* Normal notification (HeartBeat, therapy events, data).
              * Forward to session writer for therapy detection and data logging. */
             ESP_LOGD(TAG, "notification: %s", m);
-            session_writer_on_notification(session_writer_get_active(), msg);
+            session_writer_on_notification(NULL, msg);
             cJSON_Delete(msg);
             continue;
         }
@@ -983,6 +1032,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGW(TAG, "disconnected (reason=%d)", event->disconnect.reason);
+        as11_clock_capture_invalidate();
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_session_encrypted = false;
         therapy_alert_on_ble_disconnect();
@@ -1790,6 +1840,7 @@ static void confirm_task(void *arg)
      * Without this, therapy data never flows until a manual reboot.
      * Set s_manual_disconnect so the GAP disconnect event doesn't
      * launch a duplicate auto_reconnect_task. */
+    as11_clock_capture_invalidate();
     s_manual_disconnect = true;
     if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -2158,12 +2209,30 @@ static void reconnect_task(void *arg)
      * GetDateTime must be sent before StartStream because active streaming
      * congests BLE ACL buffers, making subsequent RPCs fail. */
     {
+        /* A failed recapture must not leave a measurement from the previous
+         * connection looking current. */
+        uint32_t capture_generation = as11_clock_capture_invalidate();
         int64_t as11_ms = 0;
         if (as11_ble_get_datetime(&as11_ms) == ESP_OK) {
-            s_as11_clock_ms = as11_ms;
-            s_as11_clock_capture_ntp_ms = (int64_t)time(NULL) * 1000;
-            ESP_LOGI(TAG, "reconnect: AS11 clock captured: %lld ms (NTP=%lld)",
-                     (long long)as11_ms, (long long)s_as11_clock_capture_ntp_ms);
+            /* Read provenance before wall time.  If NTP synchronises between
+             * the two reads we conservatively retain the older, degraded
+             * provenance; the next reconnect can produce a measured drift. */
+            time_source_t wall_source = time_source_get();
+            int64_t wall_ms = (int64_t)time(NULL) * 1000;
+            bool stored = as11_clock_capture_store(capture_generation,
+                                                   as11_ms, wall_ms,
+                                                   wall_source);
+            if (!stored) {
+                ESP_LOGW(TAG, "reconnect: link changed during AS11 clock "
+                              "capture; discarding stale result");
+            } else if (wall_source == TIME_SRC_NTP) {
+                ESP_LOGI(TAG, "reconnect: AS11 clock captured: %lld ms (NTP=%lld)",
+                         (long long)as11_ms, (long long)wall_ms);
+            } else {
+                ESP_LOGW(TAG, "reconnect: AS11 clock captured against "
+                              "non-NTP source=%d; measured drift unavailable",
+                         (int)wall_source);
+            }
         } else {
             ESP_LOGW(TAG, "reconnect: GetDateTime failed — clock_drift_ms will be unavailable");
         }
@@ -2482,6 +2551,7 @@ static esp_err_t do_forget_nvs(void *arg)
 
 esp_err_t as11_ble_forget(void)
 {
+    as11_clock_capture_invalidate();
     /* Delegate the NVS erase so callers on a PSRAM stack (httpd forget handler)
      * are safe; the BLE teardown below stays on the caller (no flash). */
     esp_err_t e = nvs_writer_run(do_forget_nvs, NULL);
@@ -2498,6 +2568,7 @@ esp_err_t as11_ble_forget(void)
 
 esp_err_t as11_ble_disconnect(void)
 {
+    as11_clock_capture_invalidate();
     s_manual_disconnect = true;
     if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGI(TAG, "disconnecting BLE (conn_handle=%d)", s_conn_handle);
@@ -2525,15 +2596,21 @@ esp_err_t as11_ble_stop_stream(void)
 esp_err_t as11_ble_get_clock_drift(int64_t *out_drift_ms)
 {
     if (!out_drift_ms) return ESP_ERR_INVALID_ARG;
-    if (s_as11_clock_ms == 0 || s_as11_clock_capture_ntp_ms == 0) {
+    as11_clock_capture_t capture = as11_clock_capture_load();
+    if (!capture.available) {
         ESP_LOGW(TAG, "get_clock_drift: no AS11 clock capture available");
         return ESP_ERR_INVALID_STATE;
     }
-    *out_drift_ms = s_as11_clock_capture_ntp_ms - s_as11_clock_ms;
+    if (capture.wall_source != TIME_SRC_NTP) {
+        ESP_LOGW(TAG, "get_clock_drift: capture wall source=%d is not NTP",
+                 (int)capture.wall_source);
+        return ESP_ERR_INVALID_STATE;
+    }
+    *out_drift_ms = capture.wall_ms - capture.as11_ms;
     ESP_LOGI(TAG, "get_clock_drift: drift=%lld ms (NTP=%lld AS11=%lld)",
              (long long)*out_drift_ms,
-             (long long)s_as11_clock_capture_ntp_ms,
-             (long long)s_as11_clock_ms);
+             (long long)capture.wall_ms,
+             (long long)capture.as11_ms);
     return ESP_OK;
 }
 
