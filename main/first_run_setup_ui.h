@@ -33,6 +33,10 @@ typedef enum {
     FIRST_RUN_SETUP_UI_WIFI_CONNECTED,
     FIRST_RUN_SETUP_UI_WIFI_AUTH_FAILED,
     FIRST_RUN_SETUP_UI_WIFI_ERROR,
+    /* Appended Rev B3 substates; keep earlier values stable. */
+    FIRST_RUN_SETUP_UI_WIFI_HIDDEN,
+    FIRST_RUN_SETUP_UI_WIFI_STATIC_ADDRESS,
+    FIRST_RUN_SETUP_UI_WIFI_SCAN_BLOCKED,
 } first_run_setup_ui_wifi_state_t;
 
 typedef enum {
@@ -41,6 +45,8 @@ typedef enum {
     FIRST_RUN_SETUP_UI_TIME_APPLYING,
     FIRST_RUN_SETUP_UI_TIME_SET,
     FIRST_RUN_SETUP_UI_TIME_ERROR,
+    /* Advanced NTP/hostname receipt after the zone is applied. */
+    FIRST_RUN_SETUP_UI_TIME_ADVANCED,
 } first_run_setup_ui_time_state_t;
 
 typedef enum {
@@ -119,6 +125,34 @@ typedef struct {
     first_run_setup_ui_airsense_result_t
         airsense_results[FIRST_RUN_SETUP_UI_AIRSENSE_RESULT_MAX];
     uint8_t airsense_result_count;
+
+    /* Rev B3 extension. These fields are appended so existing snapshot
+     * initialisers remain source-compatible and zero-initialisation remains
+     * a truthful "unknown/not available" value. */
+    bool wifi_scan_blocked;
+    bool static_ipv4_supported;
+    bool static_ipv4_active;
+    uint8_t wifi_slots_used;
+    uint8_t wifi_slots_max;
+    char wifi_scan_blocked_reason[96];
+    char static_ipv4_address[16];
+    char static_ipv4_gateway[16];
+    char static_ipv4_dns[16];
+
+    char ntp_server[64];
+    char hostname[33];
+    char time_sync_status[48];
+
+    char paired_client_id[48];
+    char paired_model[32];
+    char paired_serial[32];
+    char paired_firmware[24];
+    bool paired_model_available;
+    bool paired_serial_available;
+    bool paired_firmware_available;
+
+    uint16_t card_estimated_nights;
+    bool card_estimate_available;
 } first_run_setup_ui_live_t;
 
 /* Callbacks start real operations; completion is reported later by update().
@@ -142,6 +176,14 @@ typedef struct {
     esp_err_t (*configure_alerts)(void *context);
     esp_err_t (*configure_uploads)(void *context);
     esp_err_t (*finished)(void *context);
+    /* Rev B3 extensions. A NULL static-address callback is expected on
+     * firmware without persistent IPv4 support and is rendered unavailable. */
+    esp_err_t (*wifi_set_static_ipv4)(void *context, const char *address,
+                                      const char *gateway, const char *dns);
+    esp_err_t (*ntp_server_set)(void *context, const char *server);
+    esp_err_t (*hostname_set)(void *context, const char *hostname);
+    esp_err_t (*time_advanced_set)(void *context, const char *ntp_server,
+                                   const char *hostname);
 } first_run_setup_ui_controller_t;
 
 typedef struct {

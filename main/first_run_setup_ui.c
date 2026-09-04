@@ -18,16 +18,16 @@
 
 #define UI_WIDTH             1024
 #define UI_HEIGHT             600
-#define UI_HEADER_HEIGHT       64
-#define UI_RAIL_X              18
-#define UI_RAIL_Y              78
-#define UI_RAIL_WIDTH         250
-#define UI_RAIL_ROW_HEIGHT     62
-#define UI_RAIL_ROW_GAP         8
-#define UI_DETAIL_X           284
-#define UI_DETAIL_Y            78
-#define UI_DETAIL_WIDTH       722
-#define UI_DETAIL_HEIGHT      504
+#define UI_HEADER_HEIGHT       60
+#define UI_RAIL_X              16
+#define UI_RAIL_Y              62
+#define UI_RAIL_WIDTH         262
+#define UI_RAIL_ROW_HEIGHT     54
+#define UI_RAIL_ROW_GAP         3
+#define UI_DETAIL_X           290
+#define UI_DETAIL_Y            62
+#define UI_DETAIL_WIDTH       718
+#define UI_DETAIL_HEIGHT      522
 #define UI_TOUCH_TARGET_MIN    44
 #define UI_ACTION_HEIGHT       52
 #define UI_RESULT_HEIGHT       50
@@ -69,7 +69,32 @@ typedef enum {
     ACTION_AIRSENSE_RESULT,
     ACTION_SEARCH,
     ACTION_RETRY,
+    ACTION_SHOW_PASSWORD,
+    ACTION_DONE,
+    ACTION_HIDDEN_NETWORK,
+    ACTION_STATIC_ADDRESS,
+    ACTION_INPUT_FOCUS,
 } action_t;
+
+typedef enum {
+    SCREEN_NONE = 0,
+    SCREEN_WELCOME,
+    SCREEN_WIFI_SCAN,
+    SCREEN_WIFI_PASSWORD,
+    SCREEN_WIFI_PASSWORD_ERROR,
+    SCREEN_WIFI_STATIC,
+    SCREEN_WIFI_SCAN_BLOCKED,
+    SCREEN_TIMEZONE,
+    SCREEN_TIME_ADVANCED,
+    SCREEN_AIRSENSE_HOW,
+    SCREEN_AIRSENSE_SCAN,
+    SCREEN_AIRSENSE_NONE,
+    SCREEN_AIRSENSE_CODE,
+    SCREEN_AIRSENSE_REJECTED,
+    SCREEN_AIRSENSE_PAIRED,
+    SCREEN_CARD,
+    SCREEN_READY,
+} setup_screen_t;
 
 typedef struct {
     first_run_setup_ui_controller_t controller;
@@ -80,25 +105,39 @@ typedef struct {
     lv_obj_t *root;
     lv_obj_t *rail;
     lv_obj_t *detail;
-    lv_obj_t *header_wifi;
-    lv_obj_t *header_time;
+    lv_obj_t *header_clock;
     lv_obj_t *header_card;
+    lv_obj_t *rail_complete;
     lv_obj_t *rail_buttons[FIRST_RUN_SETUP_STEP_COUNT];
     lv_obj_t *rail_dots[FIRST_RUN_SETUP_STEP_COUNT];
+    lv_obj_t *rail_numbers[FIRST_RUN_SETUP_STEP_COUNT];
     lv_obj_t *rail_labels[FIRST_RUN_SETUP_STEP_COUNT];
     lv_obj_t *rail_status[FIRST_RUN_SETUP_STEP_COUNT];
 
     lv_obj_t *input;
+    lv_obj_t *input_secondary;
+    lv_obj_t *input_tertiary;
     lv_obj_t *keyboard;
     int selected_wifi;
     int selected_airsense;
     char wifi_password[65];
     char timezone_query[48];
     char pairing_code[5];
+    char hidden_ssid[33];
+    char static_address[16];
+    char static_gateway[16];
+    char static_dns[16];
+    char ntp_server[64];
+    char hostname[33];
     char action_error[96];
+    setup_screen_t rendered_screen;
+    uint32_t rendered_key;
     bool visible;
     bool in_event;
     bool render_pending;
+    bool welcome_dismissed;
+    bool password_visible;
+    bool static_return_hidden;
 } first_run_setup_ui_t;
 
 static first_run_setup_ui_t *s_ui;
@@ -107,6 +146,7 @@ static void render_all(void);
 static void render_async(void *unused);
 static void action_cb(lv_event_t *event);
 static void input_changed_cb(lv_event_t *event);
+static void input_focus_cb(lv_event_t *event);
 
 static void copy_text(char *dst, size_t dst_size, const char *src)
 {
@@ -227,7 +267,15 @@ static lv_obj_t *make_input(const char *placeholder, int x, int y,
     lv_obj_set_style_text_color(input, lv_color_hex(COLOR_TERTIARY),
                                 LV_PART_TEXTAREA_PLACEHOLDER);
     lv_obj_add_event_cb(input, input_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(input, input_focus_cb, LV_EVENT_PRESSED, NULL);
     return input;
+}
+
+static void input_focus_cb(lv_event_t *event)
+{
+    if (!s_ui || !s_ui->keyboard ||
+        lv_event_get_code(event) != LV_EVENT_PRESSED) return;
+    lv_keyboard_set_textarea(s_ui->keyboard, lv_event_get_target(event));
 }
 
 static void input_changed_cb(lv_event_t *event)
@@ -235,18 +283,36 @@ static void input_changed_cb(lv_event_t *event)
     if (!s_ui || lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) return;
     lv_obj_t *input = lv_event_get_target(event);
     const char *text = lv_textarea_get_text(input);
-    switch (s_ui->displayed_step) {
-        case FIRST_RUN_SETUP_STEP_WIFI:
+    if (s_ui->rendered_screen == SCREEN_WIFI_PASSWORD ||
+        s_ui->rendered_screen == SCREEN_WIFI_PASSWORD_ERROR) {
+        if (s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_HIDDEN) {
+            if (input == s_ui->input) {
+                copy_text(s_ui->hidden_ssid, sizeof(s_ui->hidden_ssid), text);
+            } else {
+                copy_text(s_ui->wifi_password, sizeof(s_ui->wifi_password), text);
+            }
+        } else {
             copy_text(s_ui->wifi_password, sizeof(s_ui->wifi_password), text);
-            break;
-        case FIRST_RUN_SETUP_STEP_TIME:
-            copy_text(s_ui->timezone_query, sizeof(s_ui->timezone_query), text);
-            break;
-        case FIRST_RUN_SETUP_STEP_AIRSENSE:
-            copy_text(s_ui->pairing_code, sizeof(s_ui->pairing_code), text);
-            break;
-        default:
-            break;
+        }
+    } else if (s_ui->rendered_screen == SCREEN_WIFI_STATIC) {
+        if (input == s_ui->input) {
+            copy_text(s_ui->static_address, sizeof(s_ui->static_address), text);
+        } else if (input == s_ui->input_secondary) {
+            copy_text(s_ui->static_gateway, sizeof(s_ui->static_gateway), text);
+        } else {
+            copy_text(s_ui->static_dns, sizeof(s_ui->static_dns), text);
+        }
+    } else if (s_ui->rendered_screen == SCREEN_TIMEZONE) {
+        copy_text(s_ui->timezone_query, sizeof(s_ui->timezone_query), text);
+    } else if (s_ui->rendered_screen == SCREEN_TIME_ADVANCED) {
+        if (input == s_ui->input) {
+            copy_text(s_ui->ntp_server, sizeof(s_ui->ntp_server), text);
+        } else {
+            copy_text(s_ui->hostname, sizeof(s_ui->hostname), text);
+        }
+    } else if (s_ui->rendered_screen == SCREEN_AIRSENSE_CODE ||
+               s_ui->rendered_screen == SCREEN_AIRSENSE_REJECTED) {
+        copy_text(s_ui->pairing_code, sizeof(s_ui->pairing_code), text);
     }
 }
 
@@ -279,15 +345,15 @@ static void make_footer(bool show_back, const char *secondary,
                         const char *primary, bool primary_enabled)
 {
     if (show_back) {
-        make_button(s_ui->detail, "Back", 30, 428, 112,
+        make_button(s_ui->detail, "Back", 30, 452, 112,
                     UI_ACTION_HEIGHT, false, ACTION_BACK, 0);
     }
     if (secondary) {
-        make_button(s_ui->detail, secondary, 322, 428, 170,
+        make_button(s_ui->detail, secondary, 322, 452, 170,
                     UI_ACTION_HEIGHT, false, ACTION_SKIP, 0);
     }
     if (primary) {
-        lv_obj_t *button = make_button(s_ui->detail, primary, 506, 428, 186,
+        lv_obj_t *button = make_button(s_ui->detail, primary, 506, 452, 186,
                                        UI_ACTION_HEIGHT, true,
                                        ACTION_PRIMARY, 0);
         set_button_enabled(button, primary_enabled);
@@ -298,11 +364,14 @@ static void set_action_error(esp_err_t err, const char *action)
 {
     if (!s_ui) return;
     if (err == ESP_OK) {
+        bool had_error = s_ui->action_error[0] != '\0';
         s_ui->action_error[0] = '\0';
+        if (had_error) s_ui->rendered_key = 0;
         return;
     }
     snprintf(s_ui->action_error, sizeof(s_ui->action_error),
              "%s could not start (%s).", action, esp_err_to_name(err));
+    s_ui->rendered_key = 0;
 }
 
 static void render_action_error(void)
@@ -311,9 +380,57 @@ static void render_action_error(void)
                               ? s_ui->live.error_message
                               : s_ui->action_error;
     if (message[0]) {
-        make_label(s_ui->detail, message, 30, 400, 650,
+        make_label(s_ui->detail, message, 30, 423, 650,
                    FONT_SMALL, COLOR_FAULT);
     }
+}
+
+static void make_receipt_row(lv_obj_t *parent, int y, const char *label,
+                             const char *value, uint32_t value_color)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_pos(row, 30, y);
+    lv_obj_set_size(row, 658, 48);
+    style_surface(row, COLOR_CARD, 14);
+    make_label(row, label, 16, 14, 205, FONT_BODY, COLOR_SECONDARY);
+    lv_obj_t *right = make_label(row, value, 224, 14, 414,
+                                 FONT_MONO_SMALL, value_color);
+    lv_obj_set_style_text_align(right, LV_TEXT_ALIGN_RIGHT, 0);
+}
+
+static void render_welcome(void)
+{
+    make_title("Set up SomnoTrace at the bedside",
+               "Four steps make tonight work. Alerts and uploads are optional and can wait.");
+
+    static const char *const items[] = {
+        "Connect 2.4 GHz Wi-Fi",
+        "Set the local clock",
+        "Pair the AirSense 11",
+        "Confirm recording storage",
+    };
+    for (unsigned i = 0; i < 4; i++) {
+        lv_obj_t *number = lv_obj_create(s_ui->detail);
+        lv_obj_set_pos(number, 34, 132 + (int)i * 52);
+        lv_obj_set_size(number, 30, 30);
+        style_surface(number, COLOR_CONTROL, 15);
+        char text[3];
+        snprintf(text, sizeof(text), "%u", i + 1);
+        lv_obj_t *digit = make_label(number, text, 0, 7, 30,
+                                     FONT_SMALL, COLOR_TEXT);
+        lv_obj_set_style_text_align(digit, LV_TEXT_ALIGN_CENTER, 0);
+        make_label(s_ui->detail, items[i], 78, 137 + (int)i * 52,
+                   580, FONT_ROW, COLOR_TEXT);
+    }
+    make_notice("Card check runs automatically",
+                "Its live result stays in the header throughout setup.",
+                350, COLOR_LIVE);
+
+    lv_obj_t *back = make_button(s_ui->detail, "Back", 30, 452, 112,
+                                 UI_ACTION_HEIGHT, false, ACTION_BACK, 0);
+    set_button_enabled(back, false);
+    make_button(s_ui->detail, "Start setup", 500, 452, 188,
+                UI_ACTION_HEIGHT, true, ACTION_PRIMARY, 0);
 }
 
 static const char *step_label(first_run_setup_step_t step)
@@ -337,58 +454,74 @@ static const char *step_status(first_run_setup_step_t step)
         s_ui->durable.state.continue_without_recording) {
         return "Not recording";
     }
-    if ((s_ui->durable.state.skipped_mask & bit) != 0) return "Skipped";
     if (step == FIRST_RUN_SETUP_STEP_ALERTS ||
-        step == FIRST_RUN_SETUP_STEP_UPLOADS) return "Optional";
-    return "Not set";
+        step == FIRST_RUN_SETUP_STEP_UPLOADS) return "Optional · can wait";
+    if ((s_ui->durable.state.skipped_mask & bit) != 0) return "Skipped";
+    return "Not set up";
 }
 
 static void render_header(void)
 {
     char text[96];
-    if (s_ui->live.wifi_configured && s_ui->live.connected_ssid[0]) {
-        snprintf(text, sizeof(text), "Wi-Fi  %s", s_ui->live.connected_ssid);
-    } else if (s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_SCANNING ||
-               s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_CONNECTING) {
-        copy_text(text, sizeof(text), "Wi-Fi  Working");
-    } else {
-        copy_text(text, sizeof(text), "Wi-Fi  Not connected");
-    }
-    lv_label_set_text(s_ui->header_wifi, text);
-
     if (s_ui->live.time_configured) {
-        snprintf(text, sizeof(text), "Time  %s",
-                 s_ui->live.local_time[0] ? s_ui->live.local_time : "Set");
+        if (s_ui->live.local_time[0] && s_ui->live.timezone_id[0]) {
+            snprintf(text, sizeof(text), "%s  %s", s_ui->live.local_time,
+                     s_ui->live.timezone_id);
+        } else if (s_ui->live.local_time[0]) {
+            copy_text(text, sizeof(text), s_ui->live.local_time);
+        } else {
+            copy_text(text, sizeof(text), "Clock set");
+        }
+        lv_obj_set_style_text_color(s_ui->header_clock,
+                                    lv_color_hex(COLOR_SECONDARY), 0);
     } else {
-        copy_text(text, sizeof(text), "Time  Not set");
+        copy_text(text, sizeof(text), "Clock not set · UTC");
+        lv_obj_set_style_text_color(s_ui->header_clock,
+                                    lv_color_hex(COLOR_AMBER), 0);
     }
-    lv_label_set_text(s_ui->header_time, text);
+    lv_label_set_text(s_ui->header_clock, text);
 
     switch (s_ui->live.card_state) {
         case FIRST_RUN_SETUP_UI_CARD_READY:
-            snprintf(text, sizeof(text), "Card  %s",
-                     s_ui->live.card_summary[0]
-                         ? s_ui->live.card_summary : "Ready");
+            copy_text(text, sizeof(text), "Card ready");
             break;
         case FIRST_RUN_SETUP_UI_CARD_CHECKING:
-            copy_text(text, sizeof(text), "Card  Checking");
+            copy_text(text, sizeof(text), "Checking card");
             break;
         case FIRST_RUN_SETUP_UI_CARD_FULL:
-            copy_text(text, sizeof(text), "Card  Full");
+            copy_text(text, sizeof(text), "Card full");
             break;
         case FIRST_RUN_SETUP_UI_CARD_UNREADABLE:
-            copy_text(text, sizeof(text), "Card  Unreadable");
+            copy_text(text, sizeof(text), "Card unreadable");
             break;
         case FIRST_RUN_SETUP_UI_CARD_MISSING:
         default:
-            copy_text(text, sizeof(text), "Card  Not found");
+            copy_text(text, sizeof(text), "No card");
             break;
     }
     lv_label_set_text(s_ui->header_card, text);
+    uint32_t card_color = s_ui->live.card_state == FIRST_RUN_SETUP_UI_CARD_READY
+                              ? COLOR_LIVE
+                              : (s_ui->live.card_state ==
+                                         FIRST_RUN_SETUP_UI_CARD_CHECKING
+                                     ? COLOR_AMBER
+                                     : COLOR_FAULT);
+    lv_obj_set_style_border_color(lv_obj_get_parent(s_ui->header_card),
+                                  lv_color_hex(card_color), 0);
 }
 
 static void render_rail(void)
 {
+    unsigned complete = 0;
+    for (unsigned i = 0; i < FIRST_RUN_SETUP_STEP_COUNT; i++) {
+        if (first_run_setup_step_is_resolved(&s_ui->durable.state, i)) {
+            complete++;
+        }
+    }
+    char progress[32];
+    snprintf(progress, sizeof(progress), "%u of 6 complete", complete);
+    lv_label_set_text(s_ui->rail_complete, progress);
+
     for (unsigned i = 0; i < FIRST_RUN_SETUP_STEP_COUNT; i++) {
         bool selected = s_ui->displayed_step == (first_run_setup_step_t)i;
         bool resolved = first_run_setup_step_is_resolved(
@@ -407,6 +540,15 @@ static void render_rail(void)
         lv_obj_set_style_bg_color(s_ui->rail_dots[i],
                                   lv_color_hex(resolved ? COLOR_LIVE
                                                         : COLOR_DISABLED), 0);
+        char number[3];
+        snprintf(number, sizeof(number), "%u", i + 1);
+        lv_label_set_text(s_ui->rail_numbers[i],
+                          resolved ? LV_SYMBOL_OK : number);
+        lv_obj_set_style_text_font(s_ui->rail_numbers[i],
+                                   resolved ? LV_FONT_DEFAULT : FONT_SMALL, 0);
+        lv_obj_set_style_text_color(s_ui->rail_numbers[i],
+                                    lv_color_hex(resolved ? COLOR_BASE
+                                                          : COLOR_TEXT), 0);
     }
 }
 
@@ -420,10 +562,13 @@ static void render_wifi_results(void)
         make_notice("No networks yet",
                     "Move closer to the router, then scan again.",
                     138, COLOR_AMBER);
+        make_button(s_ui->detail, "Join a hidden network",
+                    30, 238, 300, UI_ACTION_HEIGHT, false,
+                    ACTION_HIDDEN_NETWORK, 0);
     } else {
         lv_obj_t *list = lv_obj_create(s_ui->detail);
         lv_obj_set_pos(list, 22, 120);
-        lv_obj_set_size(list, 678, 296);
+        lv_obj_set_size(list, 678, 318);
         style_surface(list, COLOR_PANEL, 0);
         lv_obj_set_scroll_dir(list, LV_DIR_VER);
         lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
@@ -445,33 +590,175 @@ static void render_wifi_results(void)
                                          FONT_MONO_SMALL, COLOR_SECONDARY);
             lv_obj_set_style_text_align(right, LV_TEXT_ALIGN_RIGHT, 0);
         }
+        lv_obj_t *hidden = make_button(list, "Hidden network",
+                                       8, 8 + (int)count * 54, 654,
+                                       UI_RESULT_HEIGHT, false,
+                                       ACTION_HIDDEN_NETWORK, 0);
+        lv_obj_t *hidden_label = lv_obj_get_child(hidden, 0);
+        lv_obj_set_width(hidden_label, 590);
+        lv_obj_align(hidden_label, LV_ALIGN_LEFT_MID, 18, 0);
     }
-    make_button(s_ui->detail, "Scan again", 522, 428, 170,
+    uint8_t slots_max = s_ui->live.wifi_slots_max
+                            ? s_ui->live.wifi_slots_max : 4;
+    char slots[40];
+    snprintf(slots, sizeof(slots), "%u of %u saved networks",
+             s_ui->live.wifi_slots_used, slots_max);
+    make_label(s_ui->detail, slots, 30, 468, 300,
+               FONT_SMALL, COLOR_TERTIARY);
+    make_button(s_ui->detail, "Scan again", 518, 452, 170,
                 UI_ACTION_HEIGHT, false, ACTION_RETRY, 0);
 }
 
 static void render_wifi_password(void)
 {
+    bool hidden = s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_HIDDEN;
+    bool rejected = s_ui->live.wifi_state ==
+                    FIRST_RUN_SETUP_UI_WIFI_AUTH_FAILED;
     const first_run_setup_ui_wifi_result_t *network =
         s_ui->selected_wifi >= 0 &&
                 s_ui->selected_wifi < s_ui->live.wifi_result_count
             ? &s_ui->live.wifi_results[s_ui->selected_wifi]
             : NULL;
-    char body[96];
-    snprintf(body, sizeof(body), "Connect to %s. Passwords stay on this device.",
-             network && network->ssid[0] ? network->ssid : "the selected network");
-    make_title("Network password", body);
-    s_ui->input = make_input(network && !network->secure
-                                 ? "Open network - no password required"
-                                 : "Enter password",
-                             30, 126, 472, network ? network->secure : true, 64);
-    lv_textarea_set_text(s_ui->input, s_ui->wifi_password);
-    lv_obj_t *connect = make_button(s_ui->detail, "Connect", 516, 126, 176,
-                                    UI_ACTION_HEIGHT, true,
-                                    ACTION_PRIMARY, 0);
-    set_button_enabled(connect, network != NULL);
+    char body[128];
+    snprintf(body, sizeof(body),
+             rejected ? "The router rejected that password. Check capitals and spaces; the value is preserved below."
+                      : "Connect to %s. Passwords stay on this device.",
+             hidden ? "a hidden 2.4 GHz network"
+                    : (network && network->ssid[0]
+                           ? network->ssid : "the selected network"));
+    make_title(rejected ? "That password did not work" :
+                          (hidden ? "Join a hidden network" :
+                                    "Network password"), body);
+
+    int password_y = hidden ? 158 : 116;
+    if (hidden) {
+        s_ui->input = make_input("Network name (SSID)", 30, 100, 470,
+                                 false, 32);
+        lv_textarea_set_text(s_ui->input, s_ui->hidden_ssid);
+        s_ui->input_secondary = make_input("Password", 30, password_y,
+                                           470, !s_ui->password_visible, 64);
+        lv_textarea_set_text(s_ui->input_secondary, s_ui->wifi_password);
+    } else {
+        s_ui->input = make_input(network && !network->secure
+                                     ? "Open network - no password required"
+                                     : "Enter password",
+                                 30, password_y, 470,
+                                 !s_ui->password_visible &&
+                                     (!network || network->secure), 64);
+        lv_textarea_set_text(s_ui->input, s_ui->wifi_password);
+    }
+    lv_obj_t *password_input = hidden ? s_ui->input_secondary : s_ui->input;
+    if (rejected) {
+        lv_obj_set_style_border_color(password_input,
+                                      lv_color_hex(COLOR_FAULT), 0);
+        lv_obj_set_style_border_width(password_input, 2, 0);
+    }
+
+    int sheet_y = hidden ? 220 : 180;
+    make_label(s_ui->detail, "KEYBOARD", 30, sheet_y + 15, 130,
+               FONT_MONO_SMALL, COLOR_TERTIARY);
+    make_button(s_ui->detail,
+                s_ui->password_visible ? "Hide" : "Show",
+                450, sheet_y, 104, UI_TOUCH_TARGET_MIN, false,
+                ACTION_SHOW_PASSWORD, 0);
+    make_button(s_ui->detail, "Done", 566, sheet_y, 122,
+                UI_TOUCH_TARGET_MIN, true, ACTION_DONE, 0);
+    s_ui->keyboard = make_keyboard(password_input,
+                                   LV_KEYBOARD_MODE_TEXT_LOWER,
+                                   sheet_y + 52, 522 - (sheet_y + 66));
+    make_button(s_ui->detail, "Back", 30, sheet_y,
+                106, UI_TOUCH_TARGET_MIN, false, ACTION_BACK, 0);
+    lv_obj_t *static_button = make_button(
+        s_ui->detail, "Static address", 148, sheet_y,
+        166, UI_TOUCH_TARGET_MIN, false, ACTION_STATIC_ADDRESS, 0);
+    set_button_enabled(static_button, s_ui->live.static_ipv4_supported);
+}
+
+static void configure_ipv4_input(lv_obj_t *input, const char *value)
+{
+    lv_textarea_set_accepted_chars(input, "0123456789.");
+    lv_textarea_set_text(input, value);
+    lv_obj_set_style_text_font(input, FONT_MONO, 0);
+}
+
+static void render_wifi_static(void)
+{
+    make_title("Static network address",
+               "Optional. Leave this screen unchanged to keep automatic DHCP addressing.");
+    if (!s_ui->live.static_ipv4_supported ||
+        !s_ui->controller.wifi_set_static_ipv4) {
+        make_notice("Not available in this firmware",
+                    "Automatic DHCP addressing remains enabled and fully supported.",
+                    142, COLOR_AMBER);
+        lv_obj_t *back = make_button(s_ui->detail, "Back", 30, 452, 112,
+                                     UI_ACTION_HEIGHT, false,
+                                     ACTION_BACK, 0);
+        (void)back;
+        return;
+    }
+
+    make_label(s_ui->detail, "Address", 30, 105, 112,
+               FONT_BODY, COLOR_SECONDARY);
+    make_label(s_ui->detail, "Gateway", 30, 163, 112,
+               FONT_BODY, COLOR_SECONDARY);
+    make_label(s_ui->detail, "DNS", 30, 221, 112,
+               FONT_BODY, COLOR_SECONDARY);
+    s_ui->input = make_input("192.168.1.50", 142, 90, 360,
+                             false, 15);
+    s_ui->input_secondary = make_input("192.168.1.1", 142, 148, 360,
+                                       false, 15);
+    s_ui->input_tertiary = make_input("1.1.1.1", 142, 206, 360,
+                                      false, 15);
+    configure_ipv4_input(s_ui->input, s_ui->static_address);
+    configure_ipv4_input(s_ui->input_secondary, s_ui->static_gateway);
+    configure_ipv4_input(s_ui->input_tertiary, s_ui->static_dns);
+
+    make_label(s_ui->detail, "IP KEYPAD", 30, 278, 130,
+               FONT_MONO_SMALL, COLOR_TERTIARY);
+    make_button(s_ui->detail, "Back", 404, 263, 112,
+                UI_TOUCH_TARGET_MIN, false, ACTION_BACK, 0);
+    make_button(s_ui->detail, "Done", 530, 263, 158,
+                UI_TOUCH_TARGET_MIN, true, ACTION_DONE, 0);
     s_ui->keyboard = make_keyboard(s_ui->input,
-                                   LV_KEYBOARD_MODE_TEXT_LOWER, 195, 286);
+                                   LV_KEYBOARD_MODE_NUMBER, 315, 193);
+}
+
+static void render_wifi_blocked(void)
+{
+    make_title("Wi-Fi scan is unavailable right now",
+               "Previously scanned networks remain listed. Rescan returns when the radio is free.");
+    make_notice("Scan paused",
+                s_ui->live.wifi_scan_blocked_reason[0]
+                    ? s_ui->live.wifi_scan_blocked_reason
+                    : "Therapy is recording or another radio operation is active.",
+                132, COLOR_AMBER);
+
+    unsigned count = bounded_count(s_ui->live.wifi_result_count,
+                                   FIRST_RUN_SETUP_UI_WIFI_RESULT_MAX);
+    lv_obj_t *list = lv_obj_create(s_ui->detail);
+    lv_obj_set_pos(list, 22, 224);
+    lv_obj_set_size(list, 678, 208);
+    style_surface(list, COLOR_PANEL, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    for (unsigned i = 0; i < count; i++) {
+        char row_text[72];
+        snprintf(row_text, sizeof(row_text), "%s  %s  %d dBm",
+                 s_ui->live.wifi_results[i].ssid,
+                 s_ui->live.wifi_results[i].secure ? "Secure" : "Open",
+                 (int)s_ui->live.wifi_results[i].rssi_dbm);
+        lv_obj_t *row = make_button(list, row_text, 8,
+                                    8 + (int)i * 50, 654,
+                                    UI_TOUCH_TARGET_MIN, false,
+                                    ACTION_WIFI_RESULT, i);
+        set_button_enabled(row, false);
+    }
+    make_button(s_ui->detail, "Back", 30, 452, 112,
+                UI_ACTION_HEIGHT, false, ACTION_BACK, 0);
+    lv_obj_t *rescan = make_button(s_ui->detail, "Rescan", 518, 452, 170,
+                                   UI_ACTION_HEIGHT, false,
+                                   ACTION_RETRY, 0);
+    set_button_enabled(rescan, false);
 }
 
 static void render_wifi(void)
@@ -596,6 +883,44 @@ static void render_time_results(void)
                 UI_TOUCH_TARGET_MIN, false, ACTION_SKIP, 0);
 }
 
+static void render_time_advanced(void)
+{
+    make_title("Network time and device name",
+               "The defaults are already suitable. Change them only when your network requires it.");
+
+    make_label(s_ui->detail, "NTP server", 30, 108, 130,
+               FONT_BODY, COLOR_SECONDARY);
+    s_ui->input = make_input("Automatic via DHCP", 162, 92, 420,
+                             false, 63);
+    lv_textarea_set_text(s_ui->input, s_ui->ntp_server);
+    make_label(s_ui->detail,
+               s_ui->live.time_sync_status[0]
+                   ? s_ui->live.time_sync_status : "Automatic time source",
+               594, 108, 94, FONT_SMALL,
+               s_ui->live.time_configured ? COLOR_SUCCESS : COLOR_AMBER);
+
+    make_label(s_ui->detail, "Hostname", 30, 166, 130,
+               FONT_BODY, COLOR_SECONDARY);
+    s_ui->input_secondary = make_input("somnotrace", 162, 150, 324,
+                                       false, 10);
+    lv_textarea_set_text(s_ui->input_secondary, s_ui->hostname);
+    lv_obj_t *suffix = lv_obj_create(s_ui->detail);
+    lv_obj_set_pos(suffix, 494, 150);
+    lv_obj_set_size(suffix, 88, UI_ACTION_HEIGHT);
+    style_surface(suffix, COLOR_CONTROL, 15);
+    make_label(suffix, ".local", 8, 15, 72,
+               FONT_MONO_SMALL, COLOR_SECONDARY);
+
+    make_label(s_ui->detail, "KEYBOARD", 30, 222, 130,
+               FONT_MONO_SMALL, COLOR_TERTIARY);
+    make_button(s_ui->detail, "Back", 404, 207, 112,
+                UI_TOUCH_TARGET_MIN, false, ACTION_BACK, 0);
+    make_button(s_ui->detail, "Done", 530, 207, 158,
+                UI_TOUCH_TARGET_MIN, true, ACTION_DONE, 0);
+    s_ui->keyboard = make_keyboard(s_ui->input,
+                                   LV_KEYBOARD_MODE_TEXT_LOWER, 259, 249);
+}
+
 static void render_time(void)
 {
     switch (s_ui->live.time_state) {
@@ -665,9 +990,10 @@ static void render_airsense_results(void)
         lv_obj_t *label = lv_obj_get_child(row, 0);
         lv_obj_set_width(label, 440);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 18, 0);
+        const char *signal = device->rssi_dbm >= -60 ? "Strong" :
+                             (device->rssi_dbm >= -75 ? "Good" : "Weak");
         char meta[48];
-        snprintf(meta, sizeof(meta), "%s  %d dBm", device->address,
-                 (int)device->rssi_dbm);
+        snprintf(meta, sizeof(meta), "%s  %s", signal, device->address);
         lv_obj_t *right = make_label(row, meta, 455, 15, 190,
                                      FONT_MONO_SMALL, COLOR_SECONDARY);
         lv_obj_set_style_text_align(right, LV_TEXT_ALIGN_RIGHT, 0);
@@ -676,21 +1002,88 @@ static void render_airsense_results(void)
                 UI_ACTION_HEIGHT, false, ACTION_RETRY, 0);
 }
 
-static void render_airsense_code(void)
+static void render_airsense_how(void)
 {
-    make_title("Enter the AirSense code",
-               "A code is now shown on the AirSense. Enter all 4 digits exactly as displayed.");
+    make_title("Get a code from the AirSense",
+               "Pairing begins on the machine, not in its Bluetooth settings.");
+    static const char *const instructions[] = {
+        "On AirSense, tap More",
+        "Open myAir App",
+        "Continue until a code appears",
+        "Leave the 4-digit code showing",
+    };
+    for (unsigned i = 0; i < 4; i++) {
+        lv_obj_t *number = lv_obj_create(s_ui->detail);
+        lv_obj_set_pos(number, 34, 126 + (int)i * 58);
+        lv_obj_set_size(number, 32, 32);
+        style_surface(number, COLOR_CONTROL, 16);
+        char text[3];
+        snprintf(text, sizeof(text), "%u", i + 1);
+        lv_obj_t *digit = make_label(number, text, 0, 8, 32,
+                                     FONT_SMALL, COLOR_TEXT);
+        lv_obj_set_style_text_align(digit, LV_TEXT_ALIGN_CENTER, 0);
+        make_label(s_ui->detail, instructions[i], 82,
+                   132 + (int)i * 58, 580, FONT_ROW, COLOR_TEXT);
+    }
+    make_label(s_ui->detail, "Bluetooth only · nothing is plugged in",
+               30, 414, 420, FONT_SMALL, COLOR_TERTIARY);
+    make_button(s_ui->detail, "Skip for now", 270, 452, 170,
+                UI_ACTION_HEIGHT, false, ACTION_SKIP, 0);
+    make_button(s_ui->detail, "The code is showing · Scan",
+                452, 452, 236, UI_ACTION_HEIGHT, true,
+                ACTION_PRIMARY, 0);
+}
+
+static void render_airsense_code(bool rejected)
+{
+    if (!rejected &&
+        s_ui->live.airsense_state == FIRST_RUN_SETUP_UI_AIRSENSE_STARTING) {
+        make_title("Waiting for the AirSense code",
+                   "Keep More > myAir App open. The machine will display the code when secure pairing is ready.");
+        make_notice("Starting pairing",
+                    s_ui->live.selected_airsense_address[0]
+                        ? s_ui->live.selected_airsense_address
+                        : "Contacting the selected AirSense",
+                    150, COLOR_LIVE);
+        make_footer(true, "Skip for now", NULL, false);
+        return;
+    }
+    if (!rejected &&
+        s_ui->live.airsense_state == FIRST_RUN_SETUP_UI_AIRSENSE_CONFIRMING) {
+        make_title("Checking the 4-digit code",
+                   "SomnoTrace and the AirSense are confirming the secure connection.");
+        make_notice("Pairing", "This normally takes a few seconds.",
+                    150, COLOR_LIVE);
+        make_footer(true, "Skip for now", NULL, false);
+        return;
+    }
+    make_title(rejected ? "That code was rejected" :
+                          "Enter the AirSense code",
+               rejected
+                   ? "It may have expired. Get a fresh code from More > myAir App, or correct a mistyped digit."
+                   : "Enter all 4 digits exactly as they appear on the AirSense screen.");
     s_ui->input = make_input("4-digit code", 30, 126, 310,
                              false, 4);
     lv_textarea_set_accepted_chars(s_ui->input, "0123456789");
     lv_textarea_set_text(s_ui->input, s_ui->pairing_code);
     lv_obj_set_style_text_font(s_ui->input, FONT_MONO, 0);
-    lv_obj_t *pair = make_button(s_ui->detail, "Pair", 516, 126, 176,
-                                 UI_ACTION_HEIGHT, true,
-                                 ACTION_PRIMARY, 0);
-    set_button_enabled(pair, true);
+    if (rejected) {
+        lv_obj_set_style_border_color(s_ui->input,
+                                      lv_color_hex(COLOR_FAULT), 0);
+        lv_obj_set_style_border_width(s_ui->input, 2, 0);
+    }
+    make_label(s_ui->detail,
+               s_ui->live.selected_airsense_address[0]
+                   ? s_ui->live.selected_airsense_address
+                   : "Selected AirSense",
+               360, 143, 328, FONT_MONO_SMALL, COLOR_SECONDARY);
+    make_button(s_ui->detail, rejected ? "Fresh code" : "Back",
+                30, 190, 132, UI_TOUCH_TARGET_MIN, false,
+                ACTION_BACK, 0);
+    make_button(s_ui->detail, "Pair", 516, 190, 172,
+                UI_TOUCH_TARGET_MIN, true, ACTION_DONE, 0);
     s_ui->keyboard = make_keyboard(s_ui->input,
-                                   LV_KEYBOARD_MODE_NUMBER, 198, 282);
+                                   LV_KEYBOARD_MODE_NUMBER, 244, 264);
 }
 
 static void render_airsense(void)
@@ -722,7 +1115,7 @@ static void render_airsense(void)
             make_footer(true, "Skip for now", NULL, false);
             break;
         case FIRST_RUN_SETUP_UI_AIRSENSE_WAIT_CODE:
-            render_airsense_code();
+            render_airsense_code(false);
             break;
         case FIRST_RUN_SETUP_UI_AIRSENSE_CONFIRMING:
             make_title("Checking the code",
@@ -732,24 +1125,35 @@ static void render_airsense(void)
             make_footer(true, "Skip for now", NULL, false);
             break;
         case FIRST_RUN_SETUP_UI_AIRSENSE_CODE_REJECTED:
-            make_title("The code was rejected",
-                       "The code may have expired. Restart myAir App on the machine and try again.");
-            make_notice("Not paired",
-                        s_ui->live.error_message[0]
-                            ? s_ui->live.error_message
-                            : "No connection was saved.",
-                        145, COLOR_FAULT);
-            make_footer(true, "Skip for now", "Start again", true);
+            render_airsense_code(true);
             break;
         case FIRST_RUN_SETUP_UI_AIRSENSE_PAIRED:
             make_title("AirSense paired",
-                       "SomnoTrace can now follow therapy status and live respiratory data.");
-            make_notice(s_ui->live.paired_name[0]
-                            ? s_ui->live.paired_name : "AirSense 11",
-                        s_ui->live.paired_address[0]
-                            ? s_ui->live.paired_address
-                            : "Secure Bluetooth connection saved",
-                        150, COLOR_SUCCESS);
+                       "The secure client identity is saved; the displayed code is not needed again.");
+            make_receipt_row(s_ui->detail, 112, "Advertised name",
+                             s_ui->live.paired_name[0]
+                                 ? s_ui->live.paired_name : "Not reported",
+                             COLOR_TEXT);
+            make_receipt_row(s_ui->detail, 164, "Bluetooth address",
+                             s_ui->live.paired_address[0]
+                                 ? s_ui->live.paired_address : "Not reported",
+                             COLOR_TEXT);
+            make_receipt_row(s_ui->detail, 216, "Client identity",
+                             s_ui->live.paired_client_id[0]
+                                 ? s_ui->live.paired_client_id : "Not reported",
+                             COLOR_TEXT);
+            make_receipt_row(s_ui->detail, 268, "Serial",
+                             s_ui->live.paired_serial_available &&
+                                     s_ui->live.paired_serial[0]
+                                 ? s_ui->live.paired_serial
+                                 : "Unavailable at pairing",
+                             COLOR_TERTIARY);
+            make_receipt_row(s_ui->detail, 320, "Firmware",
+                             s_ui->live.paired_firmware_available &&
+                                     s_ui->live.paired_firmware[0]
+                                 ? s_ui->live.paired_firmware
+                                 : "Unavailable at pairing",
+                             COLOR_TERTIARY);
             make_footer(false, NULL, "Continue", true);
             break;
         case FIRST_RUN_SETUP_UI_AIRSENSE_ERROR:
@@ -764,12 +1168,7 @@ static void render_airsense(void)
             break;
         case FIRST_RUN_SETUP_UI_AIRSENSE_INSTRUCTIONS:
         default:
-            make_title("Put AirSense in pairing mode",
-                       "Start on the machine. On the AirSense 11, open More > myAir App before scanning here.");
-            make_notice("Machine first",
-                        "Leave myAir App open. SomnoTrace will scan, then the machine will show a 4-digit code.",
-                        154, COLOR_LIVE);
-            make_footer(false, "Skip for now", "I've opened myAir App", true);
+            render_airsense_how();
             break;
     }
     render_action_error();
@@ -779,15 +1178,24 @@ static void render_card(void)
 {
     switch (s_ui->live.card_state) {
         case FIRST_RUN_SETUP_UI_CARD_READY:
+            {
+            char capacity[96];
+            if (s_ui->live.card_estimate_available) {
+                snprintf(capacity, sizeof(capacity),
+                         "Estimated capacity: about %u nights. O2 recordings use additional space.",
+                         (unsigned)s_ui->live.card_estimated_nights);
+            } else {
+                copy_text(capacity, sizeof(capacity),
+                          s_ui->live.card_summary[0]
+                              ? s_ui->live.card_summary
+                              : "Writable FAT32 card detected");
+            }
             make_title("microSD card is ready",
                        "New therapy sessions can be recorded and reviewed in History.");
-            make_notice("Ready",
-                        s_ui->live.card_summary[0]
-                            ? s_ui->live.card_summary
-                            : "Writable FAT32 card detected",
-                        150, COLOR_SUCCESS);
+            make_notice("Ready", capacity, 150, COLOR_SUCCESS);
             make_footer(false, NULL, "Continue", true);
             break;
+            }
         case FIRST_RUN_SETUP_UI_CARD_CHECKING:
             make_title("Checking the microSD card",
                        "SomnoTrace is confirming that the card can be read and written.");
@@ -820,7 +1228,7 @@ static void render_card(void)
             make_title("Insert a microSD card",
                        "FAT32 with MBR, 8 GB minimum; a reputable 16-32 GB card is recommended.");
             make_notice("No card detected",
-                        "SomnoTrace can run therapy, but it cannot record new nights without a card.",
+                        "Insert it in the board's TF/microSD slot. Therapy works, but new nights will not be recorded.",
                         145, COLOR_AMBER);
             make_footer(true, "Continue without recording", "Check again", true);
             break;
@@ -857,31 +1265,192 @@ static void render_optional(first_run_setup_step_t step)
 static void render_finished(void)
 {
     make_title("SomnoTrace is ready",
-               "Setup choices are saved. You can change them later in Manage.");
-    make_notice("Ready for tonight",
-                s_ui->live.card_state == FIRST_RUN_SETUP_UI_CARD_READY
-                    ? "AirSense status and card recording are ready."
-                    : "Therapy can run; card recording remains unavailable.",
-                150, COLOR_SUCCESS);
-    make_button(s_ui->detail, "Open SomnoTrace", 472, 428, 220,
+               "Setup choices are saved. Here is exactly what is ready for tonight.");
+    char recording[72];
+    if (s_ui->live.card_state == FIRST_RUN_SETUP_UI_CARD_READY &&
+        s_ui->live.card_estimate_available) {
+        snprintf(recording, sizeof(recording), "About %u nights",
+                 (unsigned)s_ui->live.card_estimated_nights);
+    } else if (s_ui->live.card_state == FIRST_RUN_SETUP_UI_CARD_READY) {
+        copy_text(recording, sizeof(recording), "Card ready");
+    } else {
+        copy_text(recording, sizeof(recording), "Not recording");
+    }
+    make_receipt_row(s_ui->detail, 100, "Wi-Fi",
+                     s_ui->live.wifi_configured
+                         ? (s_ui->live.connected_ssid[0]
+                                ? s_ui->live.connected_ssid : "Configured")
+                         : "Not configured",
+                     s_ui->live.wifi_configured ? COLOR_TEXT : COLOR_TERTIARY);
+    make_receipt_row(s_ui->detail, 150, "Time zone",
+                     s_ui->live.time_configured
+                         ? (s_ui->live.timezone_id[0]
+                                ? s_ui->live.timezone_id : "Configured")
+                         : "Not configured",
+                     s_ui->live.time_configured ? COLOR_TEXT : COLOR_TERTIARY);
+    make_receipt_row(s_ui->detail, 200, "AirSense",
+                     s_ui->live.airsense_paired
+                         ? (s_ui->live.paired_name[0]
+                                ? s_ui->live.paired_name : "Paired")
+                         : "Not configured",
+                     s_ui->live.airsense_paired ? COLOR_TEXT : COLOR_TERTIARY);
+    make_receipt_row(s_ui->detail, 250, "Recording", recording,
+                     s_ui->live.card_state == FIRST_RUN_SETUP_UI_CARD_READY
+                         ? COLOR_TEXT : COLOR_TERTIARY);
+    make_receipt_row(s_ui->detail, 300, "Alerts",
+                     s_ui->live.alerts_configured
+                         ? "Configured" : "Not configured",
+                     s_ui->live.alerts_configured ? COLOR_TEXT : COLOR_TERTIARY);
+    make_receipt_row(s_ui->detail, 350, "Uploads",
+                     s_ui->live.uploads_configured
+                         ? "Configured" : "Not configured",
+                     s_ui->live.uploads_configured ? COLOR_TEXT : COLOR_TERTIARY);
+    if (s_ui->live.card_estimate_available) {
+        make_label(s_ui->detail,
+                   "Capacity estimate; O2 recordings use additional space.",
+                   30, 407, 430, FONT_SMALL, COLOR_TERTIARY);
+    }
+    make_button(s_ui->detail, "Set up alerts", 316, 452, 170,
+                UI_ACTION_HEIGHT, false, ACTION_RAIL,
+                FIRST_RUN_SETUP_STEP_ALERTS);
+    make_button(s_ui->detail, "Open SomnoTrace", 498, 452, 190,
                 UI_ACTION_HEIGHT, true, ACTION_PRIMARY, 0);
 }
 
-static void render_detail(void)
+static setup_screen_t desired_screen(void)
 {
-    s_ui->input = NULL;
-    s_ui->keyboard = NULL;
-    lv_obj_clean(s_ui->detail);
+    if (s_ui->displayed_step == FIRST_RUN_SETUP_STEP_FINISHED) {
+        return SCREEN_READY;
+    }
     switch (s_ui->displayed_step) {
-        case FIRST_RUN_SETUP_STEP_WIFI: render_wifi(); break;
-        case FIRST_RUN_SETUP_STEP_TIME: render_time(); break;
-        case FIRST_RUN_SETUP_STEP_AIRSENSE: render_airsense(); break;
-        case FIRST_RUN_SETUP_STEP_CARD: render_card(); break;
+        case FIRST_RUN_SETUP_STEP_WIFI:
+            if (!s_ui->welcome_dismissed &&
+                s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_IDLE &&
+                s_ui->live.wifi_result_count == 0 &&
+                !first_run_setup_step_is_resolved(
+                    &s_ui->durable.state, FIRST_RUN_SETUP_STEP_WIFI)) {
+                return SCREEN_WELCOME;
+            }
+            if (s_ui->live.wifi_state ==
+                FIRST_RUN_SETUP_UI_WIFI_STATIC_ADDRESS) {
+                return SCREEN_WIFI_STATIC;
+            }
+            if (s_ui->live.wifi_state ==
+                    FIRST_RUN_SETUP_UI_WIFI_SCAN_BLOCKED ||
+                s_ui->live.wifi_scan_blocked) {
+                return SCREEN_WIFI_SCAN_BLOCKED;
+            }
+            if (s_ui->live.wifi_state ==
+                FIRST_RUN_SETUP_UI_WIFI_AUTH_FAILED) {
+                return SCREEN_WIFI_PASSWORD_ERROR;
+            }
+            if (s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_PASSWORD ||
+                s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_HIDDEN) {
+                return SCREEN_WIFI_PASSWORD;
+            }
+            return SCREEN_WIFI_SCAN;
+
+        case FIRST_RUN_SETUP_STEP_TIME:
+            return s_ui->live.time_state == FIRST_RUN_SETUP_UI_TIME_ADVANCED
+                       ? SCREEN_TIME_ADVANCED : SCREEN_TIMEZONE;
+
+        case FIRST_RUN_SETUP_STEP_AIRSENSE:
+            switch (s_ui->live.airsense_state) {
+                case FIRST_RUN_SETUP_UI_AIRSENSE_INSTRUCTIONS:
+                    return SCREEN_AIRSENSE_HOW;
+                case FIRST_RUN_SETUP_UI_AIRSENSE_NOT_FOUND:
+                    return SCREEN_AIRSENSE_NONE;
+                case FIRST_RUN_SETUP_UI_AIRSENSE_WAIT_CODE:
+                case FIRST_RUN_SETUP_UI_AIRSENSE_STARTING:
+                case FIRST_RUN_SETUP_UI_AIRSENSE_CONFIRMING:
+                    return SCREEN_AIRSENSE_CODE;
+                case FIRST_RUN_SETUP_UI_AIRSENSE_CODE_REJECTED:
+                case FIRST_RUN_SETUP_UI_AIRSENSE_ERROR:
+                    return SCREEN_AIRSENSE_REJECTED;
+                case FIRST_RUN_SETUP_UI_AIRSENSE_PAIRED:
+                    return SCREEN_AIRSENSE_PAIRED;
+                case FIRST_RUN_SETUP_UI_AIRSENSE_SCANNING:
+                case FIRST_RUN_SETUP_UI_AIRSENSE_SELECT:
+                default:
+                    return SCREEN_AIRSENSE_SCAN;
+            }
+
+        case FIRST_RUN_SETUP_STEP_CARD: return SCREEN_CARD;
         case FIRST_RUN_SETUP_STEP_ALERTS:
         case FIRST_RUN_SETUP_STEP_UPLOADS:
-            render_optional(s_ui->displayed_step);
+            return SCREEN_CARD; /* differentiated by the durable step key */
+        default: return SCREEN_READY;
+    }
+}
+
+static uint32_t desired_render_key(setup_screen_t screen)
+{
+    uint32_t key = (uint32_t)screen;
+    key |= (uint32_t)s_ui->displayed_step << 8;
+    switch (s_ui->displayed_step) {
+        case FIRST_RUN_SETUP_STEP_WIFI:
+            key |= (uint32_t)s_ui->live.wifi_state << 12;
+            key |= (uint32_t)s_ui->live.wifi_result_count << 20;
+            if (s_ui->password_visible) key |= 1U << 28;
             break;
-        case FIRST_RUN_SETUP_STEP_FINISHED:
+        case FIRST_RUN_SETUP_STEP_TIME:
+            key |= (uint32_t)s_ui->live.time_state << 12;
+            key |= (uint32_t)s_ui->live.timezone_result_count << 20;
+            break;
+        case FIRST_RUN_SETUP_STEP_AIRSENSE:
+            key |= (uint32_t)s_ui->live.airsense_state << 12;
+            key |= (uint32_t)s_ui->live.airsense_result_count << 20;
+            break;
+        case FIRST_RUN_SETUP_STEP_CARD:
+            key |= (uint32_t)s_ui->live.card_state << 12;
+            break;
+        case FIRST_RUN_SETUP_STEP_ALERTS:
+            if (s_ui->live.alerts_configured) key |= 1U << 20;
+            break;
+        case FIRST_RUN_SETUP_STEP_UPLOADS:
+            if (s_ui->live.uploads_configured) key |= 1U << 20;
+            break;
+        default:
+            break;
+    }
+    return key ? key : 1U;
+}
+
+static void render_detail(setup_screen_t screen, uint32_t key)
+{
+    s_ui->input = NULL;
+    s_ui->input_secondary = NULL;
+    s_ui->input_tertiary = NULL;
+    s_ui->keyboard = NULL;
+    lv_obj_clean(s_ui->detail);
+    s_ui->rendered_screen = screen;
+    s_ui->rendered_key = key;
+    switch (screen) {
+        case SCREEN_WELCOME: render_welcome(); break;
+        case SCREEN_WIFI_PASSWORD:
+        case SCREEN_WIFI_PASSWORD_ERROR: render_wifi_password(); break;
+        case SCREEN_WIFI_STATIC: render_wifi_static(); break;
+        case SCREEN_WIFI_SCAN_BLOCKED: render_wifi_blocked(); break;
+        case SCREEN_WIFI_SCAN: render_wifi(); break;
+        case SCREEN_TIME_ADVANCED: render_time_advanced(); break;
+        case SCREEN_TIMEZONE: render_time(); break;
+        case SCREEN_AIRSENSE_HOW: render_airsense_how(); break;
+        case SCREEN_AIRSENSE_CODE: render_airsense_code(false); break;
+        case SCREEN_AIRSENSE_REJECTED: render_airsense_code(true); break;
+        case SCREEN_AIRSENSE_SCAN:
+        case SCREEN_AIRSENSE_NONE:
+        case SCREEN_AIRSENSE_PAIRED:
+            render_airsense();
+            break;
+        case SCREEN_CARD:
+            if (s_ui->displayed_step == FIRST_RUN_SETUP_STEP_ALERTS ||
+                s_ui->displayed_step == FIRST_RUN_SETUP_STEP_UPLOADS) {
+            render_optional(s_ui->displayed_step);
+            } else {
+                render_card();
+            }
+            break;
+        case SCREEN_READY:
         default:
             render_finished();
             break;
@@ -965,6 +1534,11 @@ static void primary_action(void)
     esp_err_t err = ESP_OK;
     switch (s_ui->displayed_step) {
         case FIRST_RUN_SETUP_STEP_WIFI:
+            if (s_ui->rendered_screen == SCREEN_WELCOME) {
+                s_ui->welcome_dismissed = true;
+                wifi_start_scan();
+                return;
+            }
             switch (s_ui->live.wifi_state) {
                 case FIRST_RUN_SETUP_UI_WIFI_PASSWORD: {
                     if (s_ui->selected_wifi < 0 ||
@@ -1008,7 +1582,12 @@ static void primary_action(void)
 
         case FIRST_RUN_SETUP_STEP_TIME:
             if (s_ui->live.time_state == FIRST_RUN_SETUP_UI_TIME_SET) {
-                advance_from_current();
+                copy_text(s_ui->ntp_server, sizeof(s_ui->ntp_server),
+                          s_ui->live.ntp_server);
+                copy_text(s_ui->hostname, sizeof(s_ui->hostname),
+                          s_ui->live.hostname);
+                s_ui->live.time_state = FIRST_RUN_SETUP_UI_TIME_ADVANCED;
+                render_all();
                 return;
             }
             s_ui->live.time_state = FIRST_RUN_SETUP_UI_TIME_IDLE;
@@ -1122,6 +1701,152 @@ static void retry_action(void)
     render_all();
 }
 
+static void back_action(void)
+{
+    switch (s_ui->rendered_screen) {
+        case SCREEN_WELCOME:
+            return;
+        case SCREEN_WIFI_PASSWORD:
+        case SCREEN_WIFI_PASSWORD_ERROR:
+            s_ui->live.wifi_state = s_ui->live.wifi_result_count
+                                        ? FIRST_RUN_SETUP_UI_WIFI_SELECT
+                                        : FIRST_RUN_SETUP_UI_WIFI_IDLE;
+            break;
+        case SCREEN_WIFI_STATIC:
+            s_ui->live.wifi_state = s_ui->static_return_hidden
+                                        ? FIRST_RUN_SETUP_UI_WIFI_HIDDEN
+                                        : FIRST_RUN_SETUP_UI_WIFI_PASSWORD;
+            break;
+        case SCREEN_WIFI_SCAN_BLOCKED:
+            s_ui->live.wifi_scan_blocked = false;
+            s_ui->live.wifi_state = FIRST_RUN_SETUP_UI_WIFI_IDLE;
+            s_ui->welcome_dismissed = false;
+            break;
+        case SCREEN_TIME_ADVANCED:
+            s_ui->live.time_state = FIRST_RUN_SETUP_UI_TIME_SET;
+            break;
+        case SCREEN_AIRSENSE_SCAN:
+        case SCREEN_AIRSENSE_NONE:
+        case SCREEN_AIRSENSE_CODE:
+        case SCREEN_AIRSENSE_REJECTED:
+            s_ui->live.airsense_state =
+                FIRST_RUN_SETUP_UI_AIRSENSE_INSTRUCTIONS;
+            break;
+        default:
+            if (s_ui->displayed_step > FIRST_RUN_SETUP_STEP_WIFI &&
+                s_ui->displayed_step <= FIRST_RUN_SETUP_STEP_FINISHED) {
+                select_step((first_run_setup_step_t)
+                            (s_ui->displayed_step - 1));
+                return;
+            }
+            break;
+    }
+    render_all();
+}
+
+static void done_action(void)
+{
+    esp_err_t err = ESP_OK;
+    switch (s_ui->rendered_screen) {
+        case SCREEN_WIFI_PASSWORD:
+        case SCREEN_WIFI_PASSWORD_ERROR: {
+            const char *ssid = NULL;
+            bool hidden = s_ui->live.wifi_state ==
+                          FIRST_RUN_SETUP_UI_WIFI_HIDDEN;
+            if (hidden) {
+                ssid = s_ui->hidden_ssid;
+            } else if (s_ui->selected_wifi >= 0 &&
+                       s_ui->selected_wifi < s_ui->live.wifi_result_count) {
+                ssid = s_ui->live.wifi_results[s_ui->selected_wifi].ssid;
+            } else {
+                ssid = s_ui->live.selected_ssid;
+            }
+            if (!ssid || !ssid[0]) {
+                set_action_error(ESP_ERR_INVALID_ARG, "Network name");
+            } else if (!s_ui->controller.wifi_connect) {
+                set_action_error(ESP_ERR_NOT_SUPPORTED,
+                                 "Wi-Fi connection");
+            } else {
+                err = s_ui->controller.wifi_connect(
+                    s_ui->controller.context, ssid, s_ui->wifi_password);
+                set_action_error(err, "Wi-Fi connection");
+                if (err == ESP_OK) {
+                    copy_text(s_ui->live.selected_ssid,
+                              sizeof(s_ui->live.selected_ssid), ssid);
+                    s_ui->live.wifi_state =
+                        FIRST_RUN_SETUP_UI_WIFI_CONNECTING;
+                }
+            }
+            break;
+        }
+
+        case SCREEN_WIFI_STATIC:
+            if (!s_ui->live.static_ipv4_supported ||
+                !s_ui->controller.wifi_set_static_ipv4) {
+                set_action_error(ESP_ERR_NOT_SUPPORTED,
+                                 "Static addressing");
+                break;
+            }
+            err = s_ui->controller.wifi_set_static_ipv4(
+                s_ui->controller.context, s_ui->static_address,
+                s_ui->static_gateway, s_ui->static_dns);
+            set_action_error(err, "Static addressing");
+            if (err == ESP_OK) {
+                s_ui->live.static_ipv4_active = true;
+                s_ui->live.wifi_state = s_ui->static_return_hidden
+                                            ? FIRST_RUN_SETUP_UI_WIFI_HIDDEN
+                                            : FIRST_RUN_SETUP_UI_WIFI_PASSWORD;
+            }
+            break;
+
+        case SCREEN_TIME_ADVANCED:
+            if (s_ui->controller.time_advanced_set) {
+                err = s_ui->controller.time_advanced_set(
+                    s_ui->controller.context, s_ui->ntp_server,
+                    s_ui->hostname);
+            } else if (s_ui->controller.ntp_server_set &&
+                       s_ui->controller.hostname_set) {
+                err = s_ui->controller.ntp_server_set(
+                    s_ui->controller.context, s_ui->ntp_server);
+                if (err == ESP_OK) {
+                    err = s_ui->controller.hostname_set(
+                        s_ui->controller.context, s_ui->hostname);
+                }
+            } else {
+                err = ESP_ERR_NOT_SUPPORTED;
+            }
+            set_action_error(err, "Time settings");
+            if (err == ESP_OK) {
+                advance_from_current();
+                return;
+            }
+            break;
+
+        case SCREEN_AIRSENSE_CODE:
+        case SCREEN_AIRSENSE_REJECTED:
+            if (strlen(s_ui->pairing_code) != 4) {
+                set_action_error(ESP_ERR_INVALID_SIZE,
+                                 "Four-digit code");
+            } else if (!s_ui->controller.airsense_confirm_code) {
+                set_action_error(ESP_ERR_NOT_SUPPORTED, "Pairing code");
+            } else {
+                err = s_ui->controller.airsense_confirm_code(
+                    s_ui->controller.context, s_ui->pairing_code);
+                set_action_error(err, "Pairing code");
+                if (err == ESP_OK) {
+                    s_ui->live.airsense_state =
+                        FIRST_RUN_SETUP_UI_AIRSENSE_CONFIRMING;
+                }
+            }
+            break;
+
+        default:
+            primary_action();
+            return;
+    }
+    render_all();
+}
+
 static void result_action(action_t action, unsigned index)
 {
     esp_err_t err = ESP_OK;
@@ -1202,13 +1927,7 @@ static void action_cb(lv_event_t *event)
         case ACTION_RAIL:
             select_step((first_run_setup_step_t)value);
             break;
-        case ACTION_BACK:
-            if (s_ui->displayed_step > FIRST_RUN_SETUP_STEP_WIFI &&
-                s_ui->displayed_step <= FIRST_RUN_SETUP_STEP_FINISHED) {
-                select_step((first_run_setup_step_t)
-                            (s_ui->displayed_step - 1));
-            }
-            break;
+        case ACTION_BACK: back_action(); break;
         case ACTION_PRIMARY: primary_action(); break;
         case ACTION_SKIP: skip_current(); break;
         case ACTION_WIFI_RESULT:
@@ -1218,6 +1937,35 @@ static void action_cb(lv_event_t *event)
             break;
         case ACTION_SEARCH: search_action(); break;
         case ACTION_RETRY: retry_action(); break;
+        case ACTION_SHOW_PASSWORD:
+            s_ui->password_visible = !s_ui->password_visible;
+            render_all();
+            break;
+        case ACTION_DONE: done_action(); break;
+        case ACTION_HIDDEN_NETWORK:
+            s_ui->welcome_dismissed = true;
+            s_ui->live.wifi_state = FIRST_RUN_SETUP_UI_WIFI_HIDDEN;
+            s_ui->selected_wifi = -1;
+            render_all();
+            break;
+        case ACTION_STATIC_ADDRESS:
+            s_ui->static_return_hidden =
+                s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_HIDDEN;
+            if (!s_ui->static_address[0]) {
+                copy_text(s_ui->static_address,
+                          sizeof(s_ui->static_address),
+                          s_ui->live.static_ipv4_address);
+                copy_text(s_ui->static_gateway,
+                          sizeof(s_ui->static_gateway),
+                          s_ui->live.static_ipv4_gateway);
+                copy_text(s_ui->static_dns,
+                          sizeof(s_ui->static_dns),
+                          s_ui->live.static_ipv4_dns);
+            }
+            s_ui->live.wifi_state =
+                FIRST_RUN_SETUP_UI_WIFI_STATIC_ADDRESS;
+            render_all();
+            break;
         default: break;
     }
     if (s_ui) s_ui->in_event = false;
@@ -1237,10 +1985,15 @@ static void render_all(void)
     }
     render_header();
     render_rail();
-    render_detail();
-    /* This is intentional: create/show always lay out the first complete frame
-     * before it can be exposed, preventing the blank setup frame seen in QEMU. */
-    lv_obj_update_layout(s_ui->root);
+    setup_screen_t screen = desired_screen();
+    uint32_t key = desired_render_key(screen);
+    if (s_ui->rendered_key != key) {
+        render_detail(screen, key);
+        /* create/show always lay out a complete first frame before exposure.
+         * Steady snapshots stop above this branch: no clean, allocation, or
+         * full-screen layout work occurs just because a status poll arrived. */
+        lv_obj_update_layout(s_ui->root);
+    }
 }
 
 static void render_async(void *unused)
@@ -1258,6 +2011,8 @@ static void live_defaults(first_run_setup_ui_live_t *live)
     live->time_state = FIRST_RUN_SETUP_UI_TIME_IDLE;
     live->airsense_state = FIRST_RUN_SETUP_UI_AIRSENSE_INSTRUCTIONS;
     live->card_state = FIRST_RUN_SETUP_UI_CARD_CHECKING;
+    live->wifi_slots_max = 4;
+    copy_text(live->hostname, sizeof(live->hostname), "somnotrace");
 }
 
 static void make_shell(lv_obj_t *parent)
@@ -1268,21 +2023,26 @@ static void make_shell(lv_obj_t *parent)
     style_surface(s_ui->root, COLOR_BASE, 0);
     lv_obj_clear_flag(s_ui->root, LV_OBJ_FLAG_SCROLLABLE);
 
-    make_label(s_ui->root, "SomnoTrace setup", 22, 18, 260,
+    lv_obj_t *brand_dot = lv_obj_create(s_ui->root);
+    lv_obj_set_pos(brand_dot, 16, 25);
+    lv_obj_set_size(brand_dot, 9, 9);
+    style_surface(brand_dot, COLOR_LIVE, 5);
+    lv_obj_clear_flag(brand_dot, LV_OBJ_FLAG_CLICKABLE);
+    make_label(s_ui->root, "SomnoTrace setup", 37, 17, 260,
                FONT_SECTION, COLOR_TEXT);
-    lv_obj_t *status = lv_obj_create(s_ui->root);
-    lv_obj_set_pos(status, 413, 9);
-    lv_obj_set_size(status, 593, 46);
-    style_surface(status, COLOR_PANEL, 23);
-    lv_obj_clear_flag(status, LV_OBJ_FLAG_SCROLLABLE);
-    s_ui->header_wifi = make_label(status, "", 18, 14, 210,
+    s_ui->header_clock = make_label(s_ui->root, "", 566, 21, 260,
+                                    FONT_SMALL, COLOR_AMBER);
+    lv_obj_set_style_text_align(s_ui->header_clock, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(s_ui->header_clock, LV_LABEL_LONG_DOT);
+
+    lv_obj_t *card_pill = lv_obj_create(s_ui->root);
+    lv_obj_set_pos(card_pill, 842, 12);
+    lv_obj_set_size(card_pill, 166, 36);
+    style_surface(card_pill, COLOR_PANEL, 18);
+    lv_obj_set_style_border_width(card_pill, 1, 0);
+    s_ui->header_card = make_label(card_pill, "", 8, 10, 150,
                                    FONT_SMALL, COLOR_TEXT);
-    lv_label_set_long_mode(s_ui->header_wifi, LV_LABEL_LONG_DOT);
-    s_ui->header_time = make_label(status, "", 235, 14, 160,
-                                   FONT_SMALL, COLOR_TEXT);
-    lv_label_set_long_mode(s_ui->header_time, LV_LABEL_LONG_DOT);
-    s_ui->header_card = make_label(status, "", 402, 14, 173,
-                                   FONT_SMALL, COLOR_TEXT);
+    lv_obj_set_style_text_align(s_ui->header_card, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_ui->header_card, LV_LABEL_LONG_DOT);
 
     s_ui->rail = lv_obj_create(s_ui->root);
@@ -1291,22 +2051,32 @@ static void make_shell(lv_obj_t *parent)
     style_surface(s_ui->rail, COLOR_PANEL, 22);
     lv_obj_clear_flag(s_ui->rail, LV_OBJ_FLAG_SCROLLABLE);
 
+    make_label(s_ui->rail, "SETUP CHECKLIST", 16, 14, 220,
+               FONT_MONO_SMALL, COLOR_LIVE);
+    s_ui->rail_complete = make_label(s_ui->rail, "0 of 6 complete",
+                                     16, 37, 220,
+                                     FONT_SMALL, COLOR_TERTIARY);
+
     for (unsigned i = 0; i < FIRST_RUN_SETUP_STEP_COUNT; i++) {
-        int y = 18 + (int)i * (UI_RAIL_ROW_HEIGHT + UI_RAIL_ROW_GAP);
+        int y = 67 + (int)i * (UI_RAIL_ROW_HEIGHT + UI_RAIL_ROW_GAP);
         lv_obj_t *row = make_button(s_ui->rail, "", 12, y,
                                     UI_RAIL_WIDTH - 24, UI_RAIL_ROW_HEIGHT,
                                     false, ACTION_RAIL, i);
         lv_obj_set_style_radius(row, 17, 0);
         s_ui->rail_buttons[i] = row;
         s_ui->rail_dots[i] = lv_obj_create(row);
-        lv_obj_set_pos(s_ui->rail_dots[i], 15, 23);
-        lv_obj_set_size(s_ui->rail_dots[i], 12, 12);
-        style_surface(s_ui->rail_dots[i], COLOR_DISABLED, 6);
+        lv_obj_set_pos(s_ui->rail_dots[i], 12, 15);
+        lv_obj_set_size(s_ui->rail_dots[i], 24, 24);
+        style_surface(s_ui->rail_dots[i], COLOR_DISABLED, 12);
         lv_obj_clear_flag(s_ui->rail_dots[i], LV_OBJ_FLAG_CLICKABLE);
-        s_ui->rail_labels[i] = make_label(row, step_label(i), 39, 10,
-                                          165, FONT_ROW, COLOR_TEXT);
-        s_ui->rail_status[i] = make_label(row, "", 39, 35,
-                                          165, FONT_SMALL, COLOR_TERTIARY);
+        s_ui->rail_numbers[i] = make_label(s_ui->rail_dots[i], "", 0, 5,
+                                           24, FONT_SMALL, COLOR_TEXT);
+        lv_obj_set_style_text_align(s_ui->rail_numbers[i],
+                                    LV_TEXT_ALIGN_CENTER, 0);
+        s_ui->rail_labels[i] = make_label(row, step_label(i), 47, 7,
+                                          176, FONT_BUTTON, COLOR_TEXT);
+        s_ui->rail_status[i] = make_label(row, "", 47, 29,
+                                          176, FONT_SMALL, COLOR_TERTIARY);
     }
 
     s_ui->detail = lv_obj_create(s_ui->root);
@@ -1357,8 +2127,11 @@ esp_err_t first_run_setup_ui_create(
 
     first_run_setup_ui_t *ui = heap_caps_calloc(
         1, sizeof(*ui), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!ui) ui = heap_caps_calloc(1, sizeof(*ui), MALLOC_CAP_8BIT);
-    if (!ui) return ESP_ERR_NO_MEM;
+    if (!ui) {
+        ESP_LOGE(TAG, "setup context requires PSRAM (%u bytes)",
+                 (unsigned)sizeof(*ui));
+        return ESP_ERR_NO_MEM;
+    }
     s_ui = ui;
     if (controller) s_ui->controller = *controller;
     live_defaults(&s_ui->live);
@@ -1384,7 +2157,7 @@ void first_run_setup_ui_destroy(void)
     first_run_setup_ui_t *released = s_ui;
     s_ui = NULL;
     memset(released, 0, sizeof(*released));
-    free(released);
+    heap_caps_free(released);
 }
 
 esp_err_t first_run_setup_ui_show(void)
@@ -1423,6 +2196,8 @@ esp_err_t first_run_setup_ui_update(
               s_ui->live.selected_ssid);
     copy_text(selected_airsense, sizeof(selected_airsense),
               s_ui->live.selected_airsense_address);
+    first_run_setup_ui_wifi_state_t local_wifi_state = s_ui->live.wifi_state;
+    first_run_setup_ui_time_state_t local_time_state = s_ui->live.time_state;
     s_ui->live = *snapshot;
     s_ui->live.wifi_result_count = (uint8_t)bounded_count(
         s_ui->live.wifi_result_count, FIRST_RUN_SETUP_UI_WIFI_RESULT_MAX);
@@ -1432,6 +2207,22 @@ esp_err_t first_run_setup_ui_update(
     s_ui->live.airsense_result_count = (uint8_t)bounded_count(
         s_ui->live.airsense_result_count,
         FIRST_RUN_SETUP_UI_AIRSENSE_RESULT_MAX);
+    /* Password/advanced editors are presentation substates owned by this
+     * module. A steady controller poll may still describe the underlying
+     * scan as READY or the zone as SET; it must not throw away typed input.
+     * A real operation transition (connecting, error, connected) wins. */
+    if ((local_wifi_state == FIRST_RUN_SETUP_UI_WIFI_PASSWORD ||
+         local_wifi_state == FIRST_RUN_SETUP_UI_WIFI_HIDDEN ||
+         local_wifi_state == FIRST_RUN_SETUP_UI_WIFI_STATIC_ADDRESS) &&
+        (s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_IDLE ||
+         s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_SELECT)) {
+        s_ui->live.wifi_state = local_wifi_state;
+    }
+    if (local_time_state == FIRST_RUN_SETUP_UI_TIME_ADVANCED &&
+        (s_ui->live.time_state == FIRST_RUN_SETUP_UI_TIME_IDLE ||
+         s_ui->live.time_state == FIRST_RUN_SETUP_UI_TIME_SET)) {
+        s_ui->live.time_state = FIRST_RUN_SETUP_UI_TIME_ADVANCED;
+    }
     if (!s_ui->live.selected_ssid[0] &&
         (s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_PASSWORD ||
          s_ui->live.wifi_state == FIRST_RUN_SETUP_UI_WIFI_CONNECTING ||
