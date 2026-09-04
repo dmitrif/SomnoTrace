@@ -184,12 +184,12 @@ struct touch_history_ui {
 };
 
 static const char *const s_signal_names[TOUCH_HISTORY_SIGNAL_COUNT] = {
-    "Flow", "Pressure", "Leak", "Flow limit",
+    "Breathing / Flow", "Pressure", "Leak", "Flow limit",
     "Snore", "SpO₂", "Pulse", "Motion",
 };
 
 static const char *const s_signal_units[TOUCH_HISTORY_SIGNAL_COUNT] = {
-    "L/min", "cmH₂O", "L/min", "index", "index", "%", "bpm", "index",
+    "L/s", "cmH₂O", "L/min", "index", "index", "%", "bpm", "index",
 };
 
 static lv_color_t history_ui_color(uint32_t rgb)
@@ -1643,7 +1643,7 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
     lv_obj_add_event_cb(ui->graph, history_ui_graph_touch,
                         LV_EVENT_PRESSING, ui);
     ui->graph_title = history_ui_label(
-        ui->graph, "Flow · L/min",
+        ui->graph, "Breathing / Flow · L/s",
         &somnotrace_space_grotesk_semibold_15, HISTORY_UI_COLOR_TEXT,
         12, 7, 132, 20);
     ui->graph_source = history_ui_label(
@@ -2046,6 +2046,19 @@ static void history_ui_update_graph_header(touch_history_ui_t *ui)
     snprintf(graph_title, sizeof(graph_title), "%s · %s",
              s_signal_names[ui->signal], s_signal_units[ui->signal]);
     lv_label_set_text(ui->graph_title, graph_title);
+
+    /* The accepted Flow identity is intentionally longer than the other
+     * channel names. Flow has three stats, so use its otherwise-empty fourth
+     * stat column to keep the complete title readable without adding objects. */
+    bool breathing_flow = ui->signal == TOUCH_HISTORY_SIGNAL_FLOW;
+    lv_obj_set_width(ui->graph_title, breathing_flow ? 200 : 132);
+    lv_obj_set_width(ui->graph_source, breathing_flow ? 200 : 132);
+    for (size_t i = 0; i < TOUCH_HISTORY_UI_STAT_COUNT; ++i) {
+        lv_coord_t stat_x = (breathing_flow ? 218 : 150) +
+                            (lv_coord_t)i * 68;
+        lv_obj_set_x(ui->stat_labels[i], stat_x);
+        lv_obj_set_x(ui->stat_values[i], stat_x);
+    }
 
     char source[96];
     if (!ui->has_overview) {

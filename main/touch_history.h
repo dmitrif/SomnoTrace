@@ -22,6 +22,7 @@
 #define TOUCH_HISTORY_VALUE_MISSING INT16_MIN
 #define TOUCH_HISTORY_VALUE_SCALE 100
 #define TOUCH_HISTORY_SESSION_ID_LEN 32
+#define TOUCH_HISTORY_STATS_MAX_VALUES 4
 /* Component-local result used only when a caller-provided operation callback
  * requests cancellation.  Partial output must be discarded. */
 #define TOUCH_HISTORY_ERR_CANCELLED ((esp_err_t)0x7101)
@@ -46,11 +47,11 @@ typedef enum {
     TOUCH_HISTORY_CHANNEL_COUNT,
 } touch_history_channel_t;
 
-/* Full-size History signal set.  Physical values are represented as signed
- * hundredths of the unit named below.  In particular, Flow and Leak remain in
- * L/min (not L/s). */
+/* Full-size History signal set. Physical values are represented as signed
+ * hundredths of the unit named below. Rich Flow stays source-native L/s;
+ * Leak is converted to its clinical L/min display unit. */
 typedef enum {
-    TOUCH_HISTORY_SIGNAL_FLOW = 0,       /* L/min */
+    TOUCH_HISTORY_SIGNAL_FLOW = 0,       /* L/s */
     TOUCH_HISTORY_SIGNAL_PRESSURE,       /* cmH2O; optional EPR companion */
     TOUCH_HISTORY_SIGNAL_LEAK,           /* L/min */
     TOUCH_HISTORY_SIGNAL_FLOW_LIMIT,     /* dimensionless */
@@ -203,6 +204,45 @@ typedef struct {
     uint16_t oximetry_night_count;
 } touch_history_month_t;
 
+/* Exact, source-derived statistics for a selected wall-clock window.  These
+ * values are deliberately separate from touch_history_overview_t: display
+ * bins are lossy and must never be used to calculate clinical percentiles.
+ * Values retain the service-wide x100 convention.  TIME_BELOW_88 is x100
+ * minutes, rather than the selected signal's physical unit. */
+typedef enum {
+    TOUCH_HISTORY_STAT_P50 = 0,
+    TOUCH_HISTORY_STAT_P95,
+    TOUCH_HISTORY_STAT_P995,
+    TOUCH_HISTORY_STAT_ABSOLUTE_P50,
+    TOUCH_HISTORY_STAT_ABSOLUTE_P95,
+    TOUCH_HISTORY_STAT_ABSOLUTE_P995,
+    TOUCH_HISTORY_STAT_MINIMUM,
+    TOUCH_HISTORY_STAT_P5,
+    TOUCH_HISTORY_STAT_P05,
+    TOUCH_HISTORY_STAT_TIME_BELOW_88,
+    TOUCH_HISTORY_STAT_MEDIAN,
+    TOUCH_HISTORY_STAT_MAXIMUM,
+} touch_history_stat_kind_t;
+
+typedef struct {
+    touch_history_stat_kind_t kind;
+    int32_t value_x100;
+    bool available;
+} touch_history_stat_value_t;
+
+typedef struct {
+    touch_history_stat_value_t values[TOUCH_HISTORY_STATS_MAX_VALUES];
+    uint64_t sample_count;
+    int64_t start_ms;
+    int64_t end_ms;
+    touch_history_signal_t signal;
+    uint8_t value_count;
+    bool therapy_only;
+    bool source_raw;
+    bool exact;
+    bool loaded;
+} touch_history_stats_t;
+
 /* Only the currently selected night/channel trace is retained by the UI.
  * Keeping this separate from touch_history_day_t avoids multiplying the
  * trace storage by 30 nights and three channels in scarce internal RAM. */
@@ -264,6 +304,12 @@ esp_err_t touch_history_load_page(size_t offset, touch_history_day_t *days,
                                   size_t capacity,
                                   touch_history_index_page_t *page);
 
+/* Resolve one recorded day to its newest-first global row without imposing a
+ * retention cap. Used by Calendar so Previous/Next remains meaningful even
+ * when the selected date is outside the currently recycled seven-row page. */
+esp_err_t touch_history_find_day_index(const char *day, size_t *index_out,
+                                       size_t *total_days_out);
+
 /* Compact calendar metadata.  This scans ready terminal sessions and ready
  * canonical O2 Ring packages, but never loads trace samples into the result. */
 esp_err_t touch_history_load_month(uint16_t year, uint8_t month,
@@ -305,6 +351,33 @@ esp_err_t touch_history_load_range_ex(
     int64_t start_ms, int64_t end_ms, touch_history_overview_t *range,
     const touch_history_operation_t *operation);
 
+/* Controller-oriented graph loader. A zero start/end pair selects the
+ * all-night overview; otherwise it has the same ranged semantics as above.
+ * `therapy_only` is meaningful only for SpO2 and filters source samples using
+ * the exact eligible therapy intervals rather than display-bin inference. */
+esp_err_t touch_history_load_view_ex(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_overview_t *view,
+    const touch_history_operation_t *operation);
+
+/* Stream exact source samples through a bounded PSRAM histogram. The selected
+ * half-open wall-clock range must lie inside the night axis. AirSense signals
+ * are restricted to the same eligible therapy intervals used for ST AHI;
+ * SpO2 can optionally apply that therapy-only filter. Flow requires raw 25 Hz
+ * L0 for every contributing interval and never labels a sidecar envelope as
+ * exact. Motion currently returns a loaded, explicitly unavailable result
+ * because its bit-field has no agreed scalar statistic. */
+esp_err_t touch_history_load_stats(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_stats_t *stats);
+esp_err_t touch_history_load_stats_ex(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_stats_t *stats,
+    const touch_history_operation_t *operation);
+
 /* Pageable event markers plus whole-night counts/indices.  A complete empty
  * events file is a valid zero-event night; missing/malformed eligible-session
  * files never become a false zero. */
@@ -330,6 +403,21 @@ uint16_t touch_history_range_point_count(touch_history_signal_t signal,
                                          uint64_t duration_ms);
 bool touch_history_flow_range_prefers_raw(uint64_t duration_ms,
                                           uint64_t night_duration_ms);
+/* Pure rich-History source-unit conversion used by overview, ranged reads,
+ * exact stats, and host regressions. Legacy touch_history_load_trace keeps its
+ * existing raw compatibility semantics. */
+bool touch_history_scale_source_x100(touch_history_signal_t signal,
+                                     int16_t raw, int16_t *scaled);
+/* Applies a manifest drift only when it is within the same strict one-day
+ * plausibility bound used at capture time and signed addition is safe. */
+bool touch_history_apply_clock_drift(int64_t as11_ms, int64_t drift_ms,
+                                     int64_t *corrected_ms);
+/* Browser-compatible weighted percentile over an integer histogram. `p` is
+ * per-mille (5 = 0.5%, 995 = 99.5%). */
+bool touch_history_weighted_percentile_histogram(
+    const uint32_t *counts, size_t bin_count, int32_t first_value,
+    uint64_t sample_count, uint16_t percentile_per_mille,
+    int32_t *value_out);
 /* Allocation-free decoder for one unwrapped AS11 Summary spool record.
  * Existing day/session identity fields are preserved; summary fields are
  * published only after the complete protobuf record validates. */

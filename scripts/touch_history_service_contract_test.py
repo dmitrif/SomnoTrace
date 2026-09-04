@@ -42,8 +42,9 @@ require(HEADER, r"TOUCH_HISTORY_CHANNEL_COUNT", "legacy channel count")
 require(HEADER, r"TOUCH_HISTORY_SIGNAL_COUNT", "full service channel count")
 require(HEADER, r"TOUCH_HISTORY_TRACE_POINTS\s+48\b", "legacy compact trace")
 
-require(SOURCE, r"Source is hundredths L/s.*?value \*= 60",
-        "Flow/Leak conversion to x100 L/min")
+require(SOURCE, r"Leak source is hundredths L/s.*?value \*= 60.*?"
+                r"Flow remains source-native hundredths L/s",
+        "distinct rich Flow L/s and Leak L/min scaling")
 require(SOURCE, r"TOUCH_HISTORY_AGGREGATION_ENVELOPE.*?"
                 r"minimum\[i\].*?maximum\[i\]",
         "parallel Flow min/max envelope")
@@ -61,7 +62,8 @@ assert "Pick the longest terminal session" in SOURCE, (
     "legacy trace behavior should stay visibly documented until UI migration"
 )
 
-for api in ("touch_history_load_page", "touch_history_load_month",
+for api in ("touch_history_load_page", "touch_history_find_day_index",
+            "touch_history_load_month",
             "touch_history_load_night", "touch_history_load_overview",
             "touch_history_load_range", "touch_history_load_events"):
     require(HEADER, rf"esp_err_t\s+{api}\(", f"{api} declaration")
@@ -89,7 +91,8 @@ require(SOURCE, r"history_fill_day_summary.*?has_device_ahi.*?"
 
 # Every public SD reader takes one upload/read lease. Cancellable APIs delegate
 # through their _ex implementation so the wait itself can observe cancellation.
-for api in ("touch_history_load_page", "touch_history_load_month"):
+for api in ("touch_history_load_page", "touch_history_find_day_index",
+            "touch_history_load_month"):
     start = SOURCE.index(f"esp_err_t {api}(")
     body = SOURCE[start:SOURCE.find("\n}", start) + 2]
     assert "history_lease_acquire()" in body, f"{api} must acquire SD lease"

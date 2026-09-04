@@ -86,6 +86,57 @@ static void test_event_taxonomy_and_combined_ahi(void)
     assert(totals.ahi == 0.0f);
 }
 
+static void test_source_histogram_percentiles(void)
+{
+    uint32_t counts[16] = {0};
+    int32_t value = -1;
+    /* Four 10s followed by four 20s exercise the portal-compatible boundary
+     * interpolation; P50 lies midway between the occupied bucket centres. */
+    counts[0] = 4;
+    counts[10] = 4;
+    assert(touch_history_weighted_percentile_histogram(
+        counts, 16, 10, 8, 500, &value));
+    assert(value == 15);
+    assert(touch_history_weighted_percentile_histogram(
+        counts, 16, 10, 8, 50, &value));
+    assert(value == 10);
+    assert(touch_history_weighted_percentile_histogram(
+        counts, 16, 10, 8, 995, &value));
+    assert(value == 20);
+    assert(!touch_history_weighted_percentile_histogram(
+        counts, 16, 10, 0, 500, &value));
+    /* A corrupt count advertised by a caller must not overflow rank math. */
+    assert(!touch_history_weighted_percentile_histogram(
+        counts, 16, 10, UINT64_MAX, 995, &value));
+    assert(!touch_history_weighted_percentile_histogram(
+        counts, 16, INT32_MAX, 8, 995, &value));
+
+    touch_history_stats_t stats = {0};
+    assert(TOUCH_HISTORY_STATS_MAX_VALUES == 4);
+    assert(sizeof(stats.values) / sizeof(stats.values[0]) == 4);
+    assert(TOUCH_HISTORY_STAT_P05 != TOUCH_HISTORY_STAT_P5);
+    assert(TOUCH_HISTORY_STAT_TIME_BELOW_88 != TOUCH_HISTORY_STAT_MINIMUM);
+
+    int16_t scaled = 0;
+    assert(touch_history_scale_source_x100(
+        TOUCH_HISTORY_SIGNAL_FLOW, 35, &scaled));
+    assert(scaled == 35); /* 0.35 L/s must not become 21.00 L/min. */
+    assert(touch_history_scale_source_x100(
+        TOUCH_HISTORY_SIGNAL_LEAK, 13, &scaled));
+    assert(scaled == 780); /* Leak remains 7.80 L/min. */
+
+    int64_t corrected = 0;
+    assert(touch_history_apply_clock_drift(
+        1760000000000LL, 60000, &corrected));
+    assert(corrected == 1760000060000LL);
+    assert(!touch_history_apply_clock_drift(
+        INT64_MAX - 10, 1000, &corrected));
+    assert(!touch_history_apply_clock_drift(
+        1760000000000LL, 24LL * 60LL * 60LL * 1000LL, &corrected));
+    assert(!touch_history_apply_clock_drift(
+        1760000000000LL, -24LL * 60LL * 60LL * 1000LL, &corrected));
+}
+
 static size_t append_varint(uint8_t *out, size_t offset, uint64_t value)
 {
     do {
@@ -203,6 +254,7 @@ int main(void)
     test_signal_contract();
     test_shared_axis_bins();
     test_event_taxonomy_and_combined_ahi();
+    test_source_histogram_percentiles();
     test_summary_record_decoder();
     puts("touch history model tests passed");
     return 0;

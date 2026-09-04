@@ -411,6 +411,105 @@ bool touch_history_flow_range_prefers_raw(uint64_t duration_ms,
            duration_ms <= night_duration_ms / 4U;
 }
 
+bool touch_history_scale_source_x100(touch_history_signal_t signal,
+                                     int16_t raw, int16_t *scaled)
+{
+    if (!scaled) return false;
+    int32_t value = raw;
+    switch (signal) {
+    case TOUCH_HISTORY_SIGNAL_LEAK:
+        /* Leak source is hundredths L/s; x100 L/min = raw * 60. */
+        value *= 60;
+        break;
+    case TOUCH_HISTORY_SIGNAL_MOTION:
+        value *= TOUCH_HISTORY_VALUE_SCALE;
+        break;
+    case TOUCH_HISTORY_SIGNAL_FLOW:
+        /* Rich Flow remains source-native hundredths L/s. */
+    case TOUCH_HISTORY_SIGNAL_PRESSURE:
+    case TOUCH_HISTORY_SIGNAL_FLOW_LIMIT:
+    case TOUCH_HISTORY_SIGNAL_SNORE:
+    case TOUCH_HISTORY_SIGNAL_SPO2:
+    case TOUCH_HISTORY_SIGNAL_PULSE:
+        break;
+    default:
+        return false;
+    }
+    if (value <= INT16_MIN || value > INT16_MAX) return false;
+    *scaled = (int16_t)value;
+    return true;
+}
+
+bool touch_history_apply_clock_drift(int64_t as11_ms, int64_t drift_ms,
+                                     int64_t *corrected_ms)
+{
+    const int64_t maximum_drift_ms = 24LL * 60LL * 60LL * 1000LL;
+    if (!corrected_ms || as11_ms <= 0 ||
+        drift_ms <= -maximum_drift_ms || drift_ms >= maximum_drift_ms ||
+        (drift_ms > 0 && as11_ms > INT64_MAX - drift_ms) ||
+        (drift_ms < 0 && as11_ms < INT64_MIN - drift_ms)) return false;
+    int64_t corrected = as11_ms + drift_ms;
+    if (corrected <= 0) return false;
+    *corrected_ms = corrected;
+    return true;
+}
+
+bool touch_history_weighted_percentile_histogram(
+    const uint32_t *counts, size_t bin_count, int32_t first_value,
+    uint64_t sample_count, uint16_t percentile_per_mille,
+    int32_t *value_out)
+{
+    if (!counts || !bin_count || !sample_count || !value_out ||
+        percentile_per_mille > 1000U) return false;
+
+    /* Avoid overflowing the public helper for a corrupt/inconsistent caller
+     * even though a real night is far smaller than UINT64_MAX samples. */
+    uint64_t target_index = (sample_count / 1000U) * percentile_per_mille +
+        ((sample_count % 1000U) * percentile_per_mille) / 1000U;
+    if (target_index >= sample_count) target_index = sample_count - 1U;
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < bin_count; ++i) {
+        uint32_t weight = counts[i];
+        if (!weight) continue;
+        if (cumulative > UINT64_MAX - weight) return false;
+        cumulative += weight;
+        if (cumulative > target_index) {
+            int64_t exact = (int64_t)first_value + (int64_t)i;
+            if (exact < INT32_MIN || exact > INT32_MAX) return false;
+            *value_out = (int32_t)exact;
+            return true;
+        }
+        if (cumulative != target_index) continue;
+
+        size_t next = i + 1U;
+        while (next < bin_count && counts[next] == 0) next++;
+        if (next == bin_count) {
+            int64_t exact = (int64_t)first_value + (int64_t)i;
+            if (exact < INT32_MIN || exact > INT32_MAX) return false;
+            *value_out = (int32_t)exact;
+            return true;
+        }
+        /* Match portal.html weightedPercentile(): interpolate between the
+         * centres of the two adjacent occupied histogram buckets only when
+         * the requested rank lands exactly on their cumulative boundary. */
+        double p = (double)percentile_per_mille / 10.0;
+        double px = 100.0 / (double)sample_count;
+        double p1 = px * ((double)cumulative - (double)weight / 2.0);
+        double p2 = px * ((double)(cumulative + counts[next]) -
+                          (double)counts[next] / 2.0);
+        int64_t base = (int64_t)first_value + (int64_t)i;
+        if (base < INT32_MIN || base > INT32_MAX) return false;
+        double value = (double)base;
+        if (p2 > p1) {
+            value += ((p - p1) / (p2 - p1)) * (double)(next - i);
+        }
+        if (value < INT32_MIN || value > INT32_MAX) return false;
+        *value_out = (int32_t)llround(value);
+        return true;
+    }
+    return false;
+}
+
 #ifndef TOUCH_HISTORY_MODEL_TEST
 
 #include <dirent.h>
@@ -935,6 +1034,7 @@ static int ox_candidate_start_order(const void *left, const void *right)
 static esp_err_t history_collect_ox_candidates(
     const char *day, touch_history_signal_t signal,
     int64_t range_start_ms, int64_t range_end_ms,
+    bool retain_overlap_owners,
     trace_candidate_t **candidates_out, size_t *count_out,
     const touch_history_operation_t *operation)
 {
@@ -960,6 +1060,7 @@ static esp_err_t history_collect_ox_candidates(
     trace_candidate_t *candidates = NULL;
     size_t candidate_count = 0;
     size_t candidate_capacity = 0;
+    bool has_selected_data = false;
     for (;;) {
         if (history_operation_cancelled(operation)) {
             discovery_error = TOUCH_HISTORY_ERR_CANCELLED;
@@ -1034,7 +1135,11 @@ static esp_err_t history_collect_ox_candidates(
             continue;
         }
         current.valid_records = ox_candidate_valid_records(&current, signal);
-        if (current.valid_records < 2) continue;
+        if (current.valid_records >= 2) {
+            has_selected_data = true;
+        } else if (!retain_overlap_owners) {
+            continue;
+        }
         if (candidate_count == candidate_capacity) {
             size_t next_capacity = candidate_capacity
                 ? candidate_capacity * 2 : 4;
@@ -1067,6 +1172,10 @@ static esp_err_t history_collect_ox_candidates(
         free(candidates);
         return ESP_ERR_NOT_FOUND;
     }
+    if (!has_selected_data) {
+        free(candidates);
+        return ESP_ERR_NOT_FOUND;
+    }
     qsort(candidates, candidate_count, sizeof(*candidates),
           ox_candidate_start_order);
     *candidates_out = candidates;
@@ -1082,7 +1191,7 @@ static esp_err_t find_ox_candidate(
     trace_candidate_t *candidates = NULL;
     size_t count = 0;
     esp_err_t result = history_collect_ox_candidates(
-        day, signal, 0, 0, &candidates, &count, operation);
+        day, signal, 0, 0, false, &candidates, &count, operation);
     if (result != ESP_OK) return result;
     size_t selected = 0;
     for (size_t i = 1; i < count; ++i) {
@@ -1115,7 +1224,7 @@ static esp_err_t history_ox_metadata(
     trace_candidate_t *candidates = NULL;
     size_t count = 0;
     esp_err_t result = history_collect_ox_candidates(
-        day, TOUCH_HISTORY_SIGNAL_COUNT, 0, 0, &candidates, &count,
+        day, TOUCH_HISTORY_SIGNAL_COUNT, 0, 0, false, &candidates, &count,
         operation);
     if (result != ESP_OK) return result;
     int64_t start = INT64_MAX;
@@ -1519,6 +1628,9 @@ static esp_err_t history_collect_eligible_intervals_leased(
     size_t session_count, history_therapy_interval_t **intervals_out,
     size_t *interval_count_out, uint64_t *eligible_ms_out,
     const touch_history_operation_t *operation);
+static bool history_interval_contains(
+    const history_therapy_interval_t *intervals, size_t interval_count,
+    int64_t timestamp_ms);
 
 typedef struct {
     char day[9];
@@ -1930,30 +2042,7 @@ static bool history_raw_value_valid(int16_t value, uint8_t version,
 static bool history_scale_x100(touch_history_signal_t signal, int16_t raw,
                                int16_t *scaled)
 {
-    if (!scaled) return false;
-    int32_t value = raw;
-    switch (signal) {
-    case TOUCH_HISTORY_SIGNAL_FLOW:
-    case TOUCH_HISTORY_SIGNAL_LEAK:
-        /* Source is hundredths L/s.  x100 L/min = raw * 60. */
-        value *= 60;
-        break;
-    case TOUCH_HISTORY_SIGNAL_MOTION:
-        value *= TOUCH_HISTORY_VALUE_SCALE;
-        break;
-    case TOUCH_HISTORY_SIGNAL_PRESSURE:
-    case TOUCH_HISTORY_SIGNAL_FLOW_LIMIT:
-    case TOUCH_HISTORY_SIGNAL_SNORE:
-    case TOUCH_HISTORY_SIGNAL_SPO2:
-    case TOUCH_HISTORY_SIGNAL_PULSE:
-        /* These sources are already physical x100. */
-        break;
-    default:
-        return false;
-    }
-    if (value <= INT16_MIN || value > INT16_MAX) return false;
-    *scaled = (int16_t)value;
-    return true;
+    return touch_history_scale_source_x100(signal, raw, scaled);
 }
 
 static esp_err_t history_probe_session(const char *day,
@@ -2434,6 +2523,7 @@ static esp_err_t history_accumulate_oximetry(
     int64_t axis_start_ms, int64_t axis_end_ms,
     history_overview_aggregate_t *aggregate,
     touch_history_overview_t *overview,
+    bool therapy_only,
     const touch_history_operation_t *operation,
     uint16_t progress_start, uint16_t progress_end)
 {
@@ -2442,6 +2532,7 @@ static esp_err_t history_accumulate_oximetry(
     size_t candidate_count = 0;
     esp_err_t result = history_collect_ox_candidates(
         day, signal, axis_start_ms, axis_end_ms,
+        true,
         &candidates, &candidate_count, operation);
     if (result != ESP_OK) return result;
     history_therapy_interval_t *eligible_intervals = NULL;
@@ -2471,6 +2562,11 @@ static esp_err_t history_accumulate_oximetry(
         }
         eligible_interval_count = kept;
         if (!kept || !eligible_ms) coverage_result = ESP_ERR_NOT_FOUND;
+    }
+    if (therapy_only && coverage_result != ESP_OK) {
+        free(eligible_intervals);
+        free(candidates);
+        return coverage_result;
     }
     uint64_t axis_span_ms = (uint64_t)(axis_end_ms - axis_start_ms);
     size_t coverage_bit_count = (size_t)((axis_span_ms + 999U) / 1000U);
@@ -2529,6 +2625,9 @@ static esp_err_t history_accumulate_oximetry(
                                      candidate->period_den;
                 int64_t timestamp_ms = candidate->start_epoch_ms +
                                        (int64_t)(offset_us / 1000U);
+                if (therapy_only && !history_interval_contains(
+                        eligible_intervals, eligible_interval_count,
+                        timestamp_ms)) continue;
                 int bin = history_overview_bin_count(
                     axis_start_ms, axis_end_ms, timestamp_ms,
                     overview->point_count);
@@ -2600,6 +2699,7 @@ static esp_err_t history_load_overview_leased(
     const char *day, touch_history_signal_t signal,
     int64_t requested_start_ms, int64_t requested_end_ms,
     touch_history_overview_t *overview,
+    bool therapy_only,
     const touch_history_operation_t *operation,
     uint16_t progress_start, uint16_t progress_end)
 {
@@ -2672,7 +2772,7 @@ static esp_err_t history_load_overview_leased(
         } else {
             result = history_accumulate_oximetry(
                 day, signal, sessions, session_count, axis_start_ms,
-                axis_end_ms, aggregate, overview, operation,
+                axis_end_ms, aggregate, overview, therapy_only, operation,
                 data_progress_start, progress_end);
         }
         if (result == ESP_OK) {
@@ -2713,7 +2813,7 @@ esp_err_t touch_history_load_overview_ex(
     esp_err_t lease = history_lease_acquire_operation(operation);
     if (lease != ESP_OK) return lease;
     esp_err_t result = history_load_overview_leased(
-        day, signal, 0, 0, overview, operation, 50, 1000);
+        day, signal, 0, 0, overview, false, operation, 50, 1000);
     sd_storage_lease_release(SD_LEASE_UPLOAD);
     return result;
 }
@@ -2746,7 +2846,37 @@ esp_err_t touch_history_load_range_ex(
     esp_err_t lease = history_lease_acquire_operation(operation);
     if (lease != ESP_OK) return lease;
     esp_err_t result = history_load_overview_leased(
-        day, signal, start_ms, end_ms, range, operation, 50, 1000);
+        day, signal, start_ms, end_ms, range, false, operation, 50, 1000);
+    sd_storage_lease_release(SD_LEASE_UPLOAD);
+    return result;
+}
+
+esp_err_t touch_history_load_view_ex(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_overview_t *view,
+    const touch_history_operation_t *operation)
+{
+    bool all_night = start_ms == 0 && end_ms == 0;
+    if (!view || !valid_day(day) || signal < TOUCH_HISTORY_SIGNAL_FLOW ||
+        signal >= TOUCH_HISTORY_SIGNAL_COUNT ||
+        (!all_night && (start_ms <= 0 || end_ms <= start_ms ||
+                        end_ms - start_ms > HISTORY_AXIS_MAX_MS)) ||
+        (therapy_only && signal != TOUCH_HISTORY_SIGNAL_SPO2))
+        return ESP_ERR_INVALID_ARG;
+    memset(view, 0, sizeof(*view));
+    view->signal = signal;
+    for (size_t i = 0; i < TOUCH_HISTORY_OVERVIEW_POINTS; ++i) {
+        view->value_x100[i] = TOUCH_HISTORY_VALUE_MISSING;
+        view->upper_x100[i] = TOUCH_HISTORY_VALUE_MISSING;
+        view->companion_x100[i] = TOUCH_HISTORY_VALUE_MISSING;
+    }
+    history_operation_progress(operation, 0);
+    esp_err_t lease = history_lease_acquire_operation(operation);
+    if (lease != ESP_OK) return lease;
+    esp_err_t result = history_load_overview_leased(
+        day, signal, start_ms, end_ms, view, therapy_only, operation,
+        50, 1000);
     sd_storage_lease_release(SD_LEASE_UPLOAD);
     return result;
 }
@@ -2897,8 +3027,11 @@ static esp_err_t history_parse_event_file(
                     ? (int64_t)ntp_time->valuedouble : -1;
                 /* Markers and gates must share the NTP/session axis. Raw AS11
                  * reportTime is not substituted when drift is unknown. */
-                int64_t event_ms = session->clock_drift_usable && as11_ms > 0
-                    ? as11_ms + session->clock_drift_ms : ntp_ms;
+                int64_t corrected_ms = 0;
+                bool time_corrected = session->clock_drift_usable &&
+                    touch_history_apply_clock_drift(
+                        as11_ms, session->clock_drift_ms, &corrected_ms);
+                int64_t event_ms = time_corrected ? corrected_ms : ntp_ms;
                 int64_t gate_ms = event_ms;
                 cJSON *name = item ? cJSON_GetObjectItemCaseSensitive(
                     item, "event") : NULL;
@@ -2946,7 +3079,7 @@ static esp_err_t history_parse_event_file(
                     .start_ms = event_ms - (int64_t)llround(seconds * 1000.0),
                     .session_index = session_index > UINT16_MAX
                         ? UINT16_MAX : (uint16_t)session_index,
-                    .time_corrected = session->clock_drift_usable,
+                    .time_corrected = time_corrected,
                 };
                 result = history_event_append(events, &event);
                 if (result != ESP_OK) break;
@@ -3084,6 +3217,514 @@ static esp_err_t history_collect_eligible_intervals_leased(
         return ESP_OK;
     }
     free(intervals);
+    return result;
+}
+
+/* Exact statistics intentionally use a full integer-domain histogram.  The
+ * 128 KiB count table plus read slab live only in PSRAM and are released when
+ * one serialized History worker finishes; no source waveform is retained. */
+#define HISTORY_STATS_BIN_COUNT 32768U
+
+typedef struct {
+    uint32_t counts[HISTORY_STATS_BIN_COUNT];
+    int16_t records[HISTORY_READ_VALUES];
+    uint64_t sample_count;
+    uint64_t below_88_ms;
+    int32_t minimum;
+    int32_t maximum;
+} history_stats_scratch_t;
+
+static history_stats_scratch_t *history_stats_scratch_create(void)
+{
+    history_stats_scratch_t *scratch = heap_caps_calloc(
+        1, sizeof(*scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (scratch) {
+        scratch->minimum = INT32_MAX;
+        scratch->maximum = INT32_MIN;
+    }
+    return scratch;
+}
+
+static bool history_interval_contains(
+    const history_therapy_interval_t *intervals, size_t interval_count,
+    int64_t timestamp_ms)
+{
+    for (size_t i = 0; i < interval_count; ++i) {
+        if (timestamp_ms < intervals[i].start_ms) return false;
+        if (timestamp_ms < intervals[i].end_ms) return true;
+    }
+    return false;
+}
+
+static bool history_intervals_overlap(
+    const history_therapy_interval_t *intervals, size_t interval_count,
+    int64_t start_ms, int64_t end_ms)
+{
+    if (end_ms <= start_ms) return false;
+    for (size_t i = 0; i < interval_count; ++i) {
+        if (intervals[i].end_ms <= start_ms) continue;
+        if (intervals[i].start_ms >= end_ms) return false;
+        return true;
+    }
+    return false;
+}
+
+static uint64_t history_interval_overlap_ms(
+    const history_therapy_interval_t *intervals, size_t interval_count,
+    int64_t start_ms, int64_t end_ms)
+{
+    uint64_t total = 0;
+    if (end_ms <= start_ms) return 0;
+    for (size_t i = 0; i < interval_count; ++i) {
+        int64_t start = intervals[i].start_ms > start_ms
+            ? intervals[i].start_ms : start_ms;
+        int64_t end = intervals[i].end_ms < end_ms
+            ? intervals[i].end_ms : end_ms;
+        if (end > start) total += (uint64_t)(end - start);
+        if (intervals[i].start_ms >= end_ms) break;
+    }
+    return total;
+}
+
+static bool history_stats_add(history_stats_scratch_t *scratch,
+                              int32_t value_x100)
+{
+    if (!scratch || value_x100 < 0 ||
+        value_x100 >= (int32_t)HISTORY_STATS_BIN_COUNT ||
+        scratch->counts[value_x100] == UINT32_MAX ||
+        scratch->sample_count == UINT64_MAX) return false;
+    scratch->counts[value_x100]++;
+    scratch->sample_count++;
+    if (value_x100 < scratch->minimum) scratch->minimum = value_x100;
+    if (value_x100 > scratch->maximum) scratch->maximum = value_x100;
+    return true;
+}
+
+static bool history_stats_set_percentile(
+    const history_stats_scratch_t *scratch, uint16_t per_mille,
+    touch_history_stat_value_t *value)
+{
+    int32_t result = 0;
+    if (!scratch || !value || scratch->sample_count < 5U ||
+        !touch_history_weighted_percentile_histogram(
+            scratch->counts, HISTORY_STATS_BIN_COUNT, 0,
+            scratch->sample_count, per_mille, &result)) return false;
+    value->value_x100 = result;
+    value->available = true;
+    return true;
+}
+
+static void history_stats_prepare(touch_history_stats_t *stats,
+                                  touch_history_signal_t signal,
+                                  int64_t start_ms, int64_t end_ms,
+                                  bool therapy_only)
+{
+    memset(stats, 0, sizeof(*stats));
+    stats->signal = signal;
+    stats->start_ms = start_ms;
+    stats->end_ms = end_ms;
+    stats->therapy_only = therapy_only;
+    switch (signal) {
+    case TOUCH_HISTORY_SIGNAL_FLOW:
+        stats->value_count = 3;
+        stats->values[0].kind = TOUCH_HISTORY_STAT_ABSOLUTE_P50;
+        stats->values[1].kind = TOUCH_HISTORY_STAT_ABSOLUTE_P95;
+        stats->values[2].kind = TOUCH_HISTORY_STAT_ABSOLUTE_P995;
+        break;
+    case TOUCH_HISTORY_SIGNAL_PRESSURE:
+    case TOUCH_HISTORY_SIGNAL_LEAK:
+    case TOUCH_HISTORY_SIGNAL_FLOW_LIMIT:
+    case TOUCH_HISTORY_SIGNAL_SNORE:
+        stats->value_count = 3;
+        stats->values[0].kind = TOUCH_HISTORY_STAT_P50;
+        stats->values[1].kind = TOUCH_HISTORY_STAT_P95;
+        stats->values[2].kind = TOUCH_HISTORY_STAT_P995;
+        break;
+    case TOUCH_HISTORY_SIGNAL_SPO2:
+        stats->value_count = 4;
+        stats->values[0].kind = TOUCH_HISTORY_STAT_MINIMUM;
+        stats->values[1].kind = TOUCH_HISTORY_STAT_P5;
+        stats->values[2].kind = TOUCH_HISTORY_STAT_P05;
+        stats->values[3].kind = TOUCH_HISTORY_STAT_TIME_BELOW_88;
+        break;
+    case TOUCH_HISTORY_SIGNAL_PULSE:
+        stats->value_count = 3;
+        stats->values[0].kind = TOUCH_HISTORY_STAT_MINIMUM;
+        stats->values[1].kind = TOUCH_HISTORY_STAT_MEDIAN;
+        stats->values[2].kind = TOUCH_HISTORY_STAT_MAXIMUM;
+        break;
+    case TOUCH_HISTORY_SIGNAL_MOTION:
+    case TOUCH_HISTORY_SIGNAL_COUNT:
+        break;
+    }
+}
+
+static void history_stats_finalize(history_stats_scratch_t *scratch,
+                                   touch_history_stats_t *stats)
+{
+    stats->sample_count = scratch->sample_count;
+    if (scratch->sample_count < 5U) return;
+    switch (stats->signal) {
+    case TOUCH_HISTORY_SIGNAL_FLOW:
+        (void)history_stats_set_percentile(scratch, 500, &stats->values[0]);
+        (void)history_stats_set_percentile(scratch, 950, &stats->values[1]);
+        (void)history_stats_set_percentile(scratch, 995, &stats->values[2]);
+        break;
+    case TOUCH_HISTORY_SIGNAL_PRESSURE:
+    case TOUCH_HISTORY_SIGNAL_LEAK:
+    case TOUCH_HISTORY_SIGNAL_FLOW_LIMIT:
+    case TOUCH_HISTORY_SIGNAL_SNORE:
+        (void)history_stats_set_percentile(scratch, 500, &stats->values[0]);
+        (void)history_stats_set_percentile(scratch, 950, &stats->values[1]);
+        (void)history_stats_set_percentile(scratch, 995, &stats->values[2]);
+        break;
+    case TOUCH_HISTORY_SIGNAL_SPO2:
+        stats->values[0].value_x100 = scratch->minimum;
+        stats->values[0].available = true;
+        (void)history_stats_set_percentile(scratch, 50, &stats->values[1]);
+        (void)history_stats_set_percentile(scratch, 5, &stats->values[2]);
+        /* x100 minutes: milliseconds / 600 is exact to 0.01 minute. */
+        stats->values[3].value_x100 = scratch->below_88_ms / 600U > INT32_MAX
+            ? INT32_MAX : (int32_t)(scratch->below_88_ms / 600U);
+        stats->values[3].available = true;
+        break;
+    case TOUCH_HISTORY_SIGNAL_PULSE:
+        stats->values[0].value_x100 = scratch->minimum;
+        stats->values[0].available = true;
+        (void)history_stats_set_percentile(scratch, 500, &stats->values[1]);
+        stats->values[2].value_x100 = scratch->maximum;
+        stats->values[2].available = true;
+        break;
+    default:
+        break;
+    }
+    stats->exact = true;
+}
+
+static esp_err_t history_stats_accumulate_as11(
+    const char *day, touch_history_signal_t signal,
+    const history_session_info_t *sessions, size_t session_count,
+    const history_therapy_interval_t *eligible, size_t eligible_count,
+    int64_t start_ms, int64_t end_ms, history_stats_scratch_t *scratch,
+    const touch_history_operation_t *operation)
+{
+    int channel = signal == TOUCH_HISTORY_SIGNAL_FLOW
+        ? 0 : history_pld_channel(signal);
+    if (channel < 0) return ESP_ERR_INVALID_ARG;
+    for (size_t s = 0; s < session_count; ++s) {
+        if (history_operation_cancelled(operation))
+            return TOUCH_HISTORY_ERR_CANCELLED;
+        int64_t session_start = sessions[s].start_ms > start_ms
+            ? sessions[s].start_ms : start_ms;
+        int64_t session_end = sessions[s].end_ms < end_ms
+            ? sessions[s].end_ms : end_ms;
+        if (!history_intervals_overlap(eligible, eligible_count,
+                                       session_start, session_end)) {
+            history_operation_progress(operation, history_progress_fraction(
+                250, 900, s + 1, session_count));
+            continue;
+        }
+
+        trace_candidate_t candidate = {0};
+        esp_err_t inspect = signal == TOUCH_HISTORY_SIGNAL_FLOW
+            ? history_flow_raw_candidate(day, &sessions[s], &candidate)
+            : history_session_candidate(day, &sessions[s], signal, &candidate);
+        /* Exact Flow statistics are never manufactured from the min/max
+         * sidecar. A missing source for any eligible contributing session
+         * invalidates the result instead of silently returning a partial. */
+        if (inspect != ESP_OK) return inspect;
+        uint32_t first = history_as11_record_at_or_after(&candidate, start_ms);
+        uint32_t end = history_as11_record_at_or_after(&candidate, end_ms);
+        if (end <= first) continue;
+        uint64_t byte_offset = (uint64_t)candidate.header_bytes +
+            (uint64_t)first * candidate.n_channels * sizeof(int16_t);
+        FILE *file = fopen(candidate.path, "rb");
+        if (!file || byte_offset > LONG_MAX ||
+            fseek(file, (long)byte_offset, SEEK_SET) != 0) {
+            if (file) fclose(file);
+            return ESP_FAIL;
+        }
+        size_t per_read = HISTORY_READ_VALUES / candidate.n_channels;
+        uint32_t processed = first;
+        esp_err_t result = ESP_OK;
+        while (processed < end) {
+            if (history_operation_cancelled(operation)) {
+                result = TOUCH_HISTORY_ERR_CANCELLED;
+                break;
+            }
+            size_t wanted = end - processed;
+            if (wanted > per_read) wanted = per_read;
+            size_t got = fread(scratch->records,
+                               candidate.n_channels * sizeof(int16_t),
+                               wanted, file);
+            for (size_t r = 0; r < got; ++r) {
+                uint32_t record_index = processed + (uint32_t)r;
+                int64_t timestamp_ms = candidate.start_epoch_ms +
+                    (int64_t)((uint64_t)record_index * 10000U /
+                              candidate.sample_hz_x10);
+                if (timestamp_ms < start_ms || timestamp_ms >= end_ms ||
+                    !history_interval_contains(eligible, eligible_count,
+                                               timestamp_ms)) continue;
+                int16_t *record = &scratch->records[r * candidate.n_channels];
+                bool signed_signal = signal == TOUCH_HISTORY_SIGNAL_FLOW;
+                if (!history_raw_value_valid(record[channel],
+                                              candidate.version,
+                                              signed_signal)) continue;
+                int16_t scaled = 0;
+                if (!history_scale_x100(signal, record[channel], &scaled))
+                    continue;
+                int32_t value = scaled;
+                if (signal == TOUCH_HISTORY_SIGNAL_FLOW && value < 0)
+                    value = -value;
+                if (!history_stats_add(scratch, value)) {
+                    result = ESP_FAIL;
+                    break;
+                }
+            }
+            processed += (uint32_t)got;
+            if (got != wanted || ferror(file)) result = ESP_FAIL;
+            if (result != ESP_OK) break;
+        }
+        if (fclose(file) != 0 && result == ESP_OK) result = ESP_FAIL;
+        if (result != ESP_OK) return result;
+        history_operation_progress(operation, history_progress_fraction(
+            250, 900, s + 1, session_count));
+    }
+    return scratch->sample_count >= 5U ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+static bool history_ox_timestamp_owned_by_later(
+    const trace_candidate_t *candidates, size_t count, size_t current,
+    int64_t timestamp_ms)
+{
+    for (size_t i = current + 1; i < count; ++i) {
+        if (candidates[i].start_epoch_ms > timestamp_ms) break;
+        if (history_candidate_end_ms(&candidates[i]) > timestamp_ms)
+            return true;
+    }
+    return false;
+}
+
+static int64_t history_ox_sample_end(
+    const trace_candidate_t *candidates, size_t count, size_t current,
+    uint32_t record_index, int64_t timestamp_ms, int64_t range_end_ms)
+{
+    const trace_candidate_t *candidate = &candidates[current];
+    uint64_t next_offset_us = (uint64_t)(record_index + 1U) *
+                              candidate->period_num_us /
+                              candidate->period_den;
+    int64_t end_ms = candidate->start_epoch_ms +
+                     (int64_t)(next_offset_us / 1000U);
+    if (end_ms <= timestamp_ms) end_ms = timestamp_ms + 1;
+    int64_t candidate_end = history_candidate_end_ms(candidate);
+    if (end_ms > candidate_end) end_ms = candidate_end;
+    if (end_ms > range_end_ms) end_ms = range_end_ms;
+    for (size_t i = current + 1; i < count; ++i) {
+        if (candidates[i].start_epoch_ms <= timestamp_ms) continue;
+        if (candidates[i].start_epoch_ms >= end_ms) break;
+        end_ms = candidates[i].start_epoch_ms;
+        break;
+    }
+    return end_ms;
+}
+
+static esp_err_t history_stats_accumulate_oximetry(
+    const char *day, touch_history_signal_t signal,
+    const history_therapy_interval_t *eligible, size_t eligible_count,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    history_stats_scratch_t *scratch,
+    const touch_history_operation_t *operation)
+{
+    trace_candidate_t *candidates = NULL;
+    size_t candidate_count = 0;
+    esp_err_t result = history_collect_ox_candidates(
+        day, signal, start_ms, end_ms, true, &candidates, &candidate_count,
+        operation);
+    if (result != ESP_OK) return result;
+    uint64_t total_records = 0;
+    for (size_t i = 0; i < candidate_count; ++i)
+        total_records += candidates[i].records;
+    uint64_t processed_total = 0;
+    for (size_t c = 0; c < candidate_count && result == ESP_OK; ++c) {
+        const trace_candidate_t *candidate = &candidates[c];
+        FILE *file = fopen(candidate->path, "rb");
+        if (!file || fseek(file, candidate->header_bytes, SEEK_SET) != 0) {
+            if (file) fclose(file);
+            result = ESP_FAIL;
+            break;
+        }
+        size_t per_read = HISTORY_READ_VALUES / candidate->n_channels;
+        uint32_t processed = 0;
+        while (processed < candidate->records) {
+            if (history_operation_cancelled(operation)) {
+                result = TOUCH_HISTORY_ERR_CANCELLED;
+                break;
+            }
+            size_t wanted = candidate->records - processed;
+            if (wanted > per_read) wanted = per_read;
+            size_t got = fread(scratch->records,
+                               candidate->n_channels * sizeof(int16_t),
+                               wanted, file);
+            for (size_t r = 0; r < got; ++r) {
+                uint32_t record_index = processed + (uint32_t)r;
+                uint64_t offset_us = (uint64_t)record_index *
+                                     candidate->period_num_us /
+                                     candidate->period_den;
+                int64_t timestamp_ms = candidate->start_epoch_ms +
+                                       (int64_t)(offset_us / 1000U);
+                if (timestamp_ms < start_ms || timestamp_ms >= end_ms ||
+                    history_ox_timestamp_owned_by_later(
+                        candidates, candidate_count, c, timestamp_ms))
+                    continue;
+                if (therapy_only && !history_interval_contains(
+                        eligible, eligible_count, timestamp_ms)) continue;
+                int16_t *record = &scratch->records[r * candidate->n_channels];
+                int16_t scaled = 0;
+                if (!history_ox_record_value(signal, record, &scaled)) continue;
+                if (!history_stats_add(scratch, scaled)) {
+                    result = ESP_FAIL;
+                    break;
+                }
+                if (signal == TOUCH_HISTORY_SIGNAL_SPO2 && scaled < 8800) {
+                    int64_t sample_end = history_ox_sample_end(
+                        candidates, candidate_count, c, record_index,
+                        timestamp_ms, end_ms);
+                    if (sample_end > timestamp_ms) {
+                        scratch->below_88_ms += therapy_only
+                            ? history_interval_overlap_ms(
+                                  eligible, eligible_count, timestamp_ms,
+                                  sample_end)
+                            : (uint64_t)(sample_end - timestamp_ms);
+                    }
+                }
+            }
+            processed += (uint32_t)got;
+            processed_total += got;
+            history_operation_progress(operation, history_progress_fraction(
+                250, 900, processed_total, total_records));
+            if (got != wanted || ferror(file)) result = ESP_FAIL;
+            if (result != ESP_OK) break;
+        }
+        if (fclose(file) != 0 && result == ESP_OK) result = ESP_FAIL;
+    }
+    free(candidates);
+    if (result != ESP_OK) return result;
+    return scratch->sample_count >= 5U ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+static esp_err_t history_load_stats_leased(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_stats_t *stats,
+    const touch_history_operation_t *operation)
+{
+    if (signal == TOUCH_HISTORY_SIGNAL_MOTION) {
+        stats->loaded = true;
+        return ESP_OK;
+    }
+    history_session_info_t *sessions = NULL;
+    size_t session_count = 0;
+    esp_err_t sessions_result = history_load_sessions_leased(
+        day, &sessions, &session_count, operation);
+    if (sessions_result == ESP_ERR_NOT_FOUND &&
+        (signal == TOUCH_HISTORY_SIGNAL_SPO2 ||
+         signal == TOUCH_HISTORY_SIGNAL_PULSE)) sessions_result = ESP_OK;
+    if (sessions_result != ESP_OK) return sessions_result;
+    if (session_count) {
+        sessions_result = history_resolve_session_ends(
+            day, sessions, session_count);
+        if (sessions_result != ESP_OK) {
+            free(sessions);
+            return sessions_result;
+        }
+    }
+    int64_t night_start_ms = 0;
+    int64_t night_end_ms = 0;
+    sessions_result = history_unified_axis(
+        day, sessions, session_count, &night_start_ms, &night_end_ms,
+        NULL, operation);
+    if (sessions_result != ESP_OK) {
+        free(sessions);
+        return sessions_result;
+    }
+    if (start_ms < night_start_ms || end_ms > night_end_ms) {
+        free(sessions);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    history_therapy_interval_t *eligible = NULL;
+    size_t eligible_count = 0;
+    uint64_t eligible_ms = 0;
+    bool needs_therapy = signal <= TOUCH_HISTORY_SIGNAL_SNORE ||
+                         (signal == TOUCH_HISTORY_SIGNAL_SPO2 && therapy_only);
+    esp_err_t eligible_result = needs_therapy
+        ? history_collect_eligible_intervals_leased(
+              day, sessions, session_count, &eligible, &eligible_count,
+              &eligible_ms, operation)
+        : ESP_OK;
+    if (eligible_result != ESP_OK) {
+        free(sessions);
+        return eligible_result;
+    }
+    (void)eligible_ms;
+    history_stats_scratch_t *scratch = history_stats_scratch_create();
+    if (!scratch) {
+        free(eligible);
+        free(sessions);
+        return ESP_ERR_NO_MEM;
+    }
+    history_operation_progress(operation, 250);
+    esp_err_t result = signal <= TOUCH_HISTORY_SIGNAL_SNORE
+        ? history_stats_accumulate_as11(
+              day, signal, sessions, session_count, eligible, eligible_count,
+              start_ms, end_ms, scratch, operation)
+        : history_stats_accumulate_oximetry(
+              day, signal, eligible, eligible_count, start_ms, end_ms,
+              therapy_only && signal == TOUCH_HISTORY_SIGNAL_SPO2,
+              scratch, operation);
+    if (result == ESP_OK) {
+        history_stats_finalize(scratch, stats);
+        stats->source_raw = signal == TOUCH_HISTORY_SIGNAL_FLOW;
+        stats->loaded = true;
+        history_operation_progress(operation, 1000);
+    } else if (result == ESP_ERR_NOT_FOUND) {
+        stats->loaded = true;
+    }
+    heap_caps_free(scratch);
+    free(eligible);
+    free(sessions);
+    return result;
+}
+
+esp_err_t touch_history_load_stats(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_stats_t *stats)
+{
+    return touch_history_load_stats_ex(
+        day, signal, start_ms, end_ms, therapy_only, stats, NULL);
+}
+
+esp_err_t touch_history_load_stats_ex(
+    const char *day, touch_history_signal_t signal,
+    int64_t start_ms, int64_t end_ms, bool therapy_only,
+    touch_history_stats_t *stats,
+    const touch_history_operation_t *operation)
+{
+    if (!valid_day(day) || signal < TOUCH_HISTORY_SIGNAL_FLOW ||
+        signal >= TOUCH_HISTORY_SIGNAL_COUNT || start_ms <= 0 ||
+        end_ms <= start_ms || end_ms - start_ms > HISTORY_AXIS_MAX_MS ||
+        !stats) return ESP_ERR_INVALID_ARG;
+    history_stats_prepare(stats, signal, start_ms, end_ms,
+                          therapy_only && signal == TOUCH_HISTORY_SIGNAL_SPO2);
+    history_operation_progress(operation, 0);
+    esp_err_t lease = history_lease_acquire_operation(operation);
+    if (lease != ESP_OK) return lease;
+    esp_err_t result = history_load_stats_leased(
+        day, signal, start_ms, end_ms,
+        therapy_only && signal == TOUCH_HISTORY_SIGNAL_SPO2,
+        stats, operation);
+    sd_storage_lease_release(SD_LEASE_UPLOAD);
     return result;
 }
 
@@ -3480,6 +4121,31 @@ esp_err_t touch_history_load_page(size_t offset, touch_history_day_t *days,
     return result;
 }
 
+esp_err_t touch_history_find_day_index(const char *day, size_t *index_out,
+                                       size_t *total_days_out)
+{
+    if (!valid_day(day) || !index_out) return ESP_ERR_INVALID_ARG;
+    *index_out = SIZE_MAX;
+    if (total_days_out) *total_days_out = 0;
+    esp_err_t lease = history_lease_acquire();
+    if (lease != ESP_OK) return lease;
+    history_day_index_t *index = NULL;
+    size_t total = 0;
+    esp_err_t result = history_collect_days_leased(&index, &total);
+    if (result == ESP_OK) {
+        for (size_t i = 0; i < total; ++i) {
+            if (strcmp(index[i].day, day) != 0) continue;
+            *index_out = i;
+            break;
+        }
+        if (*index_out == SIZE_MAX) result = ESP_ERR_NOT_FOUND;
+    }
+    if (total_days_out) *total_days_out = total;
+    free(index);
+    sd_storage_lease_release(SD_LEASE_UPLOAD);
+    return result;
+}
+
 esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
                              size_t *count)
 {
@@ -3621,7 +4287,8 @@ esp_err_t touch_history_load_night_ex(
             result = history_accumulate_oximetry(
                 day, TOUCH_HISTORY_SIGNAL_SPO2, sessions,
                 session_count_value, night->axis_start_ms,
-                night->axis_end_ms, aggregate, overview, operation, 425, 600);
+                night->axis_end_ms, aggregate, overview, false, operation,
+                425, 600);
             if (result == ESP_OK)
                 night->o2_coverage_per_mille =
                     overview->therapy_coverage_per_mille;

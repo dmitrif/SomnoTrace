@@ -179,7 +179,8 @@ assert "history_ui_list_scroll_end" in SOURCE
 
 # Truthful graph states: full-night Flow envelope, 22-minute raw zoom source,
 # Pressure/EPR companion, therapy-only SpO2, explicit gaps and event taxonomy.
-assert '"L/min"' in SOURCE, "Flow must remain L/min"
+assert '"Breathing / Flow"' in SOURCE, "accepted rich Flow title is required"
+assert '"L/s"' in SOURCE, "rich Flow must remain source-native L/s"
 assert "source_raw" in SOURCE and "raw 25 Hz" in SOURCE
 assert "1 Hz fallback" in SOURCE
 assert "TOUCH_HISTORY_AGGREGATION_ENVELOPE" in SOURCE
