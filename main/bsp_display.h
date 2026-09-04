@@ -34,6 +34,12 @@ void bsp_display_set_setup_callback(void (*callback)(void));
 /* Called once BLE initialization has completed. Each flag controls the
  * corresponding native pairing UI without assuming partial init is safe. */
 void bsp_display_enable_touch_services(bool as11_ready, bool oximeter_ready);
+
+/* Show the resumable native first-run surface on touch-capable 7-inch
+ * targets. The call is a no-op when the durable record is already finished.
+ * Slow setup operations are always dispatched off the display task. */
+esp_err_t bsp_display_start_first_run_setup(esp_err_t initial_card_result);
+bool bsp_display_first_run_setup_active(void);
 void bsp_display_show_number(uint32_t value);
 void bsp_display_show_lines(const char *title, const char *const *lines, int n_lines);
 
@@ -82,3 +88,7 @@ void bsp_display_set_rotation(uint16_t degrees);
 /* QEMU preview hooks. Physical board implementations leave these as no-ops. */
 void bsp_display_qemu_seed_demo(void);
 void bsp_display_qemu_set_tab(uint8_t tab);
+/* Disposable QEMU-only acceptance hook. It resets the emulated setup record
+ * and opens the setup surface; physical board implementations return
+ * ESP_ERR_NOT_SUPPORTED. */
+esp_err_t bsp_display_qemu_start_setup_preview(void);

@@ -17,6 +17,7 @@ SCREEN_SCENARIOS = {
     "manage": (2, (694, 563)),
 }
 INTERACTION_SCENARIOS = (
+    "setup-wifi",
     "devices",
     "system-display-controls",
     "system-display-timeout-open",
@@ -165,6 +166,10 @@ def drag(process, log_path, stream, start, end, steps=8):
 
 
 def interaction_sequence(name):
+    if name == "setup-wifi":
+        return (
+            ((66, 31), 0.8, "QEMU setup preview ready"),
+        )
     if name == "devices":
         return (
             # Stop therapy first, let its transient notice clear, then open
@@ -243,6 +248,14 @@ def bright_samples(payload, bounds, threshold=80, step=2):
 
 def validate_persistent_shell(name, payload, representative, interaction):
     """Reject transient screenshots taken before a touch redraw has landed."""
+    if name == "setup-wifi":
+        # Native setup has its own 60 px header and intentionally no ordinary
+        # Home/History/Manage navigation. Require both rail and detail content.
+        if bright_samples(payload, (18, 72, 272, 580)) < 180:
+            raise AssertionError("first-run setup rail is absent")
+        if bright_samples(payload, (292, 72, 1006, 580)) < 300:
+            raise AssertionError("first-run setup detail pane is absent")
+        return
     anchors = {
         "clock": ((20, 8, 205, 58), 80),
         "status": ((724, 5, 1010, 65), 45),

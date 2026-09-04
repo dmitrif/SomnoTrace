@@ -415,6 +415,11 @@ void bsp_display_qemu_set_tab(uint8_t tab)
     (void)tab;
 }
 
+esp_err_t bsp_display_qemu_start_setup_preview(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 static void lcd_flush(void)
 {
     if (!s_panel || !s_fb) return;
@@ -846,6 +851,17 @@ void bsp_display_enable_touch_services(bool as11_ready, bool oximeter_ready)
     /* The compact non-touch target has no local service controls. */
     (void)as11_ready;
     (void)oximeter_ready;
+}
+
+esp_err_t bsp_display_start_first_run_setup(esp_err_t initial_card_result)
+{
+    (void)initial_card_result;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+bool bsp_display_first_run_setup_active(void)
+{
+    return false;
 }
 
 void bsp_display_set_wifi_connected(bool connected)

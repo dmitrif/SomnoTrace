@@ -402,11 +402,26 @@ void app_main(void)
     therapy_alert_set_therapy_active_fn(bsp_display_is_therapy_active);
     therapy_alert_init();
 
+    first_run_setup_snapshot_t setup_snapshot;
+    first_run_setup_snapshot(&setup_snapshot);
+    bool setup_incomplete = setup_snapshot.schema_compatible &&
+        !first_run_setup_is_finished(&setup_snapshot.state);
+    bool native_setup_active = false;
+
 #if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
-    /* The 7B's BOOT pin becomes an RGB data line after startup. On a fresh
-     * device, open the setup portal immediately instead of requiring a button
-     * hold or three failed reboot cycles. */
-    if (!has_creds) s_softap_requested = true;
+    /* A fresh touch device is configured entirely on the panel.  Do not send
+     * it into the old blocking captive-portal loop just because credentials
+     * are absent; the native setup worker owns scan/join instead. */
+    if (setup_incomplete) {
+        esp_err_t setup_ui = bsp_display_start_first_run_setup(sd_ret);
+        if (setup_ui != ESP_OK) {
+            ESP_LOGE(TAG, "could not open native first-run setup: %s",
+                     esp_err_to_name(setup_ui));
+            bsp_display_set_critical_notice("Setup screen unavailable");
+        } else {
+            native_setup_active = bsp_display_first_run_setup_active();
+        }
+    }
 #endif
 
     /* 6. If BOOT was held at boot, force SoftAP regardless. */
@@ -508,7 +523,7 @@ void app_main(void)
         /* No drift available. If Wi-Fi also failed or NTP failed, we need
          * to either reboot or enter SoftAP (reboot-loop guard). */
         bool time_failed = !wifi_connected || (wifi_connected && !ntp_ok);
-        if (time_failed) {
+        if (time_failed && !native_setup_active) {
             nvs_handle_t nvs_h;
             int boot_fail_count = 0;
             nvs_writer_lock();
@@ -562,6 +577,11 @@ void app_main(void)
                 vTaskDelay(pdMS_TO_TICKS(500));
                 controlled_restart();
             }
+        } else if (time_failed) {
+            /* Setup must remain usable offline.  It can establish Wi-Fi and
+             * timezone asynchronously, after which the normal link loop will
+             * start NTP and connected services without a reboot. */
+            ESP_LOGW(TAG, "no time source yet; native first-run setup remains active");
         }
     } else {
         /* Degraded mode — reset boot failure counter. */
