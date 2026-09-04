@@ -330,12 +330,15 @@ for target, description in (
     ("s_ambient_glow", "ambient glow"),
     ("s_alert_banner", "alert banner"),
     ("s_keyboard_sheet", "keyboard sheet"),
-    ("s_history_rows\\[i\\]", "selected History row"),
 ):
     require(display,
             rf"lv_obj_set_style_shadow_width\(\s*{target}.*?"
             r"UI_DECORATIVE_SHADOW_WIDTH",
             f"physical shadow suppression for {description}")
+require(display,
+        r"set_style_num_if_changed\(\s*s_history_rows\[i\],\s*"
+        r"LV_STYLE_SHADOW_WIDTH,\s*UI_DECORATIVE_SHADOW_WIDTH",
+        "changed-only physical shadow suppression for selected History row")
 for target, description in (
     ("s_nav_buttons\\[i\\]", "selected navigation"),
     ("s_manage_buttons\\[i\\]", "selected Manage rail"),
@@ -590,7 +593,7 @@ require(history_task_source,
 require(history_refresh_source,
         r"metadata_changed\s*=\s*services->history_metadata_version\s*!=\s*"
         r"s_seen_history_metadata_version;.*?"
-        r"if\s*\(changed\)\s*\{.*?"
+        r"if\s*\(version_changed\)\s*\{.*?"
         r"s_seen_history_metadata_version\s*=\s*"
         r"services->history_metadata_version;.*?"
         r"if\s*\(!metadata_changed\s*&&\s*s_history_selected_day\[0\]\)\s*\{.*?"
@@ -654,9 +657,49 @@ for task, label in (
            f"{label} worker must not be recreated per request"
 require(display, r"heap_caps_calloc\(.*?HISTORY_MAX_DAYS.*?MALLOC_CAP_SPIRAM",
         "expanded history model stays off the worker stack")
-require(display, r"lv_chart_set_all_value\(s_history_trace_chart.*?LV_CHART_POINT_NONE",
-        "missing recorded samples remain chart gaps")
-require(display, r"trace->loaded.*?trace->has_data.*?trace->count",
+require(display,
+        r"lv_chart_set_ext_y_array\(s_history_trace_chart,\s*"
+        r"s_history_trace_series,\s*s_history_trace_values\).*?"
+        r"s_history_trace_values\[i\]\s*=\s*LV_CHART_POINT_NONE;",
+        "external History chart array preserves missing-sample gaps")
+require(display,
+        r"lv_chart_set_point_count\(s_history_trace_chart,\s*"
+        r"TOUCH_HISTORY_TRACE_POINTS\)",
+        "History chart point count follows its fixed buffers")
+assert "lv_chart_set_next_value" not in history_refresh_source, \
+       "History renderer must not invalidate the chart once per point"
+require(history_refresh_source,
+        r"trace_count\s*=\s*trace->count\s*<\s*TOUCH_HISTORY_TRACE_POINTS.*?"
+        r"s_history_trace_values\[i\]\s*=.*?"
+        r"lv_chart_refresh\(s_history_trace_chart\);",
+        "bounded History chart arrays publish with one final refresh")
+assert history_refresh_source.count("lv_chart_refresh(s_history_trace_chart);") == 1, \
+       "History renderer must refresh its direct arrays exactly once"
+require(history_refresh_source,
+        r"bool\s+list_changed\s*=.*?bool\s+summary_changed\s*=.*?"
+        r"bool\s+trace_changed\s*=.*?if\s*\(list_changed\).*?"
+        r"if\s*\(summary_changed\).*?if\s*\(!trace_changed\)\s*return;",
+        "History metadata, summary, and trace render independently")
+require(history_refresh_source,
+        r"if\s*\(channel_changed\).*?"
+        r"set_destination_surface\(s_history_channel_buttons\[i\]",
+        "History channel selection has no release-phase animation")
+require(history_refresh_source,
+        r"if\s*\(busy_changed\s*\|\|\s*metadata_changed\s*\|\|\s*"
+        r"revealed_changed\).*?Latest %u · showing %u",
+        "History pagination immediately updates its showing count")
+require(history_refresh_source,
+        r"bool\s+selected\s*=\s*s_history_selection\s*>=\s*0\s*&&\s*"
+        r"s_history_selection\s*<\s*\(int\)services->history_count;",
+        "valid cached History detail stays visible during metadata refresh")
+for direct_invalidation in (
+    "lv_obj_clear_flag(s_history_detail_content",
+    "lv_obj_clear_flag(s_history_rows[i]",
+    "lv_obj_clear_flag(s_history_trace_message",
+):
+    assert direct_invalidation not in history_refresh_source, \
+           f"History renderer bypasses changed-only visibility: {direct_invalidation}"
+require(display, r"trace->loaded.*?trace->has_data.*?trace_count",
         "physical History renders only available recorded trace data")
 require(history, r"has_ahi\s*=\s*json_number", "missing AHI remains unavailable")
 require(history_header, r"int\s+mask_off_count\s*;",

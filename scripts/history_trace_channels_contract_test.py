@@ -39,8 +39,27 @@ require(HISTORY, r"points\[i\]\s*=.*?low_lpm.*?"
 assert "points[i * 2]" not in HISTORY, \
        "flow extrema must not be serialised into one sawtooth series"
 require(DISPLAY, r"s_history_trace_upper_series\s*=\s*lv_chart_add_series.*?"
-                 r"upper_points\[i\].*?s_history_trace_upper_series",
-        "second LVGL series for the flow envelope")
+                 r"lv_chart_set_ext_y_array\(s_history_trace_chart,\s*"
+                 r"s_history_trace_upper_series,\s*"
+                 r"s_history_trace_upper_values\).*?"
+                 r"upper\s*=\s*trace->upper_points\[i\].*?"
+                 r"s_history_trace_upper_values\[i\]",
+        "external second LVGL series for the flow envelope")
+assert "lv_chart_set_next_value" not in DISPLAY[
+    DISPLAY.index("static void refresh_history_widgets"):
+    DISPLAY.index("static void refresh_device_dropdown")
+], "History chart must refresh once after direct array population"
+refresh_source = DISPLAY[
+    DISPLAY.index("static void refresh_history_widgets"):
+    DISPLAY.index("static void refresh_device_dropdown")
+]
+require(refresh_source,
+        r"trace_count\s*=\s*trace->count\s*<\s*TOUCH_HISTORY_TRACE_POINTS.*?"
+        r"s_history_trace_values\[i\]\s*=.*?"
+        r"lv_chart_refresh\(s_history_trace_chart\);",
+        "bounded direct chart population followed by one refresh")
+assert refresh_source.count("lv_chart_refresh(s_history_trace_chart);") == 1, \
+       "History chart should publish direct-array changes exactly once"
 require(DISPLAY, r"s_history_channel\s*==\s*TOUCH_HISTORY_CHANNEL_FLOW\)\s*return;",
         "single-trace area fill disabled for flow envelope")
 
