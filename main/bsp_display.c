@@ -924,6 +924,12 @@ uint8_t bsp_display_get_brightness(void)
     return s_brightness;
 }
 
+void bsp_display_restart_idle_timeout(void)
+{
+    /* The compact profile has no local touch surface, so automatic idle sleep
+     * remains disabled there. Keep the cross-board settings API harmless. */
+}
+
 void bsp_display_apply_backlight_policy(bool force_on)
 {
     if (force_on) {

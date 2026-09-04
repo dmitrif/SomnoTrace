@@ -98,7 +98,13 @@ static esp_err_t init_rgb_panel(void)
     esp_lcd_rgb_panel_config_t cfg = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
-            .pclk_hz = 30850000,
+            /* Keep enough PSRAM-to-bounce-buffer margin while LVGL is
+             * actively repainting a 1024x600 view.  The board is stable at
+             * 24 MHz for static frames, but physical scrolling/touch tests
+             * can still starve scanout and shift the lower part of a frame.
+             * 18 MHz remains effectively a 20 fps panel with these porches,
+             * matching the UI's 20 Hz live-chart presentation ceiling. */
+            .pclk_hz = 18000000,
             .h_res = WAVESHARE_7B_H_RES,
             .v_res = WAVESHARE_7B_V_RES,
             .hsync_pulse_width = 162,
@@ -112,7 +118,10 @@ static esp_err_t init_rgb_panel(void)
         .data_width = 16,
         .bits_per_pixel = 16,
         .num_fbs = 2,
-        .bounce_buffer_size_px = WAVESHARE_7B_H_RES * 10,
+        /* Twenty lines is the current Waveshare 7B reference value. It
+         * absorbs the short PSRAM bandwidth bursts caused by touch redraws,
+         * Wi-Fi, and BLE without allocating another full framebuffer. */
+        .bounce_buffer_size_px = WAVESHARE_7B_H_RES * 20,
         .sram_trans_align = 4,
         .psram_trans_align = 64,
         .hsync_gpio_num = GPIO_NUM_46,
@@ -208,7 +217,13 @@ esp_err_t waveshare_7b_set_brightness(uint8_t percent)
 {
     ESP_RETURN_ON_ERROR(init_i2c_and_expander(), TAG, "board control init");
     if (percent > 100) percent = 100;
-    uint8_t pwm = (uint8_t)((percent > 97 ? 97 : percent) * 255U / 100U);
+    /* The Waveshare I/O controller drives the backlight PWM active-low:
+     * command 0 is steady/full-on and increasing values add off-time. Keep
+     * the vendor's 97% attenuation limit so minimum brightness never becomes
+     * indistinguishable from the separate hard-off control. */
+    uint8_t attenuation = (uint8_t)(100U - percent);
+    if (attenuation > 97) attenuation = 97;
+    uint8_t pwm = (uint8_t)(attenuation * 255U / 100U);
     return iox_write(IOX_REG_PWM, pwm);
 }
 

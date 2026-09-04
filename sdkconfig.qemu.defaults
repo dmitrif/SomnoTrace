@@ -11,10 +11,15 @@ CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
 
+# Match the physical profile's one-time build_ui() stack headroom so the
+# emulator exercises the same object-tree construction envelope.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=14336
+
 # The virtual panel exposes a dedicated RGB565 framebuffer.
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_MEM_CUSTOM=y
 CONFIG_LV_MEMCPY_MEMSET_STD=y
+CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_18=y
 CONFIG_LV_FONT_MONTSERRAT_22=y

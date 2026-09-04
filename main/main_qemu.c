@@ -36,17 +36,19 @@ void app_main(void)
 
     ESP_LOGI(TAG, "1024x600 interactive UI preview ready; click to emulate touch");
     unsigned iteration = 0;
-    float phase = 0.0f;
+    /* Continue exactly where the deterministic pre-filled waveform ended so
+     * the preview never displays a moving circular-buffer seam. */
+    float phase = 300.0f * 0.06f;
     while (true) {
         float flow = 36.0f * sinf(phase) + 7.0f * sinf(phase * 2.3f);
         bsp_display_push_flow(flow);
-        if ((iteration % 10) == 0) {
+        if ((iteration % 20) == 0) {
             bsp_display_push_leak(3.2f + 0.8f * sinf(phase * 0.3f));
             bsp_display_push_metrics(8.6f + 0.4f * sinf(phase * 0.2f),
                                      14.4f, 0.08f);
         }
-        phase += 0.12f;
+        phase += 0.06f;
         iteration++;
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(40));
     }
 }

@@ -691,6 +691,17 @@ Display &amp; Sound
 <input type="range" id="lcd-brightness" class="form-control" min="0" max="7" step="1" value="6" style="padding:0" oninput="onBrightnessInput(this.value)">
 </div>
 <div class="form-group">
+<label for="screen-timeout">Turn screen off after <span id="screen-timeout-status" class="setting-status"></span></label>
+<select id="screen-timeout" class="form-control" onchange="onScreenTimeoutChange(this)">
+<option value="0">Never</option>
+<option value="60">1 minute</option>
+<option value="300" selected>5 minutes</option>
+<option value="900">15 minutes</option>
+<option value="1800">30 minutes</option>
+</select>
+<p class="card-desc" style="margin:6px 0 0">Only while therapy is stopped. The first touch wakes the screen without activating a control.</p>
+</div>
+<div class="form-group">
 <label>Display mode <span id="therapy-status" class="setting-status"></span></label>
 <select id="lcd-therapy-mode" class="form-control" onchange="onLcdTherapyModeChange(this)">
 <option value="0">Show live graph during therapy</option>
@@ -2220,6 +2231,23 @@ function onLcdTherapyModeChange(sel) {
   });
 }
 
+function onScreenTimeoutChange(sel) {
+  var seconds = sel ? parseInt(sel.value, 10) : 300;
+  var allowed = [0, 60, 300, 900, 1800];
+  if (allowed.indexOf(seconds) < 0) return;
+  setStatus('screen-timeout-status', '…', null);
+  fetch('/api/device/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen_timeout_s: seconds })
+  }).then(function(r) {
+    if (!r.ok) throw new Error('screen timeout save failed');
+    setStatus('screen-timeout-status', '✓', true);
+  }).catch(function() {
+    setStatus('screen-timeout-status', '✗', false);
+  });
+}
+
 function onLcdRotationChange(sel) {
   var rot = sel ? parseInt(sel.value) || 0 : 0;
   setStatus('rotation-status', '…', null);
@@ -2234,34 +2262,44 @@ function onLcdRotationChange(sel) {
   });
 }
 
+function renderDeviceSettings(d) {
+  var br = document.getElementById('lcd-brightness');
+  if (br && typeof d.brightness === 'number') {
+    var idx = BRIGHTNESS_STEPS.indexOf(d.brightness);
+    if (idx < 0) idx = 6; /* fallback to 10% */
+    br.value = idx;
+    var label = document.getElementById('brightness-val');
+    if (label) label.textContent = BRIGHTNESS_LABELS[idx];
+  }
+  var mode = document.getElementById('lcd-therapy-mode');
+  if (mode && typeof d.lcd_therapy_mode === 'number') {
+    mode.value = String(d.lcd_therapy_mode);
+  }
+  var timeout = document.getElementById('screen-timeout');
+  if (timeout && typeof d.screen_timeout_s === 'number') {
+    var allowedTimeouts = [0, 60, 300, 900, 1800];
+    timeout.value = String(allowedTimeouts.indexOf(d.screen_timeout_s) >= 0
+                           ? d.screen_timeout_s : 300);
+  }
+  var rot = document.getElementById('lcd-rotation');
+  if (rot && typeof d.lcd_rotation === 'number') {
+    rot.value = String(d.lcd_rotation);
+  }
+  var av = document.getElementById('alert-volume');
+  if (av && typeof d.alert_volume === 'number') {
+    /* API uses 50-100%, slider uses 1-11 */
+    var sliderVal = Math.round((d.alert_volume - 50) / 5) + 1;
+    if (sliderVal < 1) sliderVal = 1;
+    if (sliderVal > 11) sliderVal = 11;
+    av.value = sliderVal;
+    var avl = document.getElementById('alert-vol-val');
+    if (avl) avl.textContent = sliderVal;
+  }
+}
+
 function loadDeviceSettings() {
   fetch('/api/device/settings').then(function(r){ return r.json(); }).then(function(d) {
-    var br = document.getElementById('lcd-brightness');
-    if (br && typeof d.brightness === 'number') {
-      var idx = BRIGHTNESS_STEPS.indexOf(d.brightness);
-      if (idx < 0) idx = 6; /* fallback to 10% */
-      br.value = idx;
-      var label = document.getElementById('brightness-val');
-      if (label) label.textContent = BRIGHTNESS_LABELS[idx];
-    }
-    var mode = document.getElementById('lcd-therapy-mode');
-    if (mode && typeof d.lcd_therapy_mode === 'number') {
-      mode.value = String(d.lcd_therapy_mode);
-    }
-    var rot = document.getElementById('lcd-rotation');
-    if (rot && typeof d.lcd_rotation === 'number') {
-      rot.value = String(d.lcd_rotation);
-    }
-    var av = document.getElementById('alert-volume');
-    if (av && typeof d.alert_volume === 'number') {
-      /* API uses 50-100%, slider uses 1-11 */
-      var sliderVal = Math.round((d.alert_volume - 50) / 5) + 1;
-      if (sliderVal < 1) sliderVal = 1;
-      if (sliderVal > 11) sliderVal = 11;
-      av.value = sliderVal;
-      var avl = document.getElementById('alert-vol-val');
-      if (avl) avl.textContent = sliderVal;
-    }
+    renderDeviceSettings(d);
     setLoading('display-sound-details', false);
   }).catch(function() {
     setLoading('display-sound-details', false);

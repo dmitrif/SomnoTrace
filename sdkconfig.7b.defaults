@@ -5,14 +5,27 @@ CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_SIZE=64
 CONFIG_FREERTOS_HZ=1000
+# Waveshare's current 1024x600 reference enables both options to keep the
+# display path stable under redraw, flash, and network load.
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
 
 # Catch stack corruption close to its source in the larger touch/LVGL build.
 CONFIG_COMPILER_STACK_CHECK_MODE_STRONG=y
+# build_ui() creates the full bedside object tree before the dedicated LVGL
+# task starts. Keep explicit headroom for that one-time construction path.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=14336
 
 # Native 1024x600 UI (LVGL 8).
 CONFIG_LV_COLOR_DEPTH_16=y
+# Read touch at 100 Hz and schedule invalidated UI work at 60 Hz. The RGB
+# panel still scans at its stable 18 MHz timing; these only reduce the delay
+# before a gesture is observed and its dirty region is prepared.
+CONFIG_LV_INDEV_DEF_READ_PERIOD=10
+CONFIG_LV_DISP_DEF_REFR_PERIOD=16
 CONFIG_LV_MEM_CUSTOM=y
 CONFIG_LV_MEMCPY_MEMSET_STD=y
+CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_18=y
 CONFIG_LV_FONT_MONTSERRAT_22=y

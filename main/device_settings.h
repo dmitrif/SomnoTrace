@@ -49,33 +49,48 @@ typedef struct {
     lcd_therapy_mode_t lcd_therapy_mode;
     uint8_t alert_volume;      /* speaker volume for alerts: 0-100 */
     uint16_t lcd_rotation;     /* clockwise degrees: 0, 90, 180, or 270 */
+    uint16_t screen_timeout_s; /* inactivity timeout in seconds; 0 = never */
 } device_settings_t;
 
 /* Load settings from NVS. Returns ESP_OK if loaded, ESP_ERR_NVS_NOT_FOUND
  * if no settings stored (defaults are filled in). */
 esp_err_t device_settings_load(device_settings_t *cfg);
 
-/* Save settings to NVS. */
+/* Replace the complete in-memory settings structure and save it to NVS. */
 esp_err_t device_settings_save(const device_settings_t *cfg);
+
+/* Persist the latest in-memory settings without replacing changes made by a
+ * concurrent web or touchscreen task. */
+esp_err_t device_settings_save_current(void);
+
+/* Copy a coherent snapshot of the current in-memory settings. */
+void device_settings_snapshot(device_settings_t *out);
 
 /* Get current in-memory settings (loaded at boot). */
 const device_settings_t *device_settings_get(void);
 
 /* Set brightness immediately (applies to hardware + updates in-memory copy).
- * Does NOT persist to NVS — call device_settings_save() for that. */
+ * Does NOT persist to NVS — call device_settings_save_current() for that. */
 esp_err_t device_settings_set_brightness(uint8_t percent);
 
 /* Set LCD therapy mode (updates in-memory copy only).
- * Call device_settings_save() to persist. */
+ * Call device_settings_save_current() to persist. */
 esp_err_t device_settings_set_lcd_therapy_mode(lcd_therapy_mode_t mode);
 
 /* Set alert speaker volume (0-100). Updates in-memory copy and applies to
- * bsp_audio. Call device_settings_save() to persist. */
+ * bsp_audio. Call device_settings_save_current() to persist. */
 esp_err_t device_settings_set_alert_volume(uint8_t percent);
 
 /* Set LCD rotation (0, 90, 180, or 270 degrees). Updates in-memory copy and
- * applies to hardware immediately. Call device_settings_save() to persist. */
+ * applies to hardware immediately. Call device_settings_save_current() to
+ * persist. */
 esp_err_t device_settings_set_lcd_rotation(uint16_t degrees);
+
+/* Set the screen inactivity timeout. Supported values are 0 (never), 60,
+ * 300, 900, and 1800 seconds. Updates in-memory state and re-applies the
+ * display policy immediately; call device_settings_save_current() to persist
+ * it. */
+esp_err_t device_settings_set_screen_timeout_s(uint16_t seconds);
 
 /* Get settings as JSON string for web UI. Caller must free(). */
 esp_err_t device_settings_get_json(char **out_json);

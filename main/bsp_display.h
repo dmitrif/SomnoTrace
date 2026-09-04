@@ -64,6 +64,10 @@ void bsp_display_set_brightness(uint8_t percent);
 void bsp_display_set_backlight(bool on);
 uint8_t bsp_display_get_brightness(void);
 
+/* Restart the touch display's inactivity window. This is a no-op on display
+ * profiles that do not implement automatic screen sleep. */
+void bsp_display_restart_idle_timeout(void);
+
 /* Apply the current backlight policy based on lcd_therapy_mode and therapy
  * state.  Called after boot completes, when entering/leaving SoftAP, or
  * when the mode is changed at runtime.

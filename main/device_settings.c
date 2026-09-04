@@ -31,6 +31,8 @@
 #include "nvs.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "dev_settings";
 
@@ -39,10 +41,19 @@ static const char *TAG = "dev_settings";
 #define NVS_KEY_LCD_THERAPY  "lcd_thr"
 #define NVS_KEY_ALERT_VOL    "alrtvol"
 #define NVS_KEY_LCD_ROTATION "lcd_rot"
+#define NVS_KEY_SCREEN_TIMEOUT "scr_tmo"
 
 /* Brightness stored in tenth-percent units: 1=0.1%, 200=20.0%
  * Discrete steps: 0.1, 0.2, 0.5, 1, 2, 5, 10, 20 (roughly 2x each) */
+#if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B || CONFIG_SOMNOTRACE_BOARD_QEMU
+/* The 7-inch UI presents the legacy 1..200 storage range as 1..100%.
+ * Full brightness selects the controller's steady, non-PWM endpoint. */
+#define DEFAULT_BRIGHTNESS       200 /* 100% on the 7-inch target */
+#define DEFAULT_SCREEN_TIMEOUT_S 300
+#else
 #define DEFAULT_BRIGHTNESS       100 /* 10.0% */
+#define DEFAULT_SCREEN_TIMEOUT_S 0
+#endif
 #define MIN_BRIGHTNESS           1   /* 0.1% */
 #define MAX_BRIGHTNESS           200 /* 20.0% */
 #define DEFAULT_ALERT_VOLUME     65
@@ -50,6 +61,51 @@ static const char *TAG = "dev_settings";
 #define DEFAULT_LCD_ROTATION     LCD_ROTATION_0
 
 static device_settings_t s_settings;
+static device_settings_t s_save_work;
+static uint32_t s_settings_revision;
+static StaticSemaphore_t s_settings_mutex_storage;
+static StaticSemaphore_t s_save_mutex_storage;
+static SemaphoreHandle_t s_settings_mutex;
+static SemaphoreHandle_t s_save_mutex;
+static portMUX_TYPE s_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* The display is initialized before NVS is available, so touchscreen code can
+ * read or change defaults before device_settings_load(). Static, lazily-created
+ * mutexes keep that early path allocation-free and make web/touch updates safe
+ * once both tasks are running. */
+static void ensure_settings_mutexes(void)
+{
+    if (s_settings_mutex && s_save_mutex) return;
+
+    portENTER_CRITICAL(&s_mutex_init_lock);
+    if (!s_settings_mutex) {
+        s_settings_mutex = xSemaphoreCreateRecursiveMutexStatic(
+            &s_settings_mutex_storage);
+    }
+    if (!s_save_mutex) {
+        s_save_mutex = xSemaphoreCreateMutexStatic(&s_save_mutex_storage);
+    }
+    portEXIT_CRITICAL(&s_mutex_init_lock);
+}
+
+static void settings_lock(void)
+{
+    ensure_settings_mutexes();
+    xSemaphoreTakeRecursive(s_settings_mutex, portMAX_DELAY);
+}
+
+static void settings_unlock(void)
+{
+    xSemaphoreGiveRecursive(s_settings_mutex);
+}
+
+static void copy_current_settings(device_settings_t *out, uint32_t *revision)
+{
+    settings_lock();
+    *out = s_settings;
+    if (revision) *revision = s_settings_revision;
+    settings_unlock();
+}
 
 static bool lcd_rotation_is_valid(int degrees)
 {
@@ -64,13 +120,31 @@ static bool lcd_rotation_is_valid(int degrees)
     }
 }
 
+static bool screen_timeout_is_valid(int seconds)
+{
+    switch (seconds) {
+        case 0:
+        case 60:
+        case 300:
+        case 900:
+        case 1800:
+            return true;
+        default:
+            return false;
+    }
+}
+
 esp_err_t device_settings_load(device_settings_t *cfg)
 {
+    if (!cfg) return ESP_ERR_INVALID_ARG;
+    ensure_settings_mutexes();
+
     memset(cfg, 0, sizeof(*cfg));
     cfg->brightness = DEFAULT_BRIGHTNESS;
     cfg->lcd_therapy_mode = LCD_THERAPY_GRAPH;
     cfg->alert_volume = DEFAULT_ALERT_VOLUME;
     cfg->lcd_rotation = DEFAULT_LCD_ROTATION;
+    cfg->screen_timeout_s = DEFAULT_SCREEN_TIMEOUT_S;
     /* Clamp stale NVS values to current valid range */
 
     nvs_handle_t h;
@@ -78,7 +152,10 @@ esp_err_t device_settings_load(device_settings_t *cfg)
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
         nvs_writer_unlock();
         ESP_LOGI(TAG, "no device settings in NVS — using defaults");
-        memcpy(&s_settings, cfg, sizeof(s_settings));
+        settings_lock();
+        s_settings = *cfg;
+        s_settings_revision++;
+        settings_unlock();
         return ESP_ERR_NVS_NOT_FOUND;
     }
 
@@ -106,30 +183,85 @@ esp_err_t device_settings_load(device_settings_t *cfg)
         cfg->lcd_rotation = lcd_rotation_is_valid(rotation) ?
                             rotation : DEFAULT_LCD_ROTATION;
     }
+    uint16_t screen_timeout_s;
+    if (nvs_get_u16(h, NVS_KEY_SCREEN_TIMEOUT, &screen_timeout_s) == ESP_OK) {
+        cfg->screen_timeout_s = screen_timeout_is_valid(screen_timeout_s) ?
+                                screen_timeout_s : DEFAULT_SCREEN_TIMEOUT_S;
+    }
 
     nvs_close(h);
     nvs_writer_unlock();
-    memcpy(&s_settings, cfg, sizeof(s_settings));
-    ESP_LOGI(TAG, "loaded: brightness=%u (%.1f%%), lcd_therapy=%u, alert_vol=%u, lcd_rot=%u",
-             s_settings.brightness, s_settings.brightness / 10.0,
-             s_settings.lcd_therapy_mode, s_settings.alert_volume,
-             (unsigned)s_settings.lcd_rotation);
+    settings_lock();
+    s_settings = *cfg;
+    s_settings_revision++;
+    settings_unlock();
+    ESP_LOGI(TAG, "loaded: brightness=%u (%.1f%%), lcd_therapy=%u, alert_vol=%u, lcd_rot=%u, screen_tmo=%us",
+             cfg->brightness, cfg->brightness / 10.0,
+             cfg->lcd_therapy_mode, cfg->alert_volume,
+             (unsigned)cfg->lcd_rotation,
+             (unsigned)cfg->screen_timeout_s);
     return ESP_OK;
 }
 
 static esp_err_t do_device_settings_save(void *arg)
 {
-    const device_settings_t *cfg = (const device_settings_t *)arg;
+    /* arg points at s_save_work in internal DRAM. Copy it to this writer
+     * task's internal stack before any flash operation disables caches. */
+    const device_settings_t cfg = *(const device_settings_t *)arg;
     nvs_handle_t h;
     esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
     if (ret != ESP_OK) return ret;
 
-    nvs_set_u8(h, NVS_KEY_BRIGHTNESS, cfg->brightness);
-    nvs_set_u8(h, NVS_KEY_LCD_THERAPY, (uint8_t)cfg->lcd_therapy_mode);
-    nvs_set_u8(h, NVS_KEY_ALERT_VOL, cfg->alert_volume);
-    nvs_set_u16(h, NVS_KEY_LCD_ROTATION, cfg->lcd_rotation);
-    ret = nvs_commit(h);
+    ret = nvs_set_u8(h, NVS_KEY_BRIGHTNESS, cfg.brightness);
+    if (ret == ESP_OK)
+        ret = nvs_set_u8(h, NVS_KEY_LCD_THERAPY,
+                         (uint8_t)cfg.lcd_therapy_mode);
+    if (ret == ESP_OK)
+        ret = nvs_set_u8(h, NVS_KEY_ALERT_VOL, cfg.alert_volume);
+    if (ret == ESP_OK)
+        ret = nvs_set_u16(h, NVS_KEY_LCD_ROTATION, cfg.lcd_rotation);
+    if (ret == ESP_OK)
+        ret = nvs_set_u16(h, NVS_KEY_SCREEN_TIMEOUT, cfg.screen_timeout_s);
+    if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
+    return ret;
+}
+
+/* s_save_mutex must be held. If a setter runs during the flash commit, repeat
+ * with its newer revision so an older snapshot can never be the last durable
+ * value. Setters only take s_settings_mutex and therefore never block the UI
+ * for the duration of an NVS write. */
+static esp_err_t persist_current_locked(device_settings_t *persisted)
+{
+    for (;;) {
+        uint32_t revision;
+        copy_current_settings(&s_save_work, &revision);
+        esp_err_t ret = nvs_writer_run(do_device_settings_save, &s_save_work);
+        if (ret != ESP_OK) return ret;
+
+        settings_lock();
+        bool stable = revision == s_settings_revision;
+        if (stable && persisted) *persisted = s_settings;
+        settings_unlock();
+        if (stable) return ESP_OK;
+    }
+}
+
+esp_err_t device_settings_save_current(void)
+{
+    ensure_settings_mutexes();
+    xSemaphoreTake(s_save_mutex, portMAX_DELAY);
+    device_settings_t persisted;
+    esp_err_t ret = persist_current_locked(&persisted);
+    xSemaphoreGive(s_save_mutex);
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "saved: brightness=%u (%.1f%%), lcd_therapy=%u, alert_vol=%u, lcd_rot=%u, screen_tmo=%us",
+                 persisted.brightness, persisted.brightness / 10.0,
+                 persisted.lcd_therapy_mode, persisted.alert_volume,
+                 (unsigned)persisted.lcd_rotation,
+                 (unsigned)persisted.screen_timeout_s);
+    }
     return ret;
 }
 
@@ -137,16 +269,24 @@ esp_err_t device_settings_save(const device_settings_t *cfg)
 {
     if (!cfg) return ESP_ERR_INVALID_ARG;
 
-    /* Delegate the flash write so callers on a PSRAM stack (httpd) are safe. */
-    esp_err_t ret = nvs_writer_run(do_device_settings_save, (void *)cfg);
-    if (ret == ESP_OK) {
-        memcpy(&s_settings, cfg, sizeof(s_settings));
-        ESP_LOGI(TAG, "saved: brightness=%u (%.1f%%), lcd_therapy=%u, alert_vol=%u, lcd_rot=%u",
-                 s_settings.brightness, s_settings.brightness / 10.0,
-                 s_settings.lcd_therapy_mode, s_settings.alert_volume,
-                 (unsigned)s_settings.lcd_rotation);
+    /* This is an explicit full-structure replacement. Interactive callers
+     * that already used a field setter should call save_current() instead. */
+    settings_lock();
+    device_settings_t replacement = *cfg;
+    if (!screen_timeout_is_valid(replacement.screen_timeout_s)) {
+        settings_unlock();
+        return ESP_ERR_INVALID_ARG;
     }
-    return ret;
+    s_settings = replacement;
+    s_settings_revision++;
+    settings_unlock();
+    return device_settings_save_current();
+}
+
+void device_settings_snapshot(device_settings_t *out)
+{
+    if (!out) return;
+    copy_current_settings(out, NULL);
 }
 
 const device_settings_t *device_settings_get(void)
@@ -159,17 +299,23 @@ esp_err_t device_settings_set_brightness(uint8_t percent)
     if (percent < MIN_BRIGHTNESS) percent = MIN_BRIGHTNESS;
     if (percent > MAX_BRIGHTNESS) percent = MAX_BRIGHTNESS;
 
+    settings_lock();
     s_settings.brightness = percent;
+    s_settings_revision++;
     bsp_display_set_brightness(percent);
+    settings_unlock();
     return ESP_OK;
 }
 
 esp_err_t device_settings_set_lcd_therapy_mode(lcd_therapy_mode_t mode)
 {
+    settings_lock();
     s_settings.lcd_therapy_mode = mode;
+    s_settings_revision++;
     /* Re-evaluate display mode and backlight immediately */
     bsp_display_set_therapy_active(bsp_display_is_therapy_active());
     bsp_display_apply_backlight_policy(false);
+    settings_unlock();
     return ESP_OK;
 }
 
@@ -177,16 +323,36 @@ esp_err_t device_settings_set_alert_volume(uint8_t percent)
 {
     if (percent < MIN_ALERT_VOLUME) percent = MIN_ALERT_VOLUME;
     if (percent > 100) percent = 100;
+    settings_lock();
     s_settings.alert_volume = percent;
+    s_settings_revision++;
     bsp_audio_set_volume(percent);
+    settings_unlock();
     return ESP_OK;
 }
 
 esp_err_t device_settings_set_lcd_rotation(uint16_t degrees)
 {
     if (!lcd_rotation_is_valid(degrees)) return ESP_ERR_INVALID_ARG;
+    settings_lock();
     s_settings.lcd_rotation = degrees;
+    s_settings_revision++;
     bsp_display_set_rotation(degrees);
+    settings_unlock();
+    return ESP_OK;
+}
+
+esp_err_t device_settings_set_screen_timeout_s(uint16_t seconds)
+{
+    if (!screen_timeout_is_valid(seconds)) return ESP_ERR_INVALID_ARG;
+    settings_lock();
+    s_settings.screen_timeout_s = seconds;
+    s_settings_revision++;
+    /* Treat a setting change as the beginning of a fresh idle window. Turning
+     * the timeout off also restores the configured display policy now. */
+    bsp_display_restart_idle_timeout();
+    bsp_display_apply_backlight_policy(false);
+    settings_unlock();
     return ESP_OK;
 }
 
@@ -194,11 +360,17 @@ esp_err_t device_settings_get_json(char **out_json)
 {
     if (!out_json) return ESP_ERR_INVALID_ARG;
 
+    device_settings_t settings;
+    device_settings_snapshot(&settings);
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "brightness", s_settings.brightness);
-    cJSON_AddNumberToObject(root, "lcd_therapy_mode", (int)s_settings.lcd_therapy_mode);
-    cJSON_AddNumberToObject(root, "alert_volume", s_settings.alert_volume);
-    cJSON_AddNumberToObject(root, "lcd_rotation", s_settings.lcd_rotation);
+    if (!root) return ESP_ERR_NO_MEM;
+    cJSON_AddNumberToObject(root, "brightness", settings.brightness);
+    cJSON_AddNumberToObject(root, "lcd_therapy_mode",
+                           (int)settings.lcd_therapy_mode);
+    cJSON_AddNumberToObject(root, "alert_volume", settings.alert_volume);
+    cJSON_AddNumberToObject(root, "lcd_rotation", settings.lcd_rotation);
+    cJSON_AddNumberToObject(root, "screen_timeout_s",
+                           settings.screen_timeout_s);
 
     *out_json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -215,8 +387,9 @@ esp_err_t device_settings_save_json(const char *json_str)
         return ESP_ERR_INVALID_STATE;
     }
 
-    device_settings_t cfg;
-    memcpy(&cfg, &s_settings, sizeof(cfg));
+    settings_lock();
+    device_settings_t cfg = s_settings;
+    bool screen_timeout_present = false;
 
     cJSON *v;
     if ((v = cJSON_GetObjectItem(root, "brightness")) && cJSON_IsNumber(v)) {
@@ -245,22 +418,32 @@ esp_err_t device_settings_save_json(const char *json_str)
         cfg.lcd_rotation = lcd_rotation_is_valid(val) ?
                            (uint16_t)val : DEFAULT_LCD_ROTATION;
     }
+    v = cJSON_GetObjectItem(root, "screen_timeout_s");
+    if (v) {
+        int val = v->valueint;
+        if (!cJSON_IsNumber(v) || v->valuedouble != (double)val ||
+            !screen_timeout_is_valid(val)) {
+            settings_unlock();
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_ARG;
+        }
+        cfg.screen_timeout_s = (uint16_t)val;
+        screen_timeout_present = true;
+    }
 
+    s_settings = cfg;
+    s_settings_revision++;
+    /* Keep state and hardware application in one ordered section. A newer
+     * touchscreen update blocks here briefly and then applies after this one. */
+    bsp_display_set_brightness(cfg.brightness);
+    bsp_audio_set_volume(cfg.alert_volume);
+    bsp_display_set_rotation(cfg.lcd_rotation);
+    if (screen_timeout_present) bsp_display_restart_idle_timeout();
+    bsp_display_set_therapy_active(bsp_display_is_therapy_active());
+    settings_unlock();
     cJSON_Delete(root);
 
-    /* Apply brightness immediately */
-    bsp_display_set_brightness(cfg.brightness);
-    /* Apply alert volume immediately */
-    bsp_audio_set_volume(cfg.alert_volume);
-    /* Apply LCD rotation immediately */
-    bsp_display_set_rotation(cfg.lcd_rotation);
-
-    /* Persist first so device_settings_get() returns the new mode,
-     * then re-evaluate therapy display mode and backlight based on the new mode.
-     * If in SoftAP (force_on), backlight stays on regardless. */
-    esp_err_t ret = device_settings_save(&cfg);
-    bsp_display_set_therapy_active(bsp_display_is_therapy_active());
-    bsp_display_apply_backlight_policy(false);
-
-    return ret;
+    /* If a touchscreen setter races this flash commit, save_current() repeats
+     * with the newer revision instead of leaving the stale web snapshot in NVS. */
+    return device_settings_save_current();
 }
