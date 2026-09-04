@@ -148,18 +148,24 @@ require(TOUCH_BSP,
         "touchscreen exposes every persisted timeout")
 
 display_section = TOUCH_BSP.split(
-    "static void build_display_section", 1)[1].split(
+    "static int build_display_controls", 1)[1].split(
         "static void build_alerts_section", 1)[0]
-display_rows = [
-    (int(y), int(height))
-    for y, height in re.findall(
-        r"make_manage_row\(scroll,\s*(\d+),\s*(\d+)\)", display_section)
-]
-assert len(display_rows) == 3, f"unexpected Display row geometry: {display_rows}"
-assert max(y + height for y, height in display_rows) <= 340, (
-    f"Display controls overflow the 340 px viewport: {display_rows}")
+for position, height in (
+    (r"start_y", 112),
+    (r"start_y\s*\+\s*120", 128),
+    (r"start_y\s*\+\s*256", 82),
+):
+    require(display_section,
+            rf"make_manage_row\(scroll,\s*{position},\s*{height}\)",
+            f"display row at {position} with {height}px height")
+require(display_section, r"return\s+start_y\s*\+\s*346",
+        "display controls report their composed scroll height")
+require(TOUCH_BSP,
+        r"can_overflow\s*=.*?index\s*==\s*MANAGE_SYSTEM.*?"
+        r"LV_OBJ_FLAG_SCROLLABLE.*?lv_obj_set_scroll_dir\([^;]+LV_DIR_VER",
+        "composed System and Display controls have bounded vertical scrolling")
 require(display_section,
-        r"lv_obj_set_size\(s_settings_screen_timeout,\s*172,\s*56\)",
+        r"lv_obj_set_size\(s_settings_screen_timeout,\s*194,\s*56\)",
         "main timeout selector is at least 56 px tall")
 
 font_height_match = re.search(r"\.line_height\s*=\s*(\d+)", BODY_FONT)
