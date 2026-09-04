@@ -454,11 +454,12 @@ require(secondary_source,
         r"if\s*\(active_tab\s*!=\s*2\)\s*return;",
         "BLE completion survives hidden Manage render gating")
 require(secondary_source,
-        r"lv_obj_is_scrolling\(s_manage_scrolls\[s_active_manage_section\]\).*?"
+        r"lv_obj_t\s*\*active_scroll\s*=\s*s_manage_scrolls\[section\];.*?"
+        r"if\s*\(active_scroll\s*&&\s*lv_obj_is_scrolling\(active_scroll\)\).*?"
         r"return;",
-        "periodic Manage repaint defers while scrolling")
+        "visible Manage repaint defers while its active scroll root is moving")
 require(secondary_source,
-        r"if\s*\(s_active_manage_section\s*==\s*MANAGE_CONNECTIVITY\)\s*"
+        r"if\s*\(section\s*==\s*MANAGE_CONNECTIVITY\)\s*"
         r"refresh_wifi_scan_controls\(\);",
         "Wi-Fi scan widgets refresh only in their visible section")
 
