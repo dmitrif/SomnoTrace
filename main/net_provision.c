@@ -1167,7 +1167,7 @@ static void wifi_scan_task(void *arg)
                      NETPROV_SCAN_BLOCK_RECORDING, ESP_ERR_INVALID_STATE,
                      NULL, 0);
         xSemaphoreGive(s_radio_gate);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1196,7 +1196,7 @@ static void wifi_scan_task(void *arg)
         scan_publish(generation, NETPROV_SCAN_ERROR, NETPROV_SCAN_BLOCK_NONE,
                      err, NULL, 0);
         xSemaphoreGive(s_radio_gate);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     ESP_LOGI(TAG, "wifi scan complete");
@@ -1208,7 +1208,7 @@ static void wifi_scan_task(void *arg)
         scan_publish(generation, NETPROV_SCAN_ERROR, NETPROV_SCAN_BLOCK_NONE,
                      err, NULL, 0);
         xSemaphoreGive(s_radio_gate);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     /* Fetch more than the public result limit so duplicate BSSIDs do not
@@ -1225,7 +1225,7 @@ static void wifi_scan_task(void *arg)
             scan_publish(generation, NETPROV_SCAN_ERROR,
                          NETPROV_SCAN_BLOCK_NONE, ESP_ERR_NO_MEM, NULL, 0);
             xSemaphoreGive(s_radio_gate);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
         err = esp_wifi_scan_get_ap_records(&ap_count, records);
@@ -1235,7 +1235,7 @@ static void wifi_scan_task(void *arg)
             scan_publish(generation, NETPROV_SCAN_ERROR,
                          NETPROV_SCAN_BLOCK_NONE, err, NULL, 0);
             xSemaphoreGive(s_radio_gate);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
     } else {
@@ -1279,7 +1279,7 @@ static void wifi_scan_task(void *arg)
     scan_publish(generation, NETPROV_SCAN_READY, NETPROV_SCAN_BLOCK_NONE,
                  ESP_OK, aps, result_count);
     xSemaphoreGive(s_radio_gate);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 esp_err_t netprov_scan_request(void)
@@ -1640,7 +1640,7 @@ static void reboot_task(void *arg)
         !sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 5000)) {
         ESP_LOGW(TAG, "credential reboot deferred: recording or SD operation active");
         bsp_display_set_notice("Wi-Fi saved; restart deferred while recording");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     ESP_LOGI(TAG, "rebooting to apply credentials");
@@ -2370,7 +2370,7 @@ static void recreate_edfs_task(void *arg)
 
     if (total_sessions == 0) {
         ESP_LOGI(TAG, "recreate_edfs_task: no sessions found");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -2380,7 +2380,7 @@ static void recreate_edfs_task(void *arg)
             sizeof(recreate_session_t), MALLOC_CAP_SPIRAM);
     if (!sessions) {
         ESP_LOGE(TAG, "recreate_edfs_task: failed to allocate %d sessions", total_sessions);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     int n_sessions = 0;
@@ -2474,7 +2474,7 @@ static void recreate_edfs_task(void *arg)
     if (!queued_days) {
         ESP_LOGE(TAG, "recreate_edfs_task: failed to allocate queued_days");
         free(sessions);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     int n_queued_days = 0;
@@ -2528,7 +2528,7 @@ static void recreate_edfs_task(void *arg)
              n_processed, n_sessions, n_queued_days);
     free(queued_days);
     free(sessions);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 /* Scoped single-day rebuild.  Unlike recreate_edfs_task() this deletes
@@ -2537,7 +2537,7 @@ static void recreate_edfs_task(void *arg)
 static void rebuild_day_task(void *arg)
 {
     char *day = (char *)arg;
-    if (!day) { vTaskDelete(NULL); return; }
+    if (!day) { psram_task_delete(NULL); return; }
 
     esp_err_t ret = edf_gen_rebuild_day(day);
     if (ret == ESP_OK) {
@@ -2550,7 +2550,7 @@ static void rebuild_day_task(void *arg)
                  day, esp_err_to_name(ret));
     }
     free(day);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 /* SD format progress, polled by the browser via /api/format-progress.  The
@@ -2611,7 +2611,7 @@ static void format_sd_task(void *arg)
     s_format_progress.done = true;
     s_format_progress.active = false;
     xSemaphoreGive(s_format_mtx);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 static esp_err_t format_progress_handler(httpd_req_t *req)
@@ -3402,7 +3402,7 @@ void netprov_dns_task(void *arg)
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "dns socket create failed");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -3414,7 +3414,7 @@ void netprov_dns_task(void *arg)
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         ESP_LOGE(TAG, "dns bind failed");
         close(sock);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 

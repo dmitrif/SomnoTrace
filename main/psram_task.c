@@ -24,6 +24,7 @@
 #include "psram_task.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/idf_additions.h"
 
 static const char *TAG = "psram_task";
 
@@ -36,28 +37,29 @@ TaskHandle_t psram_task_create(TaskFunction_t task_func,
                                StackType_t **out_stack,
                                StaticTask_t **out_tcb)
 {
-    StackType_t *stack = heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
-    StaticTask_t *tcb  = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
-    if (!stack || !tcb) {
-        ESP_LOGE(TAG, "failed to allocate %s: stack=%u PSRAM free=%u, tcb internal free=%u",
+    /* xTaskCreateStaticPinnedToCore() cannot reclaim caller-provided buffers
+     * when a task deletes itself.  ESP-IDF's WithCaps pair records the same
+     * PSRAM stack/internal-TCB ownership and vTaskDeleteWithCaps() safely frees
+     * both, including for self-deletion. */
+    if (out_stack) *out_stack = NULL;
+    if (out_tcb) *out_tcb = NULL;
+
+    TaskHandle_t h = NULL;
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+        task_func, name, stack_size, arg, priority, &h, core_id,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS || !h) {
+        ESP_LOGE(TAG,
+                 "failed to allocate %s: stack=%u PSRAM free=%u, internal free=%u",
                  name, (unsigned)stack_size,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-        free(stack);
-        free(tcb);
         return NULL;
     }
-
-    TaskHandle_t h = xTaskCreateStaticPinnedToCore(
-        task_func, name, stack_size, arg, priority, stack, tcb, core_id);
-    if (!h) {
-        ESP_LOGE(TAG, "xTaskCreateStaticPinnedToCore failed for %s", name);
-        free(stack);
-        free(tcb);
-        return NULL;
-    }
-
-    if (out_stack) *out_stack = stack;
-    if (out_tcb)   *out_tcb   = tcb;
     return h;
+}
+
+void psram_task_delete(TaskHandle_t task)
+{
+    vTaskDeleteWithCaps(task);
 }

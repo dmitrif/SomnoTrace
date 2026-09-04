@@ -234,7 +234,7 @@ static void auto_pair_task(void *arg)
                      esp_err_to_name(rc));
             s_pair_in_progress = false;
             free(pa);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
     }
@@ -252,7 +252,7 @@ static void auto_pair_task(void *arg)
                  s_driver_type == OX_DRIVER_LEGACY ? "Gen1 (Legacy)" : "Gen2 (OxyII)");
         s_pair_in_progress = false;
         free(pa);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -264,7 +264,7 @@ static void auto_pair_task(void *arg)
                  lerr ? lerr : "unknown");
         s_pair_in_progress = false;
         free(pa);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -290,7 +290,7 @@ static void auto_pair_task(void *arg)
                  st ? st : "null", err ? err : "none");
         s_pair_in_progress = false;
         free(pa);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -305,7 +305,7 @@ static void auto_pair_task(void *arg)
                  esp_err_to_name(rc));
         s_pair_in_progress = false;
         free(pa);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -323,7 +323,7 @@ static void auto_pair_task(void *arg)
 
     s_pair_in_progress = false;
     free(pa);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 esp_err_t oximeter_pair(const char *addr_str, ox_driver_t driver)

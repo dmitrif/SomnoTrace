@@ -1610,7 +1610,7 @@ static void pair_task(void *arg)
         if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
             ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1620,7 +1620,7 @@ static void pair_task(void *arg)
     if (srp_begin() != ESP_OK) {
         set_error("SRP keygen failed");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     ESP_LOGI(TAG, "pair_task: srp_begin took %lld ms", (esp_timer_get_time() - pair_t0) / 1000);
@@ -1641,7 +1641,7 @@ static void pair_task(void *arg)
     if (se != ESP_OK) {
         set_error("StartKeyExchange send failed");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1659,7 +1659,7 @@ static void pair_task(void *arg)
     if (!resp) {
         set_error("no StartKeyExchange response");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     cJSON *result = cJSON_GetObjectItem(resp, "result");
@@ -1669,7 +1669,7 @@ static void pair_task(void *arg)
         cJSON_Delete(resp);
         set_error("bad StartKeyExchange response");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     /* stash serverPk + salt for the confirm step */
@@ -1679,7 +1679,7 @@ static void pair_task(void *arg)
     cJSON_Delete(resp);
 
     ESP_LOGI(TAG, "StartKeyExchange OK - device should show a 4-digit passkey");
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 static void confirm_task(void *arg)
@@ -1688,7 +1688,7 @@ static void confirm_task(void *arg)
     set_state(AS11_STATUS_CONFIRMING);
 
     if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        set_error("not connected"); vTaskDelete(NULL); return;
+        set_error("not connected"); psram_task_delete(NULL); return;
     }
     /* The StartKeyExchange response may still be arriving if the user
      * entered the PIN quickly.  Wait up to 5 s for s_kex_ready. */
@@ -1696,7 +1696,7 @@ static void confirm_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (!s_kex_ready || !s_server_pk || !s_salt) {
-        set_error("no key-exchange state"); vTaskDelete(NULL); return;
+        set_error("no key-exchange state"); psram_task_delete(NULL); return;
     }
 
     char m1_hex[65];
@@ -1706,7 +1706,7 @@ static void confirm_task(void *arg)
                     m1_hex, m2_expected) != ESP_OK) {
         set_error("SRP computation failed");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     ESP_LOGI(TAG, "confirm_task: srp_compute took %lld ms", (esp_timer_get_time() - conf_t0) / 1000);
@@ -1719,7 +1719,7 @@ static void confirm_task(void *arg)
     if (send_fig(FIG_VCID_TX, json) != ESP_OK) {
         set_error("ConfirmKeyExchange send failed");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -1730,7 +1730,7 @@ static void confirm_task(void *arg)
     if (!resp) {
         set_error("no ConfirmKeyExchange response");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     cJSON *err = cJSON_GetObjectItem(resp, "error");
@@ -1738,7 +1738,7 @@ static void confirm_task(void *arg)
         cJSON_Delete(resp);
         set_error("device rejected passkey");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     cJSON *result = cJSON_GetObjectItem(resp, "result");
@@ -1748,7 +1748,7 @@ static void confirm_task(void *arg)
         cJSON_Delete(resp);
         set_error("bad ConfirmKeyExchange response");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     /* verify server proof (M2) */
@@ -1758,7 +1758,7 @@ static void confirm_task(void *arg)
         cJSON_Delete(resp);
         set_error("server proof mismatch");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1776,7 +1776,7 @@ static void confirm_task(void *arg)
     if (ns != ESP_OK) {
         set_error("NVS save failed");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1796,7 +1796,7 @@ static void confirm_task(void *arg)
     }
     vTaskDelay(pdMS_TO_TICKS(500));
     psram_task_create(reconnect_task, "as11_reconn", 8192, NULL, 5, tskNO_AFFINITY, NULL, NULL);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1814,14 +1814,14 @@ static void reconnect_task(void *arg)
     }
     if (!s_host_ready) {
         ESP_LOGW(TAG, "reconnect: host not ready, aborting");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
     /* Use cached pairing info (loaded at init or after pairing). */
     if (!s_pair_cache.valid) {
         ESP_LOGD(TAG, "reconnect: no cached pairing");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1836,7 +1836,7 @@ static void reconnect_task(void *arg)
 
     if (addr_str[0] == '\0' || cid_str[0] == '\0' || pair_key_hex[0] == '\0') {
         ESP_LOGD(TAG, "reconnect: incomplete pairing cache");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1846,7 +1846,7 @@ static void reconnect_task(void *arg)
     s_own_addr_type = BLE_OWN_ADDR_PUBLIC;
     if (!str_to_addr(addr_str, &s_target_addr)) {
         ESP_LOGE(TAG, "reconnect: bad addr '%s'", addr_str);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     strlcpy(s_target_name, name_str, sizeof(s_target_name));
@@ -1871,7 +1871,7 @@ static void reconnect_task(void *arg)
             ESP_LOGI(TAG, "reconnect: aborted (pairing=%d manual=%d)",
                      s_pair_cache.valid, s_manual_disconnect);
             set_state(AS11_STATUS_IDLE);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
         if (do_connect_and_discover() == ESP_OK) {
@@ -1894,7 +1894,7 @@ static void reconnect_task(void *arg)
                          "(pairing=%d manual=%d)",
                      s_pair_cache.valid, s_manual_disconnect);
             set_state(AS11_STATUS_IDLE);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
         slow_attempt++;
@@ -1906,7 +1906,7 @@ static void reconnect_task(void *arg)
         if (!s_pair_cache.valid || s_manual_disconnect) {
             ESP_LOGI(TAG, "reconnect: aborted during slow retry wait");
             set_state(AS11_STATUS_IDLE);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
         set_state(AS11_STATUS_CONNECTING);
@@ -1925,7 +1925,7 @@ static void reconnect_task(void *arg)
     if (!connected) {
         ESP_LOGE(TAG, "reconnect: all connect attempts failed");
         set_state(AS11_STATUS_IDLE);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1943,7 +1943,7 @@ static void reconnect_task(void *arg)
         ESP_LOGE(TAG, "reconnect: bad pair key");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1959,7 +1959,7 @@ static void reconnect_task(void *arg)
         free(rpc);
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     free(rpc);
@@ -1969,7 +1969,7 @@ static void reconnect_task(void *arg)
         ESP_LOGE(TAG, "reconnect: RequestSession timeout");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     cJSON *result = cJSON_GetObjectItem(resp, "result");
@@ -1980,7 +1980,7 @@ static void reconnect_task(void *arg)
         cJSON_Delete(resp);
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1992,7 +1992,7 @@ static void reconnect_task(void *arg)
         cJSON_Delete(resp);
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -2021,7 +2021,7 @@ static void reconnect_task(void *arg)
         cJSON_Delete(resp);
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     free(rpc);
@@ -2032,7 +2032,7 @@ static void reconnect_task(void *arg)
         ESP_LOGE(TAG, "reconnect: CheckSessionIntegrity timeout");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     cJSON *err = cJSON_GetObjectItem(resp, "error");
@@ -2042,7 +2042,7 @@ static void reconnect_task(void *arg)
         cJSON_Delete(resp);
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
     ESP_LOGI(TAG, "reconnect: session integrity verified");
@@ -2055,7 +2055,7 @@ static void reconnect_task(void *arg)
         ESP_LOGE(TAG, "reconnect: bad nonce hex");
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         set_state(AS11_STATUS_ERROR);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -2211,7 +2211,7 @@ static void reconnect_task(void *arg)
     #endif
     ESP_LOGI(TAG, "reconnect: connected to %s, session established, streams started", addr_str);
 
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 /* ------------------------------------------------------------------
@@ -2235,13 +2235,13 @@ static void auto_reconnect_task(void *arg)
             ESP_LOGI(TAG, "auto-reconnect: aborted during wait "
                          "(pairing=%d manual=%d)",
                      s_pair_cache.valid, s_manual_disconnect);
-            vTaskDelete(NULL);
+            psram_task_delete(NULL);
             return;
         }
     }
 
     /* reconnect_task handles the full connect + encrypted session +
-     * stream setup.  It calls vTaskDelete(NULL) internally, so this
+     * stream setup.  It calls psram_task_delete(NULL) internally, so this
      * task is cleaned up when reconnect_task finishes. */
     reconnect_task(arg);
 }

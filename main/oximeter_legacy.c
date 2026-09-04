@@ -1181,7 +1181,7 @@ static void pair_task(void *arg)
         set_error("invalid address: %s", addr_str);
         free(pa);
         xSemaphoreGive(s_ops_mtx);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1189,7 +1189,7 @@ static void pair_task(void *arg)
         do_disconnect();
         free(pa);
         xSemaphoreGive(s_ops_mtx);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1201,7 +1201,7 @@ static void pair_task(void *arg)
         do_disconnect();
         free(pa);
         xSemaphoreGive(s_ops_mtx);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1210,7 +1210,7 @@ static void pair_task(void *arg)
         do_disconnect();
         free(pa);
         xSemaphoreGive(s_ops_mtx);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1228,7 +1228,7 @@ static void pair_task(void *arg)
         do_disconnect();
         free(pa);
         xSemaphoreGive(s_ops_mtx);
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
@@ -1304,7 +1304,7 @@ static void pair_task(void *arg)
 
     free(pa);
     xSemaphoreGive(s_ops_mtx);
-    vTaskDelete(NULL);
+    psram_task_delete(NULL);
 }
 
 /* ── Low-duty scan (caller holds s_ops_mtx) ─────────────────────────── */
@@ -1419,7 +1419,7 @@ static void pull_task(void *arg)
     }
     if (!as11_ble_is_host_ready()) {
         ESP_LOGW(TAG, "watch: host not ready, aborting");
-        vTaskDelete(NULL);
+        psram_task_delete(NULL);
         return;
     }
 
