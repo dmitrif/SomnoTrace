@@ -281,9 +281,10 @@ esp_err_t uploader_get_progress_snapshot(uploader_progress_snapshot_t *out);
  * Caller must free() the returned string. */
 esp_err_t uploader_get_progress_json(char **out_json);
 
-/* One-line summary for /api/status (header badge): how many units are still
- * outstanding across configured backends, and the worst backend state
- * ("idle" | "uploading" | "cooldown"). */
+/* Cached one-line summary for /api/status (header badge): how many units are
+ * still outstanding across configured backends, and the worst backend state
+ * ("idle" | "uploading" | "cooldown"). This is a bounded RAM-only snapshot;
+ * callers never scan or mutate the SD card. */
 void uploader_get_summary(int *out_pending, const char **out_worst);
 
 /* Debug: the parsed tracking state for one day ("YYYYMMDD").

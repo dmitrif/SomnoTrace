@@ -109,6 +109,9 @@ static upload_sched_busy_fn_t s_busy_fn;
 static int64_t s_next_scan_us;
 static bool    s_scanning;
 static char    s_status[64] = "Starting up";
+/* Updated only by the scheduler after a leased reconciliation pass. Status
+ * readers must never walk or mutate the card merely to render a badge. */
+static int     s_summary_pending;
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -123,6 +126,13 @@ static void set_status(const char *fmt, ...)
     vsnprintf(s_status, sizeof(s_status), fmt, ap);
     xSemaphoreGive(s_lock);
     va_end(ap);
+}
+
+static void set_summary_pending(int pending)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_summary_pending = pending;
+    xSemaphoreGive(s_lock);
 }
 
 /* Single choke point for backend state changes so the UI can be pushed an
@@ -582,6 +592,7 @@ static void run_pass(void)
     int max_days = uploader_max_days();
 
     if (n == 0) {
+        set_summary_pending(0);
         set_status("No upload backend configured");
         return;
     }
@@ -604,7 +615,11 @@ static void run_pass(void)
     int pending = 0;
     bool cooling = false;
     upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs) { set_status("Memory low"); return; }
+    if (!ox_refs) {
+        set_summary_pending(0);
+        set_status("Memory low");
+        return;
+    }
     int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
     for (int i = 0; i < s_n_rt; i++) {
         if (s_rt[i].state == SB_DISABLED) continue;
@@ -613,6 +628,7 @@ static void run_pass(void)
         if (s_rt[i].state == SB_COOLDOWN) cooling = true;
     }
     free(ox_refs);
+    set_summary_pending(pending);
     if (pending == 0) set_status("All uploaded");
     else if (cooling)  set_status("%d parts pending — waiting to retry", pending);
     else               set_status("%d parts pending", pending);
@@ -967,49 +983,19 @@ esp_err_t upload_sched_progress_json(char **out_json)
 
 void upload_sched_summary(int *out_pending, const char **out_worst)
 {
-    typedef struct {
-        const upload_backend_t *be;
-        int slot;
-        sb_state_t state;
-    } summary_rt_t;
-    summary_rt_t runtime[UPLOAD_MAX_BACKENDS];
-    int n_runtime = 0;
-
-    /* Snapshot only the small, API-visible runtime fields.  Configuration
-     * callbacks and index/SD reconciliation below can be slow and must never
-     * run while the scheduler state mutex is held. */
-    if (s_lock) {
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        n_runtime = s_n_rt < UPLOAD_MAX_BACKENDS ? s_n_rt : UPLOAD_MAX_BACKENDS;
-        for (int i = 0; i < n_runtime; i++) {
-            runtime[i].be = s_rt[i].be;
-            runtime[i].slot = s_rt[i].slot;
-            runtime[i].state = s_rt[i].state;
-        }
-        xSemaphoreGive(s_lock);
-    }
-
-    int max_days = uploader_max_days();
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs) {
-        if (out_pending) *out_pending = 0;
-        if (out_worst) *out_worst = "idle";
-        return;
-    }
-    int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
     int pending = 0;
     const char *worst = "idle";
 
-    for (int i = 0; i < n_runtime; i++) {
-        summary_rt_t *r = &runtime[i];
-        if (!r->be || !r->be->is_configured || !r->be->is_configured()) continue;
-        pending += upload_index_backend_pending(r->slot, max_days);
-        pending += upload_ox_pending(ox_refs, n_ox, r->slot);
-        if (r->state == SB_COOLDOWN) worst = "cooldown";
-        else if (r->state == SB_UPLOADING && strcmp(worst, "cooldown") != 0)
+    /* This getter is used by /api/status and the bedside display. Keep it a
+     * bounded in-memory snapshot: the scheduler owns all SD reconciliation. */
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    pending = s_summary_pending;
+    for (int i = 0; i < s_n_rt; i++) {
+        if (s_rt[i].state == SB_COOLDOWN) worst = "cooldown";
+        else if (s_rt[i].state == SB_UPLOADING && strcmp(worst, "cooldown") != 0)
             worst = "uploading";
     }
-    free(ox_refs);
+    if (s_lock) xSemaphoreGive(s_lock);
     if (out_pending) *out_pending = pending;
     if (out_worst) *out_worst = worst;
 }

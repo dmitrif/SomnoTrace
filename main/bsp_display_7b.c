@@ -446,6 +446,7 @@ static bool s_history_trace_worker_running;
 static char s_history_trace_requested_day[9];
 static TaskHandle_t s_history_worker_task;
 static TaskHandle_t s_history_trace_worker_task;
+static TaskHandle_t s_storage_worker_task;
 #endif
 static bool s_settings_synced;
 static uint16_t s_rendered_screen_timeout_s = UINT16_MAX;
@@ -1374,6 +1375,10 @@ static void qemu_upload_progress(uploader_progress_snapshot_t *progress)
 static void storage_status_task(void *arg)
 {
     (void)arg;
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#endif
     uint64_t free_bytes = 0;
     uint64_t total_bytes = 0;
     esp_err_t result = ESP_ERR_TIMEOUT;
@@ -1414,7 +1419,11 @@ static void storage_status_task(void *arg)
     if (result == ESP_OK && total_bytes > 0)
         s_state.storage_near_full = free_bytes < (24ULL * 1024 * 1024);
     portEXIT_CRITICAL(&s_state_lock);
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
     vTaskDelete(NULL);
+#else
+    }
+#endif
 }
 
 static void start_storage_refresh(void)
@@ -1423,8 +1432,14 @@ static void start_storage_refresh(void)
     bool busy = s_services.storage_busy;
     if (!busy) s_services.storage_busy = true;
     portEXIT_CRITICAL(&s_state_lock);
+#if CONFIG_SOMNOTRACE_BOARD_QEMU
     if (!busy && xTaskCreate(storage_status_task, "ui_storage", 4096,
                              NULL, 2, NULL) != pdPASS) {
+#else
+    if (!busy && s_storage_worker_task) {
+        xTaskNotifyGive(s_storage_worker_task);
+    } else if (!busy) {
+#endif
         portENTER_CRITICAL(&s_state_lock);
         s_services.storage_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
@@ -5862,10 +5877,15 @@ esp_err_t bsp_display_init(void)
     s_history_trace_worker_task = psram_task_create(
         history_trace_task, "ui_hist_trace", 6144, NULL, 2,
         tskNO_AFFINITY, NULL, NULL);
+    s_storage_worker_task = psram_task_create(
+        storage_status_task, "ui_storage", 8192, NULL, 2,
+        tskNO_AFFINITY, NULL, NULL);
     if (!s_history_worker_task)
         ESP_LOGE(TAG, "history metadata worker unavailable");
     if (!s_history_trace_worker_task)
         ESP_LOGE(TAG, "history trace worker unavailable");
+    if (!s_storage_worker_task)
+        ESP_LOGE(TAG, "storage status worker unavailable");
 #endif
 
     /* Start at the exact steady/full-on endpoint. Persisted hardware PWM

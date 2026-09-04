@@ -33,5 +33,6 @@ python3 scripts/font_asset_contract_test.py
 python3 scripts/screen_timeout_contract_test.py
 python3 scripts/therapy_alert_ack_contract_test.py
 python3 scripts/storage_notice_contract_test.py
+python3 scripts/storage_status_memory_contract_test.py
 python3 scripts/history_storage_lifecycle_contract_test.py
 echo "All synthetic host tests passed"
