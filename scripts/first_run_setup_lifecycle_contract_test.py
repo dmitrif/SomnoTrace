@@ -34,6 +34,7 @@ acquire = function_body(SOURCE, "controller_acquire")
 release = function_body(SOURCE, "controller_release")
 snapshot = function_body(SOURCE, "first_run_setup_controller_snapshot")
 finished = function_body(SOURCE, "first_run_setup_controller_take_finished")
+card_retry = function_body(SOURCE, "do_card_retry")
 
 # A detached controller blocks restart until its worker has actually reclaimed
 # every owned object. This is a lifecycle state, not an intentionally retained
@@ -74,5 +75,16 @@ for cleanup in (
 assert stop_case.find("free(controller)") < stop_case.find(
     "s_controller_stopping = false"
 ) < stop_case.find("psram_task_delete(NULL)")
+
+# Retrying a newly inserted card owns one atomic destructive window across
+# mount, recovery, and writer initialization. A session cannot begin between a
+# stale recording check and those filesystem mutations.
+lease_at = card_retry.find("sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE")
+mount_at = card_retry.find("sd_storage_init()")
+recover_at = card_retry.find("session_writer_recover()")
+writer_at = card_retry.find("session_writer_init()")
+release_at = card_retry.find("sd_storage_lease_release(SD_LEASE_DESTRUCTIVE)")
+assert -1 not in (lease_at, mount_at, recover_at, writer_at, release_at)
+assert lease_at < mount_at < recover_at < writer_at < release_at
 
 print("first-run setup lifecycle contract passed")

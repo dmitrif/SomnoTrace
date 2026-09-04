@@ -942,7 +942,8 @@ static void do_card_retry(setup_controller_t *controller)
 {
     esp_err_t result = ESP_OK;
 #if !CONFIG_SOMNOTRACE_BOARD_QEMU
-    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
+    if (bsp_display_is_therapy_active() ||
+        !sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 1000)) {
         state_lock(controller);
         controller->live.card_state = sd_storage_is_ready()
             ? FIRST_RUN_SETUP_UI_CARD_FULL
@@ -956,6 +957,9 @@ static void do_card_retry(setup_controller_t *controller)
         state_unlock(controller);
         return;
     }
+    /* The destructive claim is also a recording-start barrier. It spans the
+     * mount and full interrupted-session recovery, closing the former race in
+     * which therapy could start immediately after the one-time check above. */
     if (!sd_storage_is_ready()) result = sd_storage_init();
     if (result == ESP_OK && sd_storage_is_ready()) {
         /* Keep the writer unable to open a live session until recovery has
@@ -970,6 +974,7 @@ static void do_card_retry(setup_controller_t *controller)
             result = writer;
         }
     }
+    sd_storage_lease_release(SD_LEASE_DESTRUCTIVE);
 #endif
     if (result == ESP_OK) controller->initial_card_result = ESP_OK;
     publish_card_state(controller, result);
