@@ -345,8 +345,8 @@ require(secondary_source,
 require(display,
         r"#if\s+CONFIG_SOMNOTRACE_BOARD_QEMU.*?"
         r"UI_STATUS_SCRIM_OPA\s+LV_OPA_60.*?"
-        r"#else.*?UI_STATUS_SCRIM_OPA\s+LV_OPA_COVER",
-        "opaque physical status scrim avoids full-screen alpha blending")
+        r"#else.*?UI_STATUS_SCRIM_OPA\s+LV_OPA_60",
+        "status tray preserves a translucent view of its source screen")
 status_open_start = display.index("static void status_tray_open_cb(lv_event_t *event)\n{")
 status_open_source = display[
     status_open_start:display.index("static void status_tray_route_cb", status_open_start)

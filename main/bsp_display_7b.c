@@ -108,12 +108,11 @@ static const uint16_t s_screen_timeout_options[SCREEN_TIMEOUT_OPTION_COUNT] = {
 #define FLOW_RENDER_POINTS                 150
 #define FLOW_RENDER_FILL                   0
 #define FLOW_RENDER_GLOW                   0
-/* Blending a translucent 1024x600 modal scrim requires reading and mixing
- * every destination pixel in software. A pre-composited near-black surface
- * preserves the bedside dimming effect while making the status tray an
- * ordinary opaque redraw on the physical panel. */
-#define UI_STATUS_SCRIM_COLOR              0x020306
-#define UI_STATUS_SCRIM_OPA                LV_OPA_COVER
+/* Keep the underlying screen legible so this reads as a temporary tray, not a
+ * replacement page. Opening already pauses live-chart work and never changes
+ * z-order, which removes the avoidable redraw cost around this blend. */
+#define UI_STATUS_SCRIM_COLOR              0x000000
+#define UI_STATUS_SCRIM_OPA                LV_OPA_60
 #endif
 
 /* Typography roles from the 7-inch design handoff.  Keeping the role names
