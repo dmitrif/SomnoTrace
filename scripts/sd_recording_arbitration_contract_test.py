@@ -32,6 +32,7 @@ begin = function_body(STORAGE, "sd_storage_recording_begin")
 acquire = function_body(STORAGE, "sd_storage_lease_acquire")
 release = function_body(STORAGE, "sd_storage_lease_release")
 start = function_body(WRITER, "session_writer_start")
+discard = function_body(WRITER, "session_start_discard")
 
 assert "bool sd_storage_recording_begin(void);" in HEADER
 assert "s_destructive" in STORAGE
@@ -72,21 +73,26 @@ assert destructive_sem < destructive_lock < destructive_check < destructive_clai
 assert "s_destructive--" in release
 assert "s_uploading--" in release
 
-# A writer is never published or queued without a successful raw-recording
-# claim, and a refused claim frees every object allocated for the attempt.
+# A writer is never allocated, published or queued without a successful raw-
+# recording claim. Refusal therefore has no large session object to unwind;
+# every later failure uses the centralized claim-aware discard helper.
 claim_at = start.find("sd_storage_recording_begin()")
+alloc_at = start.find("heap_caps_calloc(1, sizeof(session_writer_t)")
 open_at = start.find("storage_queue_send_open(&cmd")
 publish_at = start.find("s_active = s")
-assert -1 not in (claim_at, open_at, publish_at)
-assert claim_at < open_at < publish_at
-failure = start[claim_at:open_at]
+assert -1 not in (claim_at, alloc_at, open_at, publish_at)
+assert claim_at < alloc_at < open_at < publish_at
+refused_claim = start[claim_at:alloc_at]
+assert "return NULL" in refused_claim
+assert "batch_pool_create" not in refused_claim
+assert start.count("session_start_discard(s)") == 4
 for cleanup in (
     "batch_pool_destroy(s)",
     "vSemaphoreDelete(s->fill_mutex)",
+    "sd_storage_recording_end()",
     "free(s)",
-    "return NULL",
 ):
-    assert cleanup in failure, f"refused recording claim misses {cleanup}"
+    assert cleanup in discard, f"start discard misses {cleanup}"
 
 # Compact interleaving model: because all three claim transitions execute
 # under the same mutex, no possible winner can overlap recording with either

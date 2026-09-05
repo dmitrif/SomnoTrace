@@ -36,6 +36,7 @@ typedef struct session_writer session_writer_t;
 esp_err_t session_writer_init(void);
 
 /* Start a new therapy session.
+ * Atomically acquires the SD recording claim before allocating session buffers.
  * Creates noon-day folder under .somnotrace/sessions/streams/YYYYMMDD/ and opens
  * YYYYMMDD_HHMMSS_*.snt files with prefix-based naming.
  * Returns a handle or NULL on failure. */

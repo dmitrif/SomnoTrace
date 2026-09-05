@@ -614,6 +614,24 @@ static void batch_pool_destroy(session_writer_t *s)
     s->fill = NULL;
 }
 
+/* Dispose of a not-yet-published session start. The recording claim is kept
+ * through allocation teardown so destructive storage cannot enter while any
+ * session-owned buffer or queue still exists. */
+static void session_start_discard(session_writer_t *s)
+{
+    if (!s) return;
+    batch_pool_destroy(s);
+    if (s->fill_mutex) {
+        vSemaphoreDelete(s->fill_mutex);
+        s->fill_mutex = NULL;
+    }
+    if (s->recording_claim_held) {
+        s->recording_claim_held = false;
+        sd_storage_recording_end();
+    }
+    free(s);
+}
+
 /* Hand the current fill batch to the storage worker and take a fresh one.
  * Caller holds fill_mutex.  Returns false if the batch could not be handed
  * off (pool exhausted or queue full) — the caller keeps filling and the
@@ -1209,6 +1227,10 @@ static void active_session_unlock(session_writer_t *s)
 static void sw_storage_task(void *arg)
 {
     (void)arg;
+    /* session_writer_init() creates both persistent workers transactionally.
+     * Park before touching any shared queue so a later creation failure can
+     * delete this task and its queues without an SMP use-after-free. */
+    vTaskSuspend(NULL);
     ESP_LOGI(TAG, "storage worker started on core %d", xPortGetCoreID());
 
     int64_t last_commit_us = esp_timer_get_time();
@@ -1635,6 +1657,9 @@ static void post_wait_for_storage_quiet(void)
 static void sw_post_task(void *arg)
 {
     (void)arg;
+    /* See sw_storage_task(): init resumes both workers only after every
+     * shared resource exists and s_ready has been published. */
+    vTaskSuspend(NULL);
     ESP_LOGI(TAG, "post worker started on core %d (idle; waiting for jobs)",
              xPortGetCoreID());
 
@@ -1721,6 +1746,45 @@ static void sw_post_task(void *arg)
 
 /* ── Public API ───────────────────────────────────────────────────── */
 
+/* A newly-created worker self-suspends before reading module state. Observing
+ * eSuspended is therefore a real startup join (rather than remotely suspending
+ * a possibly-running task) and makes partial-init teardown safe on SMP. */
+static void sw_wait_startup_parked(TaskHandle_t task)
+{
+    while (task && eTaskGetState(task) != eSuspended) {
+        vTaskDelay(1);
+    }
+}
+
+static void session_writer_init_unwind(void)
+{
+    s_ready = false;
+    s_active = NULL;
+
+    /* Init waits for each created worker to self-park before proceeding, so
+     * neither task can still reference a queue when it is deleted here. */
+    if (s_post_task) {
+        psram_task_delete(s_post_task);
+        s_post_task = NULL;
+    }
+    if (s_storage_task) {
+        psram_task_delete(s_storage_task);
+        s_storage_task = NULL;
+    }
+    if (s_post_q) {
+        vQueueDelete(s_post_q);
+        s_post_q = NULL;
+    }
+    if (s_storage_q) {
+        vQueueDelete(s_storage_q);
+        s_storage_q = NULL;
+    }
+    if (s_active_mutex) {
+        vSemaphoreDelete(s_active_mutex);
+        s_active_mutex = NULL;
+    }
+}
+
 esp_err_t session_writer_init(void)
 {
     if (s_ready) return ESP_OK;
@@ -1732,7 +1796,7 @@ esp_err_t session_writer_init(void)
     s_post_q = xQueueCreate(SW_POST_QUEUE_LEN, sizeof(sw_post_job_t));
     if (!s_storage_q || !s_post_q) {
         ESP_LOGE(TAG, "session writer queue alloc failed");
-        return ESP_ERR_NO_MEM;
+        goto no_mem;
     }
 
     /* Persistent workers, created once.  If either cannot be created the
@@ -1742,19 +1806,27 @@ esp_err_t session_writer_init(void)
                                        NULL, 8, tskNO_AFFINITY, NULL, NULL);
     if (!s_storage_task) {
         ESP_LOGE(TAG, "storage worker creation failed");
-        return ESP_ERR_NO_MEM;
+        goto no_mem;
     }
+    sw_wait_startup_parked(s_storage_task);
     s_post_task = psram_task_create(sw_post_task, "sw_post", 16384,
                                     NULL, 5, 1, NULL, NULL);
     if (!s_post_task) {
         ESP_LOGE(TAG, "post worker creation failed");
-        return ESP_ERR_NO_MEM;
+        goto no_mem;
     }
+    sw_wait_startup_parked(s_post_task);
 
     s_ready = true;
+    vTaskResume(s_storage_task);
+    vTaskResume(s_post_task);
     ESP_LOGI(TAG, "session writer initialised (commit interval %d ms, "
              "stale timeout %d ms)", SW_COMMIT_INTERVAL_MS, SW_STALE_TIMEOUT_MS);
     return ESP_OK;
+
+no_mem:
+    session_writer_init_unwind();
+    return ESP_ERR_NO_MEM;
 }
 
 session_writer_t *session_writer_start(void)
@@ -1783,16 +1855,29 @@ session_writer_t *session_writer_start(void)
         sw_request_finalize(prev, "rotated", (int64_t)time(NULL) * 1000, true);
     }
 
+    /* Admit the storage owner before allocating the session and its large
+     * PSRAM batch pool. This is the atomic admission boundary against
+     * History/upload/format; every failed start below releases the claim. */
+    if (!sd_storage_recording_begin()) {
+        ESP_LOGW(TAG, "cannot start session: microSD reader or maintenance active");
+        return NULL;
+    }
+
     session_writer_t *s = heap_caps_calloc(1, sizeof(session_writer_t), MALLOC_CAP_SPIRAM);
     if (!s) s = calloc(1, sizeof(session_writer_t));
-    if (!s) return NULL;
+    if (!s) {
+        sd_storage_recording_end();
+        return NULL;
+    }
+    s->recording_claim_held = true;
 
     s->fill_mutex = xSemaphoreCreateMutex();
-    if (!s->fill_mutex) { free(s); return NULL; }
+    if (!s->fill_mutex) {
+        session_start_discard(s);
+        return NULL;
+    }
     if (!batch_pool_create(s)) {
-        batch_pool_destroy(s);
-        vSemaphoreDelete(s->fill_mutex);
-        free(s);
+        session_start_discard(s);
         return NULL;
     }
 
@@ -1804,12 +1889,6 @@ session_writer_t *session_writer_start(void)
     s->last_stream_us = s->start_time_us;
 
     make_session_id(s->session_id, sizeof(s->session_id));
-    /* Leave a breadcrumb in RTC memory: if the firmware dies mid-session, the
-     * next boot can name the session that was recording even when no core
-     * dump could be written. */
-    crash_diag_note_session(s->session_id);
-    crash_diag_note_activity("session_open");
-
     char noon_day[16];
     noon_day_folder_local(time(NULL), noon_day, sizeof(noon_day));
     snprintf(s->dir, sizeof(s->dir), "%s/%s", SD_STREAMS_DIR, noon_day);
@@ -1825,35 +1904,22 @@ session_writer_t *session_writer_start(void)
          * it with a second set of seven files. */
         session_writer_t *existing = s_active;
         xSemaphoreGive(s_active_mutex);
-        batch_pool_destroy(s);
-        vSemaphoreDelete(s->fill_mutex);
-        free(s);
+        session_start_discard(s);
         return existing;
     }
 
     s->active = true;
-    if (!sd_storage_recording_begin()) {
-        ESP_LOGW(TAG, "cannot start session: microSD reader or maintenance active");
-        s->active = false;
-        xSemaphoreGive(s_active_mutex);
-        batch_pool_destroy(s);
-        vSemaphoreDelete(s->fill_mutex);
-        free(s);
-        return NULL;
-    }
-    s->recording_claim_held = true;
+    /* Leave a breadcrumb only after duplicate arbitration has selected this
+     * start. If OPEN cannot be queued, clear it with the rest of the start. */
+    crash_diag_note_session(s->session_id);
+    crash_diag_note_activity("session_open");
     sw_cmd_t cmd = { .type = SW_CMD_OPEN, .s = s };
     if (!storage_queue_send_open(&cmd, 100)) {
         ESP_LOGE(TAG, "failed to enqueue session open");
         s->active = false;
-        if (s->recording_claim_held) {
-            s->recording_claim_held = false;
-            sd_storage_recording_end();
-        }
         xSemaphoreGive(s_active_mutex);
-        batch_pool_destroy(s);
-        vSemaphoreDelete(s->fill_mutex);
-        free(s);
+        crash_diag_note_session(NULL);
+        session_start_discard(s);
         return NULL;
     }
     s_active = s;
