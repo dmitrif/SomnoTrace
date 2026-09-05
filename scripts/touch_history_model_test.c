@@ -49,6 +49,18 @@ static void test_shared_axis_bins(void)
     assert(!touch_history_flow_range_prefers_raw(
         3ULL * 60ULL * 60ULL * 1000ULL, eight_hours));
 
+    /* 25 Hz raw Flow is safe as a line while each sample retains a display
+     * bin. Beyond the 480-point view capacity it must become a min/max
+     * envelope rather than a signed mean that can cancel around zero. */
+    assert(!touch_history_flow_bins_need_envelope(5000, 125, 250));
+    assert(!touch_history_flow_bins_need_envelope(19200, 480, 250));
+    assert(touch_history_flow_bins_need_envelope(19201, 480, 250));
+    assert(touch_history_flow_bins_need_envelope(20000, 480, 250));
+    assert(touch_history_flow_bins_need_envelope(
+        22ULL * 60ULL * 1000ULL, 480, 250));
+    assert(touch_history_flow_bins_need_envelope(UINT64_MAX, 480, 250));
+    assert(touch_history_flow_bins_need_envelope(5000, 0, 250));
+
     /* Regression: 102,730 raw samples at 25 Hz are only about 68.5 minutes.
      * A count cap of 86,400 used to reject this valid physical-card track. */
     assert(touch_history_sample_span_within(

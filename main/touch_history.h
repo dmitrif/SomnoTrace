@@ -421,6 +421,13 @@ uint16_t touch_history_range_point_count(touch_history_signal_t signal,
                                          uint64_t duration_ms);
 bool touch_history_flow_range_prefers_raw(uint64_t duration_ms,
                                           uint64_t night_duration_ms);
+/* Raw Flow may be drawn as a conventional line only while the retained view
+ * has at least one display bin per source sample. Wider windows must preserve
+ * each bin's signed minimum and maximum; averaging breathing around zero can
+ * otherwise turn real inspiration/expiration into a misleading flat line. */
+bool touch_history_flow_bins_need_envelope(uint64_t duration_ms,
+                                           uint16_t point_count,
+                                           uint32_t sample_hz_x10);
 /* Overflow-safe source-duration bound. `period_num_us / period_den` is the
  * exact sample period; unlike a record-count cap this accepts useful 25 Hz
  * Flow tracks without permitting an implausibly long corrupt trace. */

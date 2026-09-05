@@ -1147,8 +1147,7 @@ static void history_ui_graph_draw(lv_event_t *event)
 
     const bool envelope =
         ui->signal == TOUCH_HISTORY_SIGNAL_FLOW &&
-        ui->overview.aggregation == TOUCH_HISTORY_AGGREGATION_ENVELOPE &&
-        !ui->overview.source_raw;
+        ui->overview.aggregation == TOUCH_HISTORY_AGGREGATION_ENVELOPE;
     size_t previous = SIZE_MAX;
     size_t previous_companion = SIZE_MAX;
     for (size_t i = 0; i < ui->overview.point_count; ++i) {

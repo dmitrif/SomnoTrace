@@ -455,6 +455,16 @@ bool touch_history_flow_range_prefers_raw(uint64_t duration_ms,
            duration_ms <= night_duration_ms / 4U;
 }
 
+bool touch_history_flow_bins_need_envelope(uint64_t duration_ms,
+                                           uint16_t point_count,
+                                           uint32_t sample_hz_x10)
+{
+    if (!duration_ms || !point_count || !sample_hz_x10) return true;
+    if (duration_ms > UINT64_MAX / sample_hz_x10) return true;
+    return duration_ms * sample_hz_x10 >
+           (uint64_t)point_count * 10000U;
+}
+
 bool touch_history_sample_span_within(uint32_t sample_count,
                                       uint32_t period_num_us,
                                       uint32_t period_den,
@@ -2951,7 +2961,11 @@ static esp_err_t history_load_overview_leased(
                                  aggregate);
         overview->source_raw = raw_flow;
         overview->source_fallback = source_fallback;
-        if (raw_flow)
+        /* A point-for-point raw window is a conventional waveform. Once the
+         * 25 Hz source outnumbers the fixed display bins, signed means can
+         * cancel an entire breath around zero; retain its min/max envelope. */
+        if (raw_flow && !touch_history_flow_bins_need_envelope(
+                span_ms, point_count, 250U))
             overview->aggregation = TOUCH_HISTORY_AGGREGATION_MEAN;
         if (signal <= TOUCH_HISTORY_SIGNAL_SNORE) {
             result = history_accumulate_as11(
