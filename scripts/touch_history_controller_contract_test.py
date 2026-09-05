@@ -35,6 +35,26 @@ def function_body(text: str, name: str) -> str:
     return text[match.start():index]
 
 
+def braced_block(text: str, marker: str) -> str:
+    match = re.search(marker, text, re.DOTALL)
+    if not match:
+        raise AssertionError(f"missing block marker {marker}")
+    brace = text.find("{", match.start(), match.end())
+    if brace < 0:
+        raise AssertionError(f"marker has no opening brace {marker}")
+    depth = 1
+    index = brace + 1
+    while index < len(text) and depth:
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        raise AssertionError(f"unterminated block {marker}")
+    return text[brace + 1:index - 1]
+
+
 for api in (
     "touch_history_controller_create",
     "touch_history_controller_destroy",
@@ -79,6 +99,45 @@ require(SOURCE, r"job->non_cancellable.*?operation\.progress\s*=\s*NULL.*?"
         "hidden-cancel ranged read remains generation-interruptible")
 require(SOURCE, r"ZOOM_LOADING", "explicit zoom-loading state")
 
+publish = function_body(SOURCE, "history_controller_publish")
+reconcile_calendar = function_body(
+    SOURCE, "history_controller_reconcile_calendar_locked"
+)
+selection_job = function_body(SOURCE, "history_controller_job_selects_night")
+publish_month = braced_block(
+    publish, r"if\s*\(job->kind\s*==\s*HISTORY_JOB_MONTH\)\s*\{"
+)
+for forbidden in (
+    "controller->model.state", "progress_per_mille", "retry_job",
+    "ever_loaded", "controller->model = *result",
+):
+    assert forbidden not in publish_month, (
+        f"month publication must not own foreground field {forbidden}"
+    )
+for required in ("model.month", "model.has_month", "calendar_loading",
+                 "calendar_read_error"):
+    assert required in publish_month, f"month publication omits {required}"
+
+publish_error = function_body(SOURCE, "history_controller_publish_error")
+publish_month_error = braced_block(
+    publish_error, r"if\s*\(job->kind\s*==\s*HISTORY_JOB_MONTH\)\s*\{"
+)
+for forbidden in ("model.state", "model.error", "retry_job"):
+    assert forbidden not in publish_month_error, (
+        f"month error must not own foreground field {forbidden}"
+    )
+for required in ("calendar_loading", "calendar_read_error"):
+    assert required in publish_month_error, f"month error omits {required}"
+
+enqueue = function_body(SOURCE, "history_controller_enqueue_locked")
+enqueue_month = braced_block(enqueue, r"if\s*\(calendar_job\)\s*\{")
+enqueue_wrapper = function_body(SOURCE, "history_controller_enqueue")
+take_job = function_body(SOURCE, "history_controller_take_job")
+for forbidden in ("controller->generation++", "retry_job", "xQueueOverwrite"):
+    assert forbidden not in enqueue_month, (
+        f"calendar enqueue must not mutate foreground field {forbidden}"
+    )
+
 # Complete navigation surface: initial newest selection, seven-row paging,
 # calendar months, cross-page destination selection, fixed zoom tier and cursor.
 require(SOURCE, r"HISTORY_JOB_INITIAL.*?result->days\[0\]\.day.*?"
@@ -86,11 +145,196 @@ require(SOURCE, r"HISTORY_JOB_INITIAL.*?result->days\[0\]\.day.*?"
 require(SOURCE, r"TOUCH_HISTORY_UI_LIST_ROWS", "seven-row page boundary")
 require(SOURCE, r"HISTORY_JOB_MONTH.*?touch_history_load_month",
         "calendar month worker")
+require(
+    SOURCE,
+    r"bool calendar;.*?\}\s*history_operation_context_t;.*?"
+    r"calendar \? controller->calendar_generation == generation.*?"
+    r"touch_history_load_month_ex\(.*?&operation\)",
+    "month scan cancellation uses its independent calendar generation",
+)
+require(
+    SOURCE,
+    r"history_controller_begin_job.*?job->kind == HISTORY_JOB_MONTH.*?return;",
+    "month reads never replace the right detail with a loading state",
+)
+require(
+    publish,
+    r"touch_history_ui_rail_mode_t rail_mode\s*=\s*"
+    r"controller->model\.rail_mode;.*?controller->model\s*=\s*\*result;.*?"
+    r"controller->model\.rail_mode\s*=\s*rail_mode",
+    "worker publications preserve synchronous left-rail selection",
+)
+for selection_kind in ("HISTORY_JOB_INITIAL", "HISTORY_JOB_DAY",
+                       "HISTORY_JOB_PAGE"):
+    assert selection_kind in selection_job, (
+        f"calendar reconciliation omits {selection_kind}"
+    )
+assert "history_controller_job_selects_night(job)" in reconcile_calendar
+require(
+    reconcile_calendar,
+    r"TOUCH_HISTORY_UI_RAIL_CALENDAR.*?model\.has_night.*?"
+    r"pending_matches.*?published_matches.*?calendar_loading.*?"
+    r"history_controller_enqueue_locked",
+    "selection publication coalesces the selected night's month",
+)
+assert "HISTORY_JOB_VIEW" not in selection_job, (
+    "channel and zoom publications must not snap an intentionally browsed month"
+)
+require(
+    publish,
+    r"controller->retry_job = \*job;.*?"
+    r"history_controller_reconcile_calendar_locked\(controller, job\)",
+    "calendar alignment is part of the foreground commit",
+)
+require(
+    SOURCE,
+    r"TOUCH_HISTORY_UI_INTENT_OPEN_CALENDAR.*?"
+    r"xSemaphoreTake\(controller->mutex.*?"
+    r"target_day = live->has_night.*?history_controller_month_from_day\("
+    r"\s*target_day.*?"
+    r"TOUCH_HISTORY_UI_RAIL_CALENDAR.*?"
+    r"history_controller_enqueue_locked",
+    "Calendar atomically opens on the selected night's month",
+)
+require(
+    SOURCE,
+    r"TOUCH_HISTORY_UI_INTENT_OPEN_CALENDAR.*?"
+    r"retry_job\.kind == HISTORY_JOB_DAY.*?"
+    r"retry_job\.generation ==.*?controller->generation.*?"
+    r"target_day = controller->retry_job\.day",
+    "Calendar anticipates a queued row selection without waiting for publish",
+)
+require(
+    SOURCE,
+    r"TOUCH_HISTORY_UI_INTENT_CLOSE_CALENDAR.*?"
+    r"controller->model\.rail_mode\s*=\s*TOUCH_HISTORY_UI_RAIL_LIST",
+    "List restores the left rail without rewriting detail state",
+)
+require(
+    publish_error,
+    r"job->kind == HISTORY_JOB_MONTH.*?calendar_read_error = true",
+    "calendar read failures remain scoped to the left rail",
+)
+require(
+    publish_error,
+    r"if \(job->kind != HISTORY_JOB_MONTH\)\s*"
+    r"controller->retry_job = \*job",
+    "calendar reads never replace the selected-night retry target",
+)
+require(
+    take_job,
+    r"xSemaphoreTake\(controller->mutex.*?xQueueReceive\(.*?"
+    r"controller->month_pending.*?xSemaphoreGive\(controller->mutex\)",
+    "foreground mailbox is drained before coalesced calendar work",
+)
+require(
+    enqueue,
+    r"calendar_generation\+\+.*?pending_month = \*job;.*?"
+    r"month_pending = true",
+    "month requests coalesce without cancelling foreground work",
+)
+require(
+    enqueue,
+    r"xQueueOverwrite\(controller->queue, job\).*?"
+    r"xTaskNotifyGive\(worker\)",
+    "locked enqueue publishes before waking the worker",
+)
+require(
+    enqueue_wrapper,
+    r"xSemaphoreTake\(controller->mutex.*?"
+    r"history_controller_enqueue_locked\(.*?"
+    r"xSemaphoreGive\(controller->mutex\)",
+    "ordinary enqueue holds the destroy lifecycle lock through publication",
+)
+require(
+    enqueue,
+    r"controller->month_running.*?controller->model\.calendar_loading.*?"
+    r"controller->calendar_generation\+\+.*?"
+    r"controller->pending_month\s*=\s*resume.*?"
+    r"controller->month_pending\s*=\s*true.*?xQueueOverwrite",
+    "foreground work cancels and re-pends an in-flight calendar target",
+)
+require(
+    SOURCE,
+    r"HISTORY_JOB_INITIAL.*?month_result.*?calendar_read_error = true",
+    "initial detail success retains a scoped calendar-index failure",
+)
+require(
+    SOURCE,
+    r"TOUCH_HISTORY_UI_INTENT_SELECT_CALENDAR_DAY.*?"
+    r"xSemaphoreTake\(controller->mutex.*?"
+    r"TOUCH_HISTORY_UI_RAIL_CALENDAR.*?!live->calendar_loading.*?"
+    r"selected_year == live->month.year.*?"
+    r"selected_month == live->month.month.*?"
+    r"history_controller_enqueue_locked",
+    "calendar day selection is live-validated and published atomically",
+)
+require(
+    SOURCE,
+    r"status == TOUCH_HISTORY_ERR_CANCELLED.*?ESP_ERR_INVALID_STATE.*?"
+    r"history_controller_publish_error",
+    "recording-priority cancellation cannot leave a current job loading",
+)
+assert "TOUCH_HISTORY_UI_STATE_CALENDAR" not in SOURCE
+require(SOURCE, r"\.rail_mode\s*=\s*model->rail_mode",
+        "controller forwards rail selection to UI snapshot")
+require(UI, r"ui->rail_mode\s*=\s*snapshot->rail_mode",
+        "UI retains controller rail selection")
+require(UI, r"calendar_overlay.*?rail_mode\s*!=\s*"
+            r"TOUCH_HISTORY_UI_RAIL_CALENDAR",
+        "calendar visibility depends on rail mode")
 require(SOURCE, r"job->global_index.*?result->page\.offset.*?"
                 r"history_controller_load_view", "cross-page prev/next")
 require(SOURCE, r"global_index\s*==\s*SIZE_MAX.*?"
-                r"touch_history_find_day_index.*?TOUCH_HISTORY_UI_LIST_ROWS",
+                r"touch_history_find_day_index_ex.*?TOUCH_HISTORY_UI_LIST_ROWS",
         "calendar selection resolves its global page")
+require(SOURCE, r"history_controller_load_page.*?touch_history_load_page_ex",
+        "foreground index paging is generation-cancellable")
+require(SOURCE, r"HISTORY_JOB_INITIAL.*?touch_history_load_month_ex.*?"
+                r"month_result == TOUCH_HISTORY_ERR_CANCELLED.*?"
+                r"history_controller_generation_current.*?"
+                r"return month_result.*?calendar_read_error = true",
+    "initial month scan separates stale cancellation from rail failure")
+can_advance_month = function_body(
+    SOURCE, "history_controller_can_advance_month"
+)
+require(
+    can_advance_month,
+    r"now >= 1700000000.*?model->has_newest_month.*?"
+    r"model->newest_year.*?model->newest_month.*?upper_year",
+    "newest indexed night is the offline forward-navigation bound",
+)
+require(
+    SOURCE,
+    r"history_controller_remember_newest_month.*?page\.offset != 0.*?"
+    r"model->days\[0\]\.day.*?has_newest_month = true.*?"
+    r"history_controller_load_page.*?history_controller_remember_newest_month",
+    "newest month bound is retained from the newest index page",
+)
+for lifecycle_function in (
+    "touch_history_controller_destroy",
+    "touch_history_controller_set_active",
+    "touch_history_controller_refresh",
+):
+    lifecycle = function_body(SOURCE, lifecycle_function)
+    assert "calendar_generation++" in lifecycle, (
+        f"{lifecycle_function} does not invalidate calendar work"
+    )
+    assert "month_pending = false" in lifecycle, (
+        f"{lifecycle_function} does not discard pending calendar work"
+    )
+for producer_function in (
+    "touch_history_controller_set_active",
+    "touch_history_controller_refresh",
+):
+    producer = function_body(SOURCE, producer_function)
+    require(
+        producer,
+        r"xSemaphoreTake\(controller->mutex.*?"
+        r"history_controller_enqueue_locked\(.*?"
+        r"xSemaphoreGive\(controller->mutex\)",
+        f"{producer_function} decides and publishes its load atomically",
+    )
 require(SOURCE, r"HISTORY_CONTROLLER_ZOOM_22_MIN_MS\s*"
                 r"\(22LL\s*\*\s*60LL\s*\*\s*1000LL\)", "22-minute zoom")
 require(SOURCE, r"cursor_ms.*?TOUCH_HISTORY_UI_INTENT_SELECT_CHANNEL.*?"

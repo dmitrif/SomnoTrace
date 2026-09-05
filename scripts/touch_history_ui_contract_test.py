@@ -97,7 +97,8 @@ require(
     "selected-night title never renders an ellipsis",
 )
 
-# Calendar cells are one lazy draw/touch grid rather than 42 LVGL buttons.
+# Calendar replaces only the left-rail content below the persistent segmented
+# control. The selected-night detail remains mounted and visible on the right.
 require(
     SOURCE,
     r"if\s*\(ui->calendar_overlay\)\s*return ESP_OK",
@@ -105,12 +106,79 @@ require(
 )
 require(
     SOURCE,
-    r"state == TOUCH_HISTORY_UI_STATE_CALENDAR.*?"
+    r"history_ui_discard_calendar.*?lv_obj_del\(ui->calendar_overlay\).*?"
+    r"ui->calendar_grid = NULL.*?ui->calendar_status = NULL",
+    "partial calendar allocation is discarded transactionally",
+)
+require(
+    SOURCE,
+    r"history_ui_ensure_calendar.*?goto no_memory;.*?no_memory:\s*"
+    r"history_ui_discard_calendar\(ui\);\s*return ESP_ERR_NO_MEM",
+    "calendar allocation failures leave no partial subtree",
+)
+require(
+    SOURCE,
+    r"rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR.*?"
     r"history_ui_ensure_calendar",
-    "calendar allocation only on calendar state",
+    "calendar allocation only in calendar rail mode",
+)
+require(
+    SOURCE,
+    r"ui->calendar_overlay = history_ui_container\(\s*"
+    r"ui->left,\s*0,\s*HISTORY_UI_CALENDAR_Y,\s*"
+    r"TOUCH_HISTORY_UI_LIST_WIDTH,\s*HISTORY_UI_CALENDAR_H",
+    "calendar content belongs to the 288-pixel left rail",
+)
+require(
+    SOURCE,
+    r"bool calendar = ui->rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR;.*?"
+    r"history_ui_set_hidden\(ui->list_title, calendar\);.*?"
+    r"history_ui_set_hidden\(ui->jump_to_date, calendar\);.*?"
+    r"history_ui_set_hidden\(ui->list_viewport, calendar\);.*?"
+    r"if \(calendar\)\s*return;.*?"
+    r"for \(size_t i = 0; i < TOUCH_HISTORY_UI_LIST_ROWS; \+\+i\)",
+    "calendar swaps only the list content beneath the segment",
+)
+assert "calendar_close" not in SOURCE, "List is the calendar's only close control"
+assert "lv_obj_move_foreground(ui->calendar_overlay)" not in SOURCE
+assert '{"M", "T", "W", "T", "F", "S", "S"}' in SOURCE
+require(
+    SOURCE,
+    r"selected_date_valid.*?selected_year == ui->month.year.*?"
+    r"selected_month == ui->month.month.*?selected_day == \(unsigned\)day",
+    "selected calendar date remains highlighted",
+)
+require(
+    SOURCE,
+    r"history_ui_calendar_grid_pressed.*?ui->calendar_loading.*?return;",
+    "calendar ignores stale grid coordinates while a month is loading",
 )
 assert SOURCE.count("ui->calendar_grid = history_ui_container(") == 1
 assert "42 calendar cells from becoming 42 objects" in SOURCE
+require(
+    SOURCE,
+    r"history_ui_calendar_grid_content_changed.*?"
+    r"month\.therapy_days != snapshot->month->therapy_days.*?"
+    r"month\.oximetry_days != snapshot->month->oximetry_days",
+    "calendar redraws only when semantic month content changes",
+)
+require(
+    SOURCE,
+    r"history_ui_update_calendar\(.*?bool grid_content_changed\).*?"
+    r"if \(grid_content_changed\)\s*lv_obj_invalidate\(ui->calendar_grid\)",
+    "unrelated snapshots do not redraw the calendar grid",
+)
+require(
+    SOURCE,
+    r"history_ui_set_hidden.*?lv_obj_has_flag\(object, LV_OBJ_FLAG_HIDDEN\)"
+    r" == hidden.*?return;",
+    "unchanged visibility does not dirty the LVGL tree",
+)
+require(
+    SOURCE,
+    r"history_ui_set_enabled.*?currently_enabled == enabled.*?return;",
+    "unchanged enabled state does not dirty the LVGL tree",
+)
 
 # The retained 480-point model and all copied arrays live in PSRAM only.
 require(
@@ -133,12 +201,16 @@ for state in (
     "EMPTY",
     "AUTO_LOADING",
     "READY",
-    "CALENDAR",
     "ZOOM_LOADING",
     "READ_ERROR",
     "DEGRADED_UNKNOWN",
 ):
     assert f"TOUCH_HISTORY_UI_STATE_{state}" in HEADER, f"missing state {state}"
+
+for rail_mode in ("LIST", "CALENDAR"):
+    assert f"TOUCH_HISTORY_UI_RAIL_{rail_mode}" in HEADER, (
+        f"missing History rail mode {rail_mode}"
+    )
 
 for event_state in ("UNAVAILABLE", "COMPLETE", "INCOMPLETE"):
     assert f"TOUCH_HISTORY_UI_EVENT_STATE_{event_state}" in HEADER, (

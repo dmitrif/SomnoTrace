@@ -36,13 +36,20 @@ typedef enum {
     /* Initial/new-night aggregation. This operation may be cancelled. */
     TOUCH_HISTORY_UI_STATE_AUTO_LOADING,
     TOUCH_HISTORY_UI_STATE_READY,
-    TOUCH_HISTORY_UI_STATE_CALENDAR,
     /* Ranged SD reread. Deliberately has no cancellation affordance. */
     TOUCH_HISTORY_UI_STATE_ZOOM_LOADING,
     TOUCH_HISTORY_UI_STATE_READ_ERROR,
     /* Some provenance is unknown; known values remain visible. */
     TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN,
 } touch_history_ui_state_t;
+
+/* List/Calendar is a left-rail presentation choice, not a data lifecycle
+ * state. Keeping it independent lets Calendar remain selected while the
+ * right-hand night detail loads, fails, or reports degraded data. */
+typedef enum {
+    TOUCH_HISTORY_UI_RAIL_LIST = 0,
+    TOUCH_HISTORY_UI_RAIL_CALENDAR,
+} touch_history_ui_rail_mode_t;
 
 /* Provenance for the respiratory-event lane. COMPLETE with a zero total is a
  * trustworthy zero-event night; UNAVAILABLE must never be presented as zero.
@@ -110,6 +117,7 @@ typedef struct {
  * rejected instead of silently dropping sessions, events, or rows. */
 typedef struct {
     touch_history_ui_state_t state;
+    touch_history_ui_rail_mode_t rail_mode;
 
     const touch_history_day_t *days;
     size_t day_count;
@@ -130,6 +138,8 @@ typedef struct {
     const touch_history_month_t *month;
     bool can_previous_month;
     bool can_next_month;
+    bool calendar_loading;
+    bool calendar_read_error;
 
     touch_history_signal_t selected_signal;
     touch_history_ui_stat_snapshot_t stats[TOUCH_HISTORY_UI_STAT_COUNT];

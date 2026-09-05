@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -75,6 +76,7 @@ typedef struct {
     touch_history_month_t month;
 
     touch_history_ui_state_t state;
+    touch_history_ui_rail_mode_t rail_mode;
     touch_history_signal_t signal;
     int64_t window_start_ms;
     int64_t window_end_ms;
@@ -83,12 +85,17 @@ typedef struct {
     bool has_night;
     bool has_overview;
     bool has_month;
+    bool has_newest_month;
     bool cursor_valid;
     bool therapy_only;
     bool usage_target_known;
     bool usage_on_target;
     bool events_truncated;
+    bool calendar_loading;
+    bool calendar_read_error;
     touch_history_ui_event_state_t event_state;
+    uint16_t newest_year;
+    uint8_t newest_month;
     char status[TOUCH_HISTORY_UI_TEXT_MAX];
     char error[TOUCH_HISTORY_UI_TEXT_MAX];
     char degraded[TOUCH_HISTORY_UI_TEXT_MAX];
@@ -111,6 +118,8 @@ typedef struct {
     bool has_month;
     bool cursor_valid;
     bool therapy_only;
+    touch_history_ui_rail_mode_t rail_mode;
+    bool calendar_loading;
 } history_navigation_t;
 
 struct touch_history_controller {
@@ -120,11 +129,16 @@ struct touch_history_controller {
     QueueHandle_t queue;
     TaskHandle_t worker;
     history_job_t retry_job;
+    history_job_t pending_month;
+    history_job_t active_month;
     uint32_t generation;
+    uint32_t calendar_generation;
     uint32_t revision;
     uint32_t rendered_revision;
     bool active;
     bool ever_loaded;
+    bool month_pending;
+    bool month_running;
     bool closing;
 };
 
@@ -133,7 +147,29 @@ typedef struct {
     uint32_t generation;
     uint16_t base;
     uint16_t span;
+    bool calendar;
 } history_operation_context_t;
+
+static esp_err_t history_controller_enqueue_locked(
+    touch_history_controller_t *controller, history_job_t *job,
+    bool *calendar_state_changed);
+static void history_controller_month_from_day(const char day[9],
+                                              uint16_t *year,
+                                              uint8_t *month);
+
+static void history_controller_remember_newest_month(history_model_t *model)
+{
+    if (!model || model->page.offset != 0 || !model->page.returned)
+        return;
+    uint16_t year = 0;
+    uint8_t month = 0;
+    history_controller_month_from_day(model->days[0].day, &year, &month);
+    if (year < 2000 || year > 2200 || month < 1 || month > 12)
+        return;
+    model->newest_year = year;
+    model->newest_month = month;
+    model->has_newest_month = true;
+}
 
 static void history_controller_notify(touch_history_controller_t *controller)
 {
@@ -147,14 +183,61 @@ static void history_controller_text(char *out, size_t size, const char *text)
     snprintf(out, size, "%s", text ? text : "");
 }
 
+static bool history_controller_can_advance_month(const history_model_t *model)
+{
+    const touch_history_month_t *month = model ? &model->month : NULL;
+    if (!month || month->month < 1 || month->month > 12)
+        return false;
+
+    unsigned upper_year = 0;
+    unsigned upper_month = 0;
+    time_t now = time(NULL);
+    struct tm local = {0};
+    if (now >= 1700000000 && localtime_r(&now, &local)) {
+        upper_year = (unsigned)local.tm_year + 1900U;
+        upper_month = (unsigned)local.tm_mon + 1U;
+    }
+    /* A bedside device can boot and browse its card before NTP has restored
+     * wall time. Retain the newest indexed night as a second safe upper bound
+     * so Previous never becomes a one-way trip while the clock is invalid. */
+    if (model && model->has_newest_month &&
+        (model->newest_year > upper_year ||
+         (model->newest_year == upper_year &&
+          model->newest_month > upper_month))) {
+        upper_year = model->newest_year;
+        upper_month = model->newest_month;
+    }
+    if (!upper_year || !upper_month)
+        return false;
+    return month->year < upper_year ||
+           (month->year == upper_year && month->month < upper_month);
+}
+
 static bool history_controller_generation_current(
-    touch_history_controller_t *controller, uint32_t generation)
+    touch_history_controller_t *controller, uint32_t generation,
+    bool calendar)
 {
     bool current = false;
     if (!controller || xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE)
         return false;
     current = !controller->closing && controller->active &&
-              controller->generation == generation;
+        (calendar ? controller->calendar_generation == generation
+                  : controller->generation == generation);
+    xSemaphoreGive(controller->mutex);
+    return current;
+}
+
+static bool history_controller_job_current(
+    touch_history_controller_t *controller, const history_job_t *job)
+{
+    bool current = false;
+    if (!controller || !job ||
+        xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE)
+        return false;
+    current = !controller->closing && controller->active &&
+        (job->kind == HISTORY_JOB_MONTH
+             ? controller->calendar_generation == job->generation
+             : controller->generation == job->generation);
     xSemaphoreGive(controller->mutex);
     return current;
 }
@@ -163,7 +246,7 @@ static bool history_controller_should_cancel(void *context)
 {
     history_operation_context_t *operation = context;
     return !operation || !history_controller_generation_current(
-        operation->controller, operation->generation);
+        operation->controller, operation->generation, operation->calendar);
 }
 
 static void history_controller_progress(void *context, uint16_t per_mille)
@@ -194,13 +277,14 @@ static void history_controller_progress(void *context, uint16_t per_mille)
 static touch_history_operation_t history_controller_operation(
     history_operation_context_t *context,
     touch_history_controller_t *controller, uint32_t generation,
-    uint16_t base, uint16_t span)
+    uint16_t base, uint16_t span, bool calendar)
 {
     *context = (history_operation_context_t) {
         .controller = controller,
         .generation = generation,
         .base = base,
         .span = span,
+        .calendar = calendar,
     };
     return (touch_history_operation_t) {
         .should_cancel = history_controller_should_cancel,
@@ -212,6 +296,10 @@ static touch_history_operation_t history_controller_operation(
 static void history_controller_begin_job(touch_history_controller_t *controller,
                                          const history_job_t *job)
 {
+    /* Month navigation only replaces the left rail. Keep the selected-night
+     * lifecycle and right detail visible while the compact month index loads. */
+    if (job->kind == HISTORY_JOB_MONTH)
+        return;
     bool notify = false;
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
         if (!controller->closing && controller->generation == job->generation) {
@@ -242,6 +330,59 @@ static bool history_controller_copy_model(touch_history_controller_t *controller
     return true;
 }
 
+static bool history_controller_job_selects_night(const history_job_t *job)
+{
+    if (!job)
+        return false;
+    return job->kind == HISTORY_JOB_INITIAL ||
+           job->kind == HISTORY_JOB_DAY ||
+           (job->kind == HISTORY_JOB_PAGE &&
+            job->global_index != SIZE_MAX);
+}
+
+/* Caller owns controller->mutex. A night selection and the Calendar rail are
+ * published by independent jobs, so reconcile them at the foreground commit
+ * boundary. This makes the selected night win even when Calendar was opened
+ * while that DAY/INITIAL/PAGE job was still queued or running. VIEW jobs are
+ * intentionally excluded: changing a channel or zoom must not snap a month
+ * the user is deliberately browsing back to the selected night. */
+static void history_controller_reconcile_calendar_locked(
+    touch_history_controller_t *controller, const history_job_t *job)
+{
+    if (!controller || !history_controller_job_selects_night(job) ||
+        controller->model.rail_mode != TOUCH_HISTORY_UI_RAIL_CALENDAR ||
+        !controller->model.has_night)
+        return;
+
+    uint16_t year = 0;
+    uint8_t month = 0;
+    history_controller_month_from_day(
+        controller->model.night.day, &year, &month);
+    if (!year || !month)
+        return;
+
+    bool pending_matches = controller->month_pending &&
+        controller->pending_month.year == year &&
+        controller->pending_month.month == month;
+    bool published_matches = controller->model.has_month &&
+        controller->model.month.year == year &&
+        controller->model.month.month == month;
+    bool aligned = controller->model.calendar_loading
+        ? pending_matches : published_matches;
+    if (aligned)
+        return;
+
+    history_job_t month_job = {
+        .kind = HISTORY_JOB_MONTH,
+        .year = year,
+        .month = month,
+        .signal = controller->model.signal,
+        .global_index = SIZE_MAX,
+    };
+    (void)history_controller_enqueue_locked(
+        controller, &month_job, NULL);
+}
+
 static bool history_controller_publish(touch_history_controller_t *controller,
                                        const history_job_t *job,
                                        const history_model_t *result)
@@ -249,12 +390,46 @@ static bool history_controller_publish(touch_history_controller_t *controller,
     bool published = false;
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE)
         return false;
-    if (!controller->closing && controller->active &&
-        controller->generation == job->generation) {
-        controller->model = *result;
-        controller->model.progress_per_mille = 1000;
-        controller->retry_job = *job;
-        controller->ever_loaded = true;
+    bool generation_current = job->kind == HISTORY_JOB_MONTH
+        ? controller->calendar_generation == job->generation
+        : controller->generation == job->generation;
+    if (!controller->closing && controller->active && generation_current) {
+        if (job->kind == HISTORY_JOB_MONTH) {
+            /* A month job owns only compact rail metadata. Never publish its
+             * stale copy of the night, cursor, lifecycle, retry, or progress. */
+            controller->model.month = result->month;
+            controller->model.has_month = result->has_month;
+            controller->model.calendar_loading = false;
+            controller->model.calendar_read_error = false;
+        } else {
+            touch_history_ui_rail_mode_t rail_mode =
+                controller->model.rail_mode;
+            touch_history_month_t month = controller->model.month;
+            bool has_month = controller->model.has_month;
+            bool calendar_loading = controller->model.calendar_loading;
+            bool calendar_read_error =
+                controller->model.calendar_read_error;
+            controller->model = *result;
+            /* Rail selection is synchronous. Foreground worker results must
+             * not close it or roll back a month published between intents. */
+            controller->model.rail_mode = rail_mode;
+            if (job->kind != HISTORY_JOB_INITIAL) {
+                controller->model.month = month;
+                controller->model.has_month = has_month;
+                controller->model.calendar_loading = calendar_loading;
+                controller->model.calendar_read_error = calendar_read_error;
+            } else if (calendar_loading) {
+                /* A month selection can be queued while a full refresh owns
+                 * the worker. Keep that pending state visible until its
+                 * independently-versioned month result is published. */
+                controller->model.calendar_loading = true;
+                controller->model.calendar_read_error = false;
+            }
+            controller->model.progress_per_mille = 1000;
+            controller->retry_job = *job;
+            controller->ever_loaded = true;
+            history_controller_reconcile_calendar_locked(controller, job);
+        }
         controller->revision++;
         published = true;
     }
@@ -269,29 +444,40 @@ static void history_controller_publish_error(
 {
     bool notify = false;
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE) return;
-    if (!controller->closing && controller->active &&
-        controller->generation == job->generation) {
-        controller->model.state = TOUCH_HISTORY_UI_STATE_READ_ERROR;
-        controller->model.progress_per_mille = 0;
-        controller->model.status[0] = '\0';
-        if (error == ESP_ERR_NOT_FOUND) {
-            history_controller_text(controller->model.error,
-                                    sizeof(controller->model.error),
-                                    "No readable History data was found.");
-        } else if (error == ESP_ERR_NO_MEM) {
-            history_controller_text(controller->model.error,
-                                    sizeof(controller->model.error),
-                                    "History ran out of external memory.");
-        } else if (error == ESP_ERR_TIMEOUT || error == ESP_ERR_INVALID_STATE) {
-            history_controller_text(controller->model.error,
-                                    sizeof(controller->model.error),
-                                    "The card is busy. Try again in a moment.");
+    bool generation_current = job->kind == HISTORY_JOB_MONTH
+        ? controller->calendar_generation == job->generation
+        : controller->generation == job->generation;
+    if (!controller->closing && controller->active && generation_current) {
+        if (job->kind == HISTORY_JOB_MONTH) {
+            /* A calendar-index failure belongs to the left rail. It must not
+             * replace a still-valid selected night with the detail error. */
+            controller->model.calendar_loading = false;
+            controller->model.calendar_read_error = true;
         } else {
-            history_controller_text(controller->model.error,
-                                    sizeof(controller->model.error),
-                                    "Could not read the microSD card.");
+            controller->model.state = TOUCH_HISTORY_UI_STATE_READ_ERROR;
+            controller->model.progress_per_mille = 0;
+            controller->model.status[0] = '\0';
+            if (error == ESP_ERR_NOT_FOUND) {
+                history_controller_text(controller->model.error,
+                                        sizeof(controller->model.error),
+                                        "No readable History data was found.");
+            } else if (error == ESP_ERR_NO_MEM) {
+                history_controller_text(controller->model.error,
+                                        sizeof(controller->model.error),
+                                        "History ran out of external memory.");
+            } else if (error == ESP_ERR_TIMEOUT ||
+                       error == ESP_ERR_INVALID_STATE) {
+                history_controller_text(controller->model.error,
+                                        sizeof(controller->model.error),
+                                        "The card is busy. Try again in a moment.");
+            } else {
+                history_controller_text(controller->model.error,
+                                        sizeof(controller->model.error),
+                                        "Could not read the microSD card.");
+            }
         }
-        controller->retry_job = *job;
+        if (job->kind != HISTORY_JOB_MONTH)
+            controller->retry_job = *job;
         controller->revision++;
         notify = true;
     }
@@ -382,7 +568,7 @@ static esp_err_t history_controller_load_view(
 {
     history_operation_context_t operation_context;
     touch_history_operation_t operation = history_controller_operation(
-        &operation_context, controller, job->generation, 50, 900);
+        &operation_context, controller, job->generation, 50, 900, false);
     /* Zoom/pan overlays deliberately hide Cancel, but a newer generation or a
      * deactivated History page must still interrupt the card read. Progress is
      * not rendered for that overlay, so suppress its otherwise costly updates. */
@@ -540,13 +726,19 @@ static esp_err_t history_controller_load_view(
     return ESP_OK;
 }
 
-static esp_err_t history_controller_load_page(const history_job_t *job,
-                                              history_model_t *model)
+static esp_err_t history_controller_load_page(
+    touch_history_controller_t *controller, const history_job_t *job,
+    history_model_t *model)
 {
     touch_history_day_t days[TOUCH_HISTORY_UI_LIST_ROWS] = {0};
     touch_history_index_page_t page = {0};
-    esp_err_t result = touch_history_load_page(
-        job->page_offset, days, TOUCH_HISTORY_UI_LIST_ROWS, &page);
+    history_operation_context_t operation_context;
+    touch_history_operation_t operation = history_controller_operation(
+        &operation_context, controller, job->generation, 0, 0, false);
+    operation.progress = NULL;
+    esp_err_t result = touch_history_load_page_ex(
+        job->page_offset, days, TOUCH_HISTORY_UI_LIST_ROWS, &page,
+        &operation);
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "index page offset=%u failed: %s (0x%x)",
                  (unsigned)job->page_offset, esp_err_to_name(result),
@@ -555,6 +747,7 @@ static esp_err_t history_controller_load_page(const history_job_t *job,
     }
     memcpy(model->days, days, sizeof(days));
     model->page = page;
+    history_controller_remember_newest_month(model);
     model->selected_row = SIZE_MAX;
     if (model->has_night)
         history_controller_update_selection(
@@ -614,6 +807,7 @@ static esp_err_t history_controller_preview_page(
         .total_days = HISTORY_PREVIEW_DAY_COUNT,
         .has_more = offset + returned < HISTORY_PREVIEW_DAY_COUNT,
     };
+    history_controller_remember_newest_month(model);
     model->selected_row = SIZE_MAX;
     if (model->has_night)
         history_controller_update_selection(
@@ -957,7 +1151,7 @@ static esp_err_t history_controller_preview_process(
     if (job->kind == HISTORY_JOB_MONTH) {
         history_controller_preview_month(job->year, job->month, &result->month);
         result->has_month = true;
-        result->state = TOUCH_HISTORY_UI_STATE_CALENDAR;
+        result->calendar_read_error = false;
         return ESP_OK;
     }
     return ESP_OK;
@@ -977,7 +1171,8 @@ static esp_err_t history_controller_process(
         result->selected_row = SIZE_MAX;
         result->selected_global_index = SIZE_MAX;
         result->signal = job->signal;
-        esp_err_t load = history_controller_load_page(job, result);
+        esp_err_t load = history_controller_load_page(
+            controller, job, result);
         if (load == ESP_ERR_NOT_FOUND) {
             result->state = TOUCH_HISTORY_UI_STATE_EMPTY;
             history_controller_text(result->status, sizeof(result->status),
@@ -995,13 +1190,34 @@ static esp_err_t history_controller_process(
         uint16_t year = 0;
         uint8_t month = 0;
         history_controller_month_from_day(detail.day, &year, &month);
-        if (year && month &&
-            touch_history_load_month(year, month, &result->month) == ESP_OK)
-            result->has_month = true;
+        if (year && month) {
+            history_operation_context_t operation_context;
+            touch_history_operation_t operation = history_controller_operation(
+                &operation_context, controller, job->generation, 0, 0, false);
+            operation.progress = NULL;
+            esp_err_t month_result = touch_history_load_month_ex(
+                year, month, &result->month, &operation);
+            if (month_result == ESP_OK) {
+                result->has_month = true;
+                result->calendar_read_error = false;
+            } else if (month_result == TOUCH_HISTORY_ERR_CANCELLED &&
+                       !history_controller_generation_current(
+                           controller, job->generation, false)) {
+                /* A newer intent/deactivation owns the model now. */
+                return month_result;
+            } else {
+                /* The night detail is still complete and useful. Scope a
+                 * failed or recording-preempted compact index read to the
+                 * Calendar rail. */
+                result->has_month = false;
+                result->calendar_read_error = true;
+            }
+        }
         return ESP_OK;
     }
     case HISTORY_JOB_PAGE: {
-        esp_err_t page_result = history_controller_load_page(job, result);
+        esp_err_t page_result = history_controller_load_page(
+            controller, job, result);
         if (page_result != ESP_OK) return page_result;
         if (job->global_index != SIZE_MAX &&
             job->global_index >= result->page.offset &&
@@ -1022,8 +1238,12 @@ static esp_err_t history_controller_process(
         history_job_t resolved = *job;
         if (resolved.global_index == SIZE_MAX) {
             size_t total_days = 0;
-            esp_err_t found = touch_history_find_day_index(
-                resolved.day, &resolved.global_index, &total_days);
+            history_operation_context_t operation_context;
+            touch_history_operation_t operation = history_controller_operation(
+                &operation_context, controller, job->generation, 0, 0, false);
+            operation.progress = NULL;
+            esp_err_t found = touch_history_find_day_index_ex(
+                resolved.day, &resolved.global_index, &total_days, &operation);
             if (found != ESP_OK) return found;
             resolved.page_offset =
                 (resolved.global_index / TOUCH_HISTORY_UI_LIST_ROWS) *
@@ -1031,7 +1251,8 @@ static esp_err_t history_controller_process(
             result->page.total_days = total_days;
         }
         if (resolved.page_offset != result->page.offset) {
-            esp_err_t page = history_controller_load_page(&resolved, result);
+            esp_err_t page = history_controller_load_page(
+                controller, &resolved, result);
             if (page != ESP_OK) return page;
         }
         return history_controller_load_view(
@@ -1040,11 +1261,15 @@ static esp_err_t history_controller_process(
     case HISTORY_JOB_VIEW:
         return history_controller_load_view(controller, job, result, false);
     case HISTORY_JOB_MONTH: {
-        esp_err_t month = touch_history_load_month(
-            job->year, job->month, &result->month);
+        history_operation_context_t operation_context;
+        touch_history_operation_t operation = history_controller_operation(
+            &operation_context, controller, job->generation, 0, 0, true);
+        operation.progress = NULL;
+        esp_err_t month = touch_history_load_month_ex(
+            job->year, job->month, &result->month, &operation);
         if (month != ESP_OK) return month;
         result->has_month = true;
-        result->state = TOUCH_HISTORY_UI_STATE_CALENDAR;
+        result->calendar_read_error = false;
         result->status[0] = '\0';
         return ESP_OK;
     }
@@ -1054,45 +1279,100 @@ static esp_err_t history_controller_process(
     return ESP_ERR_INVALID_ARG;
 }
 
+static bool history_controller_take_job(
+    touch_history_controller_t *controller, history_job_t *job)
+{
+    bool found = false;
+    if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
+        /* Producers use this same lifecycle lock, so a foreground job cannot
+         * arrive between the priority check and taking coalesced month work. */
+        if (xQueueReceive(controller->queue, job, 0) == pdTRUE) {
+            found = true;
+        } else if (controller->month_pending) {
+            *job = controller->pending_month;
+            controller->month_pending = false;
+            controller->active_month = *job;
+            controller->month_running = true;
+            found = true;
+        }
+        xSemaphoreGive(controller->mutex);
+    }
+    return found;
+}
+
+static void history_controller_finish_job(
+    touch_history_controller_t *controller, const history_job_t *job)
+{
+    if (!controller || !job || job->kind != HISTORY_JOB_MONTH)
+        return;
+    if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
+        if (controller->month_running &&
+            controller->active_month.generation == job->generation)
+            controller->month_running = false;
+        xSemaphoreGive(controller->mutex);
+    }
+}
+
 static void history_controller_worker(void *argument)
 {
     touch_history_controller_t *controller = argument;
     history_job_t job;
-    while (xQueueReceive(controller->queue, &job, portMAX_DELAY) == pdTRUE) {
-        if (job.kind == HISTORY_JOB_STOP) break;
-        if (!history_controller_generation_current(controller, job.generation)) {
-            ESP_LOGI(TAG, "drop stale job=%u generation=%u",
-                     (unsigned)job.kind, (unsigned)job.generation);
-            continue;
-        }
-        ESP_LOGI(TAG, "begin job=%u generation=%u day=%s signal=%u",
-                 (unsigned)job.kind, (unsigned)job.generation,
-                 job.day[0] ? job.day : "-", (unsigned)job.signal);
-        history_controller_begin_job(controller, &job);
-        history_model_t *result = heap_caps_malloc(
-            sizeof(*result), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!result) {
-            ESP_LOGE(TAG,
-                     "job=%u generation=%u could not allocate %u-byte result model",
+    bool stopping = false;
+    while (!stopping) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (history_controller_take_job(controller, &job)) {
+            if (job.kind == HISTORY_JOB_STOP) {
+                stopping = true;
+                break;
+            }
+            if (!history_controller_job_current(controller, &job)) {
+                ESP_LOGI(TAG, "drop stale job=%u generation=%u",
+                         (unsigned)job.kind, (unsigned)job.generation);
+                history_controller_finish_job(controller, &job);
+                continue;
+            }
+            ESP_LOGI(TAG, "begin job=%u generation=%u day=%s signal=%u",
                      (unsigned)job.kind, (unsigned)job.generation,
-                     (unsigned)sizeof(*result));
-            history_controller_publish_error(controller, &job, ESP_ERR_NO_MEM);
-            continue;
+                     job.day[0] ? job.day : "-", (unsigned)job.signal);
+            history_controller_begin_job(controller, &job);
+            history_model_t *result = heap_caps_malloc(
+                sizeof(*result), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!result) {
+                ESP_LOGE(
+                    TAG,
+                    "job=%u generation=%u could not allocate %u-byte result model",
+                    (unsigned)job.kind, (unsigned)job.generation,
+                    (unsigned)sizeof(*result));
+                history_controller_publish_error(
+                    controller, &job, ESP_ERR_NO_MEM);
+                history_controller_finish_job(controller, &job);
+                continue;
+            }
+            esp_err_t status = history_controller_process(
+                controller, &job, result);
+            if (status == ESP_OK) {
+                (void)history_controller_publish(controller, &job, result);
+            } else if (history_controller_job_current(controller, &job)) {
+                /* Cancellation can mean either a superseding UI generation
+                 * or recording-priority preemption. The former is stale by
+                 * the check above; the latter is still current and must leave
+                 * a retryable state instead of a permanent loading surface. */
+                esp_err_t visible_status =
+                    status == TOUCH_HISTORY_ERR_CANCELLED
+                        ? ESP_ERR_INVALID_STATE : status;
+                ESP_LOGE(
+                    TAG,
+                    "job=%u generation=%u day=%s signal=%u failed: %s (0x%x)",
+                    (unsigned)job.kind, (unsigned)job.generation,
+                    job.day[0] ? job.day : "-", (unsigned)job.signal,
+                    esp_err_to_name(visible_status),
+                    (unsigned)visible_status);
+                history_controller_publish_error(
+                    controller, &job, visible_status);
+            }
+            heap_caps_free(result);
+            history_controller_finish_job(controller, &job);
         }
-        esp_err_t status = history_controller_process(controller, &job, result);
-        if (status == ESP_OK) {
-            (void)history_controller_publish(controller, &job, result);
-        } else if (status != TOUCH_HISTORY_ERR_CANCELLED &&
-                   history_controller_generation_current(
-                       controller, job.generation)) {
-            ESP_LOGE(TAG,
-                     "job=%u generation=%u day=%s signal=%u failed: %s (0x%x)",
-                     (unsigned)job.kind, (unsigned)job.generation,
-                     job.day[0] ? job.day : "-", (unsigned)job.signal,
-                     esp_err_to_name(status), (unsigned)status);
-            history_controller_publish_error(controller, &job, status);
-        }
-        heap_caps_free(result);
     }
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
         controller->worker = NULL;
@@ -1101,23 +1381,86 @@ static void history_controller_worker(void *argument)
     psram_task_delete(NULL);
 }
 
+/* Caller owns controller->mutex. Keeping lifecycle validation, generation
+ * assignment, mailbox publication, and worker wake in one critical section
+ * prevents refresh/activation and destroy from racing another producer. */
+static esp_err_t history_controller_enqueue_locked(
+    touch_history_controller_t *controller, history_job_t *job,
+    bool *calendar_state_changed)
+{
+    if (!controller || !job) return ESP_ERR_INVALID_ARG;
+    if (calendar_state_changed)
+        *calendar_state_changed = false;
+    if (controller->closing || !controller->active)
+        return ESP_ERR_INVALID_STATE;
+    TaskHandle_t worker = controller->worker;
+    if (!worker)
+        return ESP_ERR_INVALID_STATE;
+    bool calendar_job = job->kind == HISTORY_JOB_MONTH;
+    bool calendar_changed = false;
+    BaseType_t queued = pdPASS;
+    if (calendar_job) {
+        controller->calendar_generation++;
+        if (!controller->calendar_generation)
+            controller->calendar_generation = 1;
+        job->generation = controller->calendar_generation;
+        controller->pending_month = *job;
+        controller->month_pending = true;
+        calendar_changed = !controller->model.calendar_loading ||
+                           controller->model.calendar_read_error;
+        controller->model.calendar_loading = true;
+        controller->model.calendar_read_error = false;
+        if (calendar_changed)
+            controller->revision++;
+    } else {
+        /* A foreground gesture preempts an in-flight all-history month scan.
+         * Re-pend the same target under a fresh calendar generation so it
+         * resumes after the foreground mailbox drains instead of being lost. */
+        if (controller->month_running &&
+            controller->model.calendar_loading &&
+            controller->model.rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR) {
+            controller->calendar_generation++;
+            if (!controller->calendar_generation)
+                controller->calendar_generation = 1;
+            history_job_t resume = controller->month_pending
+                ? controller->pending_month : controller->active_month;
+            controller->pending_month = resume;
+            controller->pending_month.generation =
+                controller->calendar_generation;
+            controller->month_pending = true;
+        }
+        controller->generation++;
+        if (!controller->generation) controller->generation = 1;
+        job->generation = controller->generation;
+        controller->retry_job = *job;
+        queued = xQueueOverwrite(controller->queue, job);
+    }
+    /* Queue publication and its wake edge stay inside the lifecycle lock.
+     * Destroy cannot reset/delete the queue or retire this task handle between
+     * the closing check and the nonblocking producer operation. */
+    if (queued == pdPASS)
+        xTaskNotifyGive(worker);
+    if (calendar_state_changed)
+        *calendar_state_changed = calendar_changed;
+    return queued == pdPASS ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t history_controller_enqueue(
     touch_history_controller_t *controller, history_job_t *job)
 {
     if (!controller || !job) return ESP_ERR_INVALID_ARG;
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE)
         return ESP_FAIL;
-    if (controller->closing || !controller->active) {
-        xSemaphoreGive(controller->mutex);
-        return ESP_ERR_INVALID_STATE;
-    }
-    controller->generation++;
-    if (!controller->generation) controller->generation = 1;
-    job->generation = controller->generation;
-    controller->retry_job = *job;
+    bool calendar_state_changed = false;
+    esp_err_t result = history_controller_enqueue_locked(
+        controller, job, &calendar_state_changed);
+    touch_history_controller_changed_fn changed =
+        calendar_state_changed ? controller->config.changed : NULL;
+    void *changed_context = controller->config.context;
     xSemaphoreGive(controller->mutex);
-    BaseType_t queued = xQueueOverwrite(controller->queue, job);
-    if (queued == pdPASS) {
+    if (result == ESP_OK) {
+        if (changed)
+            changed(changed_context);
         ESP_LOGI(TAG, "queued job=%u generation=%u day=%s signal=%u",
                  (unsigned)job->kind, (unsigned)job->generation,
                  job->day[0] ? job->day : "-", (unsigned)job->signal);
@@ -1125,7 +1468,7 @@ static esp_err_t history_controller_enqueue(
     }
     ESP_LOGE(TAG, "queue rejected job=%u generation=%u",
              (unsigned)job->kind, (unsigned)job->generation);
-    return ESP_FAIL;
+    return result;
 }
 
 esp_err_t touch_history_controller_create(
@@ -1170,14 +1513,21 @@ void touch_history_controller_destroy(touch_history_controller_t *controller)
 {
     if (!controller) return;
     history_job_t stop = {.kind = HISTORY_JOB_STOP};
+    TaskHandle_t worker_to_notify = NULL;
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
         controller->closing = true;
         controller->active = false;
         controller->generation++;
+        controller->calendar_generation++;
+        controller->month_pending = false;
+        controller->month_running = false;
+        worker_to_notify = controller->worker;
         xSemaphoreGive(controller->mutex);
     }
     xQueueReset(controller->queue);
     (void)xQueueSend(controller->queue, &stop, portMAX_DELAY);
+    if (worker_to_notify)
+        xTaskNotifyGive(worker_to_notify);
     for (;;) {
         TaskHandle_t worker = NULL;
         if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
@@ -1198,6 +1548,13 @@ esp_err_t touch_history_controller_set_active(
     if (!controller) return ESP_ERR_INVALID_ARG;
     bool load = false;
     bool notify = false;
+    esp_err_t result = ESP_OK;
+    history_job_t job = {
+        .kind = HISTORY_JOB_INITIAL,
+        .page_offset = 0,
+        .global_index = 0,
+        .signal = TOUCH_HISTORY_SIGNAL_FLOW,
+    };
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE)
         return ESP_FAIL;
     if (controller->closing) {
@@ -1207,6 +1564,13 @@ esp_err_t touch_history_controller_set_active(
     controller->active = active;
     if (!active) {
         controller->generation++;
+        controller->calendar_generation++;
+        controller->month_pending = false;
+        if (controller->model.calendar_loading) {
+            controller->model.calendar_loading = false;
+            controller->revision++;
+            notify = true;
+        }
         controller->model.progress_per_mille = 0;
         if (controller->model.state == TOUCH_HISTORY_UI_STATE_AUTO_LOADING ||
             controller->model.state == TOUCH_HISTORY_UI_STATE_ZOOM_LOADING) {
@@ -1221,6 +1585,7 @@ esp_err_t touch_history_controller_set_active(
                controller->model.state == TOUCH_HISTORY_UI_STATE_EMPTY ||
                controller->model.state == TOUCH_HISTORY_UI_STATE_READ_ERROR) {
         load = true;
+        result = history_controller_enqueue_locked(controller, &job, NULL);
     }
     ESP_LOGI(TAG, "set active=%u load=%u generation=%u state=%u ever=%u",
              active ? 1U : 0U, load ? 1U : 0U,
@@ -1229,21 +1594,24 @@ esp_err_t touch_history_controller_set_active(
              controller->ever_loaded ? 1U : 0U);
     xSemaphoreGive(controller->mutex);
     if (notify) history_controller_notify(controller);
-    if (!load) return ESP_OK;
-    history_job_t job = {
-        .kind = HISTORY_JOB_INITIAL,
-        .page_offset = 0,
-        .global_index = 0,
-        .signal = TOUCH_HISTORY_SIGNAL_FLOW,
-    };
-    return history_controller_enqueue(controller, &job);
+    if (load && result == ESP_OK)
+        ESP_LOGI(TAG, "queued activation job=%u generation=%u",
+                 (unsigned)job.kind, (unsigned)job.generation);
+    return result;
 }
 
 esp_err_t touch_history_controller_refresh(
     touch_history_controller_t *controller)
 {
     if (!controller) return ESP_ERR_INVALID_ARG;
-    bool active = false;
+    bool notify = false;
+    esp_err_t result = ESP_OK;
+    history_job_t job = {
+        .kind = HISTORY_JOB_INITIAL,
+        .page_offset = 0,
+        .global_index = 0,
+        .signal = TOUCH_HISTORY_SIGNAL_FLOW,
+    };
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) != pdTRUE)
         return ESP_FAIL;
     if (controller->closing) {
@@ -1252,16 +1620,23 @@ esp_err_t touch_history_controller_refresh(
     }
     controller->ever_loaded = false;
     controller->generation++;
-    active = controller->active;
+    controller->calendar_generation++;
+    controller->month_pending = false;
+    if (controller->model.calendar_loading ||
+        controller->model.calendar_read_error) {
+        controller->model.calendar_loading = false;
+        controller->model.calendar_read_error = false;
+        controller->revision++;
+        notify = true;
+    }
+    if (controller->active)
+        result = history_controller_enqueue_locked(controller, &job, NULL);
     xSemaphoreGive(controller->mutex);
-    if (!active) return ESP_OK;
-    history_job_t job = {
-        .kind = HISTORY_JOB_INITIAL,
-        .page_offset = 0,
-        .global_index = 0,
-        .signal = TOUCH_HISTORY_SIGNAL_FLOW,
-    };
-    return history_controller_enqueue(controller, &job);
+    if (notify) history_controller_notify(controller);
+    if (result == ESP_OK && job.generation)
+        ESP_LOGI(TAG, "queued refresh job=%u generation=%u",
+                 (unsigned)job.kind, (unsigned)job.generation);
+    return result;
 }
 
 static bool history_controller_get_navigation(
@@ -1285,6 +1660,8 @@ static bool history_controller_get_navigation(
     navigation->has_month = controller->model.has_month;
     navigation->cursor_valid = controller->model.cursor_valid;
     navigation->therapy_only = controller->model.therapy_only;
+    navigation->rail_mode = controller->model.rail_mode;
+    navigation->calendar_loading = controller->model.calendar_loading;
     xSemaphoreGive(controller->mutex);
     return true;
 }
@@ -1430,53 +1807,156 @@ void touch_history_controller_handle_intent(
         break;
     }
     case TOUCH_HISTORY_UI_INTENT_OPEN_CALENDAR: {
-        uint16_t year = model.has_month ? model.month.year : 0;
-        uint8_t month = model.has_month ? model.month.month : 0;
-        if ((!year || !month) && model.has_night)
-            history_controller_month_from_day(model.night.day, &year, &month);
-        if (year && month) {
-            history_job_t job = {
-                .kind = HISTORY_JOB_MONTH, .year = year, .month = month,
-                .signal = model.signal,
-                .global_index = SIZE_MAX,
-            };
-            (void)history_controller_enqueue(controller, &job);
+        bool notify = false;
+        bool queued = false;
+        uint16_t year = 0;
+        uint8_t month = 0;
+        if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
+            history_model_t *live = &controller->model;
+            if (!controller->closing && controller->active) {
+                /* The selected night wins over a cached month left behind by
+                 * an earlier calendar visit. Resolve it inside the same lock
+                 * that publishes the rail and optional month job. */
+                const char *target_day = live->has_night
+                    ? live->night.day : NULL;
+                /* A just-tapped row may already own the foreground
+                 * generation without having published its night yet. Use
+                 * that known DAY target so Calendar does not briefly open on
+                 * the selection it is replacing. The commit-time reconcile
+                 * below remains the final invariant for every interleaving. */
+                if (controller->retry_job.kind == HISTORY_JOB_DAY &&
+                    controller->retry_job.generation ==
+                        controller->generation &&
+                    controller->retry_job.day[0])
+                    target_day = controller->retry_job.day;
+                if (target_day)
+                    history_controller_month_from_day(
+                        target_day, &year, &month);
+                if ((!year || !month) && live->has_month) {
+                    year = live->month.year;
+                    month = live->month.month;
+                }
+                if (live->rail_mode != TOUCH_HISTORY_UI_RAIL_CALENDAR ||
+                    live->calendar_read_error) {
+                    live->rail_mode = TOUCH_HISTORY_UI_RAIL_CALENDAR;
+                    live->calendar_read_error = false;
+                    controller->revision++;
+                    notify = true;
+                }
+                bool month_is_current = live->has_month &&
+                    live->month.year == year && live->month.month == month;
+                if (year && month && !month_is_current) {
+                    history_job_t job = {
+                        .kind = HISTORY_JOB_MONTH,
+                        .year = year,
+                        .month = month,
+                        .signal = live->signal,
+                        .global_index = SIZE_MAX,
+                    };
+                    bool calendar_changed = false;
+                    queued = history_controller_enqueue_locked(
+                        controller, &job, &calendar_changed) == ESP_OK;
+                    notify = notify || calendar_changed;
+                }
+            }
+            touch_history_controller_changed_fn changed =
+                notify ? controller->config.changed : NULL;
+            void *changed_context = controller->config.context;
+            xSemaphoreGive(controller->mutex);
+            if (changed)
+                changed(changed_context);
         }
+        if (queued)
+            ESP_LOGI(TAG, "queued Calendar month=%04u-%02u",
+                     (unsigned)year, (unsigned)month);
         break;
     }
     case TOUCH_HISTORY_UI_INTENT_CLOSE_CALENDAR: {
         bool notify = false;
         if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
-            controller->generation++;
-            controller->model.state = controller->model.has_night
-                ? TOUCH_HISTORY_UI_STATE_READY : TOUCH_HISTORY_UI_STATE_EMPTY;
-            controller->revision++;
-            notify = true;
+            if (controller->model.rail_mode != TOUCH_HISTORY_UI_RAIL_LIST) {
+                controller->model.rail_mode = TOUCH_HISTORY_UI_RAIL_LIST;
+                controller->model.calendar_loading = false;
+                controller->model.calendar_read_error = false;
+                controller->calendar_generation++;
+                controller->month_pending = false;
+                controller->revision++;
+                notify = true;
+            }
             xSemaphoreGive(controller->mutex);
         }
         if (notify) history_controller_notify(controller);
         break;
     }
     case TOUCH_HISTORY_UI_INTENT_MONTH_RELATIVE: {
-        int year = model.month.year;
-        int month = model.month.month + (int)intent->relative;
-        while (month < 1) { month += 12; year--; }
-        while (month > 12) { month -= 12; year++; }
-        if (year >= 2000 && year <= 2200) {
-            history_job_t job = {
-                .kind = HISTORY_JOB_MONTH, .year = (uint16_t)year,
-                .month = (uint8_t)month, .signal = model.signal,
-                .global_index = SIZE_MAX,
-            };
-            (void)history_controller_enqueue(controller, &job);
+        bool notify = false;
+        bool queued = false;
+        int year = 0;
+        int month = 0;
+        if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
+            history_model_t *live = &controller->model;
+            if (!controller->closing && controller->active &&
+                live->rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR &&
+                live->has_month && !live->calendar_loading &&
+                (intent->relative <= 0 ||
+                 history_controller_can_advance_month(live))) {
+                year = live->month.year;
+                month = live->month.month + (int)intent->relative;
+                while (month < 1) { month += 12; year--; }
+                while (month > 12) { month -= 12; year++; }
+                if (year >= 2000 && year <= 2200) {
+                    history_job_t job = {
+                        .kind = HISTORY_JOB_MONTH,
+                        .year = (uint16_t)year,
+                        .month = (uint8_t)month,
+                        .signal = live->signal,
+                        .global_index = SIZE_MAX,
+                    };
+                    queued = history_controller_enqueue_locked(
+                        controller, &job, &notify) == ESP_OK;
+                }
+            }
+            touch_history_controller_changed_fn changed =
+                notify ? controller->config.changed : NULL;
+            void *changed_context = controller->config.context;
+            xSemaphoreGive(controller->mutex);
+            if (changed)
+                changed(changed_context);
         }
+        if (queued)
+            ESP_LOGI(TAG, "queued Calendar month=%04d-%02d", year, month);
         break;
     }
-    case TOUCH_HISTORY_UI_INTENT_SELECT_CALENDAR_DAY:
-        if (intent->day[0])
-            history_controller_queue_day(controller, &model, intent->day,
-                                         SIZE_MAX, model.page.offset);
+    case TOUCH_HISTORY_UI_INTENT_SELECT_CALENDAR_DAY: {
+        bool queued = false;
+        if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
+            history_model_t *live = &controller->model;
+            uint16_t selected_year = 0;
+            uint8_t selected_month = 0;
+            history_controller_month_from_day(
+                intent->day, &selected_year, &selected_month);
+            if (!controller->closing && controller->active &&
+                live->rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR &&
+                !live->calendar_loading && live->has_month && intent->day[0] &&
+                selected_year == live->month.year &&
+                selected_month == live->month.month) {
+                history_job_t job = {
+                    .kind = HISTORY_JOB_DAY,
+                    .page_offset = live->page.offset,
+                    .global_index = SIZE_MAX,
+                    .signal = live->signal,
+                    .therapy_only = live->therapy_only,
+                };
+                memcpy(job.day, intent->day, sizeof(job.day));
+                queued = history_controller_enqueue_locked(
+                    controller, &job, NULL) == ESP_OK;
+            }
+            xSemaphoreGive(controller->mutex);
+        }
+        if (queued)
+            ESP_LOGI(TAG, "queued Calendar day=%s", intent->day);
         break;
+    }
     case TOUCH_HISTORY_UI_INTENT_PREVIOUS_NIGHT:
     case TOUCH_HISTORY_UI_INTENT_NEXT_NIGHT: {
         if (model.selected_global_index == SIZE_MAX) break;
@@ -1652,6 +2132,7 @@ esp_err_t touch_history_controller_apply(
     history_model_t *model = &controller->model;
     touch_history_ui_snapshot_t snapshot = {
         .state = model->state,
+        .rail_mode = model->rail_mode,
         .days = model->days,
         .day_count = model->page.returned,
         .page = model->page,
@@ -1667,7 +2148,10 @@ esp_err_t touch_history_controller_apply(
         .events_truncated = model->events_truncated,
         .month = model->has_month ? &model->month : NULL,
         .can_previous_month = model->has_month && model->month.year > 2000,
-        .can_next_month = model->has_month && model->month.year < 2200,
+        .can_next_month = model->has_month &&
+            history_controller_can_advance_month(model),
+        .calendar_loading = model->calendar_loading,
+        .calendar_read_error = model->calendar_read_error,
         .selected_signal = model->signal,
         .can_previous_night = model->selected_global_index != SIZE_MAX &&
             model->selected_global_index + 1U < model->page.total_days,

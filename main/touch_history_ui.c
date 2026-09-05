@@ -40,6 +40,10 @@
 #define HISTORY_UI_LIST_ROW_H 60
 #define HISTORY_UI_LIST_VIEWPORT_Y 92
 #define HISTORY_UI_LIST_VIEWPORT_H 358
+#define HISTORY_UI_CALENDAR_Y HISTORY_UI_HIT
+#define HISTORY_UI_CALENDAR_H (TOUCH_HISTORY_UI_HEIGHT - HISTORY_UI_CALENDAR_Y)
+#define HISTORY_UI_CALENDAR_GRID_Y 48
+#define HISTORY_UI_CALENDAR_GRID_H 294
 
 #define HISTORY_UI_DETAIL_HEADER_H 44
 #define HISTORY_UI_SUMMARY_Y 64
@@ -93,7 +97,9 @@ struct touch_history_ui {
 
     lv_obj_t *list_segment;
     lv_obj_t *list_segment_button;
+    lv_obj_t *list_segment_label;
     lv_obj_t *calendar_button;
+    lv_obj_t *calendar_button_label;
     lv_obj_t *list_title;
     lv_obj_t *jump_to_date;
     lv_obj_t *list_viewport;
@@ -147,10 +153,11 @@ struct touch_history_ui {
     lv_obj_t *calendar_title;
     lv_obj_t *calendar_previous;
     lv_obj_t *calendar_next;
-    lv_obj_t *calendar_close;
     lv_obj_t *calendar_grid;
+    lv_obj_t *calendar_status;
 
     touch_history_ui_state_t state;
+    touch_history_ui_rail_mode_t rail_mode;
     touch_history_day_t days[TOUCH_HISTORY_UI_LIST_ROWS];
     size_t day_count;
     touch_history_index_page_t page;
@@ -170,6 +177,8 @@ struct touch_history_ui {
     bool has_month;
     bool can_previous_month;
     bool can_next_month;
+    bool calendar_loading;
+    bool calendar_read_error;
     touch_history_signal_t signal;
     history_ui_stat_t stats[TOUCH_HISTORY_UI_STAT_COUNT];
     bool can_previous_night;
@@ -219,6 +228,8 @@ static lv_obj_t *history_ui_container(lv_obj_t *parent, lv_coord_t x,
                                       uint32_t border)
 {
     lv_obj_t *object = lv_obj_create(parent);
+    if (!object)
+        return NULL;
     lv_obj_set_pos(object, x, y);
     lv_obj_set_size(object, width, height);
     lv_obj_set_style_radius(object, HISTORY_UI_RADIUS, 0);
@@ -238,6 +249,8 @@ static lv_obj_t *history_ui_label(lv_obj_t *parent, const char *text,
                                   lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *label = lv_label_create(parent);
+    if (!label)
+        return NULL;
     lv_obj_set_pos(label, x, y);
     lv_obj_set_size(label, width, height);
     lv_obj_set_style_text_font(label, font, 0);
@@ -253,6 +266,8 @@ static lv_obj_t *history_ui_button(lv_obj_t *parent, lv_coord_t x,
                                    lv_coord_t height, uint32_t background)
 {
     lv_obj_t *button = lv_btn_create(parent);
+    if (!button)
+        return NULL;
     lv_obj_set_pos(button, x, y);
     lv_obj_set_size(button, width, height);
     lv_obj_set_style_radius(button, 10, 0);
@@ -272,6 +287,8 @@ static lv_obj_t *history_ui_button_label(lv_obj_t *button, const char *text,
                                          uint32_t color)
 {
     lv_obj_t *label = lv_label_create(button);
+    if (!label)
+        return NULL;
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, history_ui_color(color), 0);
     lv_label_set_text(label, text);
@@ -283,6 +300,8 @@ static void history_ui_set_hidden(lv_obj_t *object, bool hidden)
 {
     if (!object)
         return;
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hidden)
+        return;
     if (hidden)
         lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
     else
@@ -293,6 +312,10 @@ static void history_ui_set_enabled(lv_obj_t *object, bool enabled)
 {
     if (!object)
         return;
+    bool currently_enabled =
+        !lv_obj_has_state(object, LV_STATE_DISABLED);
+    if (currently_enabled == enabled)
+        return;
     if (enabled) {
         lv_obj_clear_state(object, LV_STATE_DISABLED);
         lv_obj_set_style_opa(object, LV_OPA_COVER, 0);
@@ -300,6 +323,17 @@ static void history_ui_set_enabled(lv_obj_t *object, bool enabled)
         lv_obj_add_state(object, LV_STATE_DISABLED);
         lv_obj_set_style_opa(object, LV_OPA_40, 0);
     }
+}
+
+static void history_ui_set_label_text_if_changed(lv_obj_t *label,
+                                                 const char *text)
+{
+    if (!label)
+        return;
+    const char *next = text ? text : "";
+    const char *current = lv_label_get_text(label);
+    if (!current || strcmp(current, next))
+        lv_label_set_text(label, next);
 }
 
 static void history_ui_emit(touch_history_ui_t *ui,
@@ -619,6 +653,13 @@ static int history_ui_first_weekday(unsigned year, unsigned month)
                   (unsigned)offsets[month - 1] + 1U) % 7U);
 }
 
+/* The general date formatter above uses Sunday=0. The History handoff's
+ * calendar is Monday-first, so translate only the calendar column index. */
+static int history_ui_calendar_first_column(unsigned year, unsigned month)
+{
+    return (history_ui_first_weekday(year, month) + 6) % 7;
+}
+
 static int history_ui_calendar_day_at(const touch_history_ui_t *ui,
                                       lv_coord_t x, lv_coord_t y)
 {
@@ -635,7 +676,8 @@ static int history_ui_calendar_day_at(const touch_history_ui_t *ui,
     if (col < 0 || col > 6 || row < 0 || row > 5)
         return 0;
     int day = row * 7 + col -
-              history_ui_first_weekday(ui->month.year, ui->month.month) + 1;
+              history_ui_calendar_first_column(
+                  ui->month.year, ui->month.month) + 1;
     int count = history_ui_days_in_month(ui->month.year, ui->month.month);
     return day >= 1 && day <= count ? day : 0;
 }
@@ -644,7 +686,9 @@ static void history_ui_calendar_grid_pressed(lv_event_t *event)
 {
     touch_history_ui_t *ui = lv_event_get_user_data(event);
     lv_indev_t *indev = lv_indev_get_act();
-    if (!ui || !indev)
+    /* The old month remains painted while its replacement is read. Ignore
+     * coordinates until the requested month is coherent and published. */
+    if (!ui || !indev || ui->calendar_loading)
         return;
     lv_point_t point;
     lv_indev_get_point(indev, &point);
@@ -1409,7 +1453,7 @@ static void history_ui_calendar_draw(lv_event_t *event)
     if (!ui || !draw_ctx || !grid || !ui->has_month)
         return;
 
-    static const char *const weekday[] = {"S", "M", "T", "W", "T", "F", "S"};
+    static const char *const weekday[] = {"M", "T", "W", "T", "F", "S", "S"};
     lv_area_t area;
     lv_obj_get_content_coords(grid, &area);
     lv_coord_t width = lv_area_get_width(&area);
@@ -1424,7 +1468,13 @@ static void history_ui_calendar_draw(lv_event_t *event)
                              HISTORY_UI_COLOR_TERTIARY, LV_TEXT_ALIGN_CENTER);
     }
 
-    int first = history_ui_first_weekday(ui->month.year, ui->month.month);
+    unsigned selected_year = 0;
+    unsigned selected_month = 0;
+    unsigned selected_day = 0;
+    bool selected_date_valid = ui->has_night && history_ui_parse_day(
+        ui->night.day, &selected_year, &selected_month, &selected_day);
+    int first = history_ui_calendar_first_column(
+        ui->month.year, ui->month.month);
     int days = history_ui_days_in_month(ui->month.year, ui->month.month);
     for (int day = 1; day <= days; ++day) {
         int slot = first + day - 1;
@@ -1437,11 +1487,17 @@ static void history_ui_calendar_draw(lv_event_t *event)
         bool therapy = (ui->month.therapy_days & bit) != 0;
         bool oximetry = (ui->month.oximetry_days & bit) != 0;
         bool has_data = therapy || oximetry;
+        bool selected = selected_date_valid &&
+                        selected_year == ui->month.year &&
+                        selected_month == ui->month.month &&
+                        selected_day == (unsigned)day;
         history_ui_draw_rect(draw_ctx, &cell,
-                             has_data ? HISTORY_UI_COLOR_ROW
+                             selected ? 0xe9edf3
+                                      : has_data ? HISTORY_UI_COLOR_ROW
                                       : HISTORY_UI_COLOR_BASE,
-                             has_data ? LV_OPA_COVER : LV_OPA_50, 8,
-                             HISTORY_UI_COLOR_BORDER, has_data ? 1 : 0);
+                             selected || has_data ? LV_OPA_COVER : LV_OPA_50,
+                             8, HISTORY_UI_COLOR_BORDER,
+                             selected ? 0 : (has_data ? 1 : 0));
         char number[4];
         snprintf(number, sizeof(number), "%d", day);
         lv_area_t number_area = {
@@ -1449,7 +1505,8 @@ static void history_ui_calendar_draw(lv_event_t *event)
         };
         history_ui_draw_text(draw_ctx, &number_area, number,
                              &somnotrace_space_grotesk_medium_15,
-                             has_data ? HISTORY_UI_COLOR_TEXT
+                             selected ? HISTORY_UI_COLOR_CARD
+                                      : has_data ? HISTORY_UI_COLOR_TEXT
                                       : HISTORY_UI_COLOR_DISABLED,
                              LV_TEXT_ALIGN_CENTER);
         lv_coord_t dot_y = cell.y2 - 5;
@@ -1489,6 +1546,8 @@ static lv_obj_t *history_ui_dot(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
                                 uint32_t color)
 {
     lv_obj_t *dot = lv_obj_create(parent);
+    if (!dot)
+        return NULL;
     lv_obj_set_pos(dot, x, y);
     lv_obj_set_size(dot, 8, 8);
     lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
@@ -1500,6 +1559,20 @@ static lv_obj_t *history_ui_dot(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
     return dot;
 }
 
+static void history_ui_discard_calendar(touch_history_ui_t *ui)
+{
+    if (!ui)
+        return;
+    if (ui->calendar_overlay)
+        lv_obj_del(ui->calendar_overlay);
+    ui->calendar_overlay = NULL;
+    ui->calendar_title = NULL;
+    ui->calendar_previous = NULL;
+    ui->calendar_next = NULL;
+    ui->calendar_grid = NULL;
+    ui->calendar_status = NULL;
+}
+
 static esp_err_t history_ui_ensure_calendar(touch_history_ui_t *ui)
 {
     if (!ui)
@@ -1508,69 +1581,89 @@ static esp_err_t history_ui_ensure_calendar(touch_history_ui_t *ui)
         return ESP_OK;
 
     ui->calendar_overlay = history_ui_container(
-        ui->detail, 0, 0, TOUCH_HISTORY_UI_DETAIL_WIDTH,
-        TOUCH_HISTORY_UI_HEIGHT, HISTORY_UI_COLOR_PANEL,
-        HISTORY_UI_COLOR_BORDER);
+        ui->left, 0, HISTORY_UI_CALENDAR_Y, TOUCH_HISTORY_UI_LIST_WIDTH,
+        HISTORY_UI_CALENDAR_H, HISTORY_UI_COLOR_PANEL, 0);
     if (!ui->calendar_overlay)
         return ESP_ERR_NO_MEM;
 
     ui->calendar_title = history_ui_label(
         ui->calendar_overlay, "Recorded nights",
-        &somnotrace_space_grotesk_semibold_19, HISTORY_UI_COLOR_TEXT,
-        76, 12, 430, 28);
+        &somnotrace_space_grotesk_semibold_15, HISTORY_UI_COLOR_TEXT,
+        HISTORY_UI_HIT, 10,
+        TOUCH_HISTORY_UI_LIST_WIDTH - 2 * HISTORY_UI_HIT, 24);
+    if (!ui->calendar_title)
+        goto no_memory;
     lv_obj_set_style_text_align(ui->calendar_title, LV_TEXT_ALIGN_CENTER, 0);
 
     ui->calendar_previous = history_ui_button(
-        ui->calendar_overlay, 12, 4, HISTORY_UI_HIT, HISTORY_UI_HIT,
+        ui->calendar_overlay, 0, 0, HISTORY_UI_HIT, HISTORY_UI_HIT,
         HISTORY_UI_COLOR_CONTROL);
-    history_ui_button_label(ui->calendar_previous, "<",
-                            &somnotrace_space_grotesk_semibold_19,
-                            HISTORY_UI_COLOR_TEXT);
+    if (!ui->calendar_previous)
+        goto no_memory;
+    lv_obj_set_style_radius(ui->calendar_previous, LV_RADIUS_CIRCLE, 0);
+    lv_obj_t *previous_label = history_ui_button_label(
+        ui->calendar_previous, "<", &somnotrace_space_grotesk_semibold_19,
+        HISTORY_UI_COLOR_TEXT);
+    if (!previous_label)
+        goto no_memory;
     lv_obj_add_event_cb(ui->calendar_previous,
                         history_ui_month_previous_pressed,
                         LV_EVENT_PRESSED, ui);
 
     ui->calendar_next = history_ui_button(
-        ui->calendar_overlay, 584, 4, HISTORY_UI_HIT, HISTORY_UI_HIT,
+        ui->calendar_overlay, TOUCH_HISTORY_UI_LIST_WIDTH - HISTORY_UI_HIT,
+        0, HISTORY_UI_HIT, HISTORY_UI_HIT,
         HISTORY_UI_COLOR_CONTROL);
-    history_ui_button_label(ui->calendar_next, ">",
-                            &somnotrace_space_grotesk_semibold_19,
-                            HISTORY_UI_COLOR_TEXT);
+    if (!ui->calendar_next)
+        goto no_memory;
+    lv_obj_set_style_radius(ui->calendar_next, LV_RADIUS_CIRCLE, 0);
+    lv_obj_t *next_label = history_ui_button_label(
+        ui->calendar_next, ">", &somnotrace_space_grotesk_semibold_19,
+        HISTORY_UI_COLOR_TEXT);
+    if (!next_label)
+        goto no_memory;
     lv_obj_add_event_cb(ui->calendar_next, history_ui_month_next_pressed,
-                        LV_EVENT_PRESSED, ui);
-
-    ui->calendar_close = history_ui_button(
-        ui->calendar_overlay, 636, 4, HISTORY_UI_HIT, HISTORY_UI_HIT,
-        HISTORY_UI_COLOR_CONTROL);
-    history_ui_button_label(ui->calendar_close, "x",
-                            &somnotrace_space_grotesk_semibold_17,
-                            HISTORY_UI_COLOR_TEXT);
-    lv_obj_add_event_cb(ui->calendar_close, history_ui_close_calendar_pressed,
                         LV_EVENT_PRESSED, ui);
 
     /* One touch/draw grid keeps 42 calendar cells from becoming 42 objects. */
     ui->calendar_grid = history_ui_container(
-        ui->calendar_overlay, 16, 56, 660, 300, HISTORY_UI_COLOR_CARD, 0);
+        ui->calendar_overlay, 0, HISTORY_UI_CALENDAR_GRID_Y,
+        TOUCH_HISTORY_UI_LIST_WIDTH, HISTORY_UI_CALENDAR_GRID_H,
+        HISTORY_UI_COLOR_CARD, 0);
+    if (!ui->calendar_grid)
+        goto no_memory;
     lv_obj_add_flag(ui->calendar_grid, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(ui->calendar_grid, history_ui_calendar_draw,
                         LV_EVENT_DRAW_MAIN, ui);
     lv_obj_add_event_cb(ui->calendar_grid, history_ui_calendar_grid_pressed,
                         LV_EVENT_PRESSED, ui);
 
-    history_ui_dot(ui->calendar_overlay, 22, 383, HISTORY_UI_COLOR_LIVE);
-    history_ui_label(ui->calendar_overlay, "AirSense",
-                     &somnotrace_space_grotesk_medium_13,
-                     HISTORY_UI_COLOR_SECONDARY, 36, 376, 100, 22);
-    history_ui_dot(ui->calendar_overlay, 142, 383, HISTORY_UI_COLOR_O2);
-    history_ui_label(ui->calendar_overlay, "O2 Ring",
-                     &somnotrace_space_grotesk_medium_13,
-                     HISTORY_UI_COLOR_SECONDARY, 156, 376, 100, 22);
-    history_ui_label(ui->calendar_overlay,
-                     "Empty days stay visible and cannot be selected",
-                     &somnotrace_space_grotesk_medium_13,
-                     HISTORY_UI_COLOR_TERTIARY, 276, 376, 390, 22);
+    lv_obj_t *therapy_dot = history_ui_dot(
+        ui->calendar_overlay, 16, 365, HISTORY_UI_COLOR_LIVE);
+    lv_obj_t *therapy_label = history_ui_label(
+        ui->calendar_overlay, "AirSense", &somnotrace_space_grotesk_medium_13,
+        HISTORY_UI_COLOR_SECONDARY, 30, 358, 96, 22);
+    lv_obj_t *oximetry_dot = history_ui_dot(
+        ui->calendar_overlay, 150, 365, HISTORY_UI_COLOR_O2);
+    lv_obj_t *oximetry_label = history_ui_label(
+        ui->calendar_overlay, "O₂ Ring", &somnotrace_space_grotesk_medium_13,
+        HISTORY_UI_COLOR_SECONDARY, 164, 358, 104, 22);
+    if (!therapy_dot || !therapy_label || !oximetry_dot || !oximetry_label)
+        goto no_memory;
+    ui->calendar_status = history_ui_label(
+        ui->calendar_overlay, "Could not read this month",
+        &somnotrace_ibm_plex_mono_semibold_11, HISTORY_UI_COLOR_FAULT,
+        10, 384, TOUCH_HISTORY_UI_LIST_WIDTH - 20, 18);
+    if (!ui->calendar_status)
+        goto no_memory;
+    lv_obj_set_style_text_align(ui->calendar_status, LV_TEXT_ALIGN_CENTER, 0);
+    history_ui_set_hidden(ui->calendar_status, true);
     history_ui_set_hidden(ui->calendar_overlay, true);
     return ESP_OK;
+
+no_memory:
+    history_ui_discard_calendar(ui);
+    return ESP_ERR_NO_MEM;
 }
 
 static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
@@ -1596,9 +1689,9 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
     ui->list_segment_button = history_ui_button(
         ui->list_segment, 0, 0, TOUCH_HISTORY_UI_LIST_WIDTH / 2,
         HISTORY_UI_HIT, HISTORY_UI_COLOR_ROW_ACTIVE);
-    history_ui_button_label(ui->list_segment_button, "List",
-                            &somnotrace_space_grotesk_semibold_13,
-                            HISTORY_UI_COLOR_TEXT);
+    ui->list_segment_label = history_ui_button_label(
+        ui->list_segment_button, "List",
+        &somnotrace_space_grotesk_semibold_13, HISTORY_UI_COLOR_CARD);
     lv_obj_add_event_cb(ui->list_segment_button,
                         history_ui_close_calendar_pressed,
                         LV_EVENT_PRESSED, ui);
@@ -1606,9 +1699,9 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
         ui->list_segment, TOUCH_HISTORY_UI_LIST_WIDTH / 2, 0,
         TOUCH_HISTORY_UI_LIST_WIDTH / 2, HISTORY_UI_HIT,
         HISTORY_UI_COLOR_CARD);
-    history_ui_button_label(ui->calendar_button, "Calendar",
-                            &somnotrace_space_grotesk_semibold_13,
-                            HISTORY_UI_COLOR_TEXT);
+    ui->calendar_button_label = history_ui_button_label(
+        ui->calendar_button, "Calendar",
+        &somnotrace_space_grotesk_semibold_13, HISTORY_UI_COLOR_SECONDARY);
     lv_obj_add_event_cb(ui->calendar_button,
                         history_ui_open_calendar_pressed,
                         LV_EVENT_PRESSED, ui);
@@ -1983,6 +2076,31 @@ static const char *history_ui_default_stat_label(touch_history_signal_t signal,
 
 static void history_ui_update_list(touch_history_ui_t *ui)
 {
+    bool calendar = ui->rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR;
+    history_ui_set_hidden(ui->list_title, calendar);
+    history_ui_set_hidden(ui->jump_to_date, calendar);
+    history_ui_set_hidden(ui->list_viewport, calendar);
+    lv_obj_set_style_bg_color(
+        ui->list_segment_button,
+        history_ui_color(calendar ? HISTORY_UI_COLOR_CARD : 0xe9edf3), 0);
+    lv_obj_set_style_bg_color(
+        ui->calendar_button,
+        history_ui_color(calendar ? 0xe9edf3 : HISTORY_UI_COLOR_CARD), 0);
+    lv_obj_set_style_text_color(
+        ui->list_segment_label,
+        history_ui_color(calendar ? HISTORY_UI_COLOR_SECONDARY
+                                  : HISTORY_UI_COLOR_CARD), 0);
+    lv_obj_set_style_text_color(
+        ui->calendar_button_label,
+        history_ui_color(calendar ? HISTORY_UI_COLOR_CARD
+                                  : HISTORY_UI_COLOR_SECONDARY), 0);
+
+    /* The Calendar owns this rail below the persistent segment. Keep the
+     * recycled List tree dormant until List is selected again; rewriting its
+     * hidden labels on graph/loading revisions only burns LVGL time and heap. */
+    if (calendar)
+        return;
+
     for (size_t i = 0; i < TOUCH_HISTORY_UI_LIST_ROWS; ++i) {
         history_ui_row_t *row = &ui->rows[i];
         bool present = i < ui->day_count;
@@ -2031,15 +2149,6 @@ static void history_ui_update_list(touch_history_ui_t *ui)
              (unsigned)ui->page.total_days);
     lv_label_set_text(ui->list_title, count);
     history_ui_set_enabled(ui->jump_to_date, ui->page.total_days > 0);
-    bool calendar = ui->state == TOUCH_HISTORY_UI_STATE_CALENDAR;
-    lv_obj_set_style_bg_color(
-        ui->list_segment_button,
-        history_ui_color(calendar ? HISTORY_UI_COLOR_CARD
-                                  : HISTORY_UI_COLOR_ROW_ACTIVE), 0);
-    lv_obj_set_style_bg_color(
-        ui->calendar_button,
-        history_ui_color(calendar ? HISTORY_UI_COLOR_ROW_ACTIVE
-                                  : HISTORY_UI_COLOR_CARD), 0);
 }
 
 static void history_ui_update_header(touch_history_ui_t *ui)
@@ -2385,13 +2494,14 @@ static void history_ui_update_state(touch_history_ui_t *ui)
     }
 }
 
-static void history_ui_update_calendar(touch_history_ui_t *ui)
+static void history_ui_update_calendar(touch_history_ui_t *ui,
+                                       bool grid_content_changed)
 {
     if (!ui->calendar_overlay)
         return;
     history_ui_set_hidden(ui->calendar_overlay,
-                          ui->state != TOUCH_HISTORY_UI_STATE_CALENDAR);
-    if (ui->state != TOUCH_HISTORY_UI_STATE_CALENDAR)
+                          ui->rail_mode != TOUCH_HISTORY_UI_RAIL_CALENDAR);
+    if (ui->rail_mode != TOUCH_HISTORY_UI_RAIL_CALENDAR)
         return;
     char title[48];
     static const char *const months[] = {
@@ -2403,17 +2513,34 @@ static void history_ui_update_calendar(touch_history_ui_t *ui)
                  months[ui->month.month - 1], (unsigned)ui->month.year);
     else
         history_ui_copy_text(title, sizeof(title), "Recorded nights");
-    lv_label_set_text(ui->calendar_title, title);
-    history_ui_set_enabled(ui->calendar_previous, ui->can_previous_month);
-    history_ui_set_enabled(ui->calendar_next, ui->can_next_month);
-    lv_obj_invalidate(ui->calendar_grid);
-    lv_obj_move_foreground(ui->calendar_overlay);
+    history_ui_set_label_text_if_changed(ui->calendar_title, title);
+    history_ui_set_enabled(ui->calendar_previous,
+                           ui->can_previous_month && !ui->calendar_loading);
+    history_ui_set_enabled(ui->calendar_next,
+                           ui->can_next_month && !ui->calendar_loading);
+    if (ui->calendar_loading) {
+        history_ui_set_label_text_if_changed(
+            ui->calendar_status, "Loading month…");
+        lv_obj_set_style_text_color(
+            ui->calendar_status, history_ui_color(HISTORY_UI_COLOR_LIVE), 0);
+    } else if (ui->calendar_read_error) {
+        history_ui_set_label_text_if_changed(
+            ui->calendar_status, "Could not read this month");
+        lv_obj_set_style_text_color(
+            ui->calendar_status, history_ui_color(HISTORY_UI_COLOR_FAULT), 0);
+    }
+    history_ui_set_hidden(
+        ui->calendar_status,
+        !ui->calendar_loading && !ui->calendar_read_error);
+    if (grid_content_changed)
+        lv_obj_invalidate(ui->calendar_grid);
 }
 
 static esp_err_t history_ui_validate_snapshot(
     const touch_history_ui_snapshot_t *snapshot)
 {
     if (!snapshot || snapshot->state > TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN ||
+        snapshot->rail_mode > TOUCH_HISTORY_UI_RAIL_CALENDAR ||
         snapshot->day_count > TOUCH_HISTORY_UI_LIST_ROWS ||
         snapshot->session_count > TOUCH_HISTORY_UI_MAX_SESSIONS ||
         snapshot->event_count > TOUCH_HISTORY_UI_MAX_VISIBLE_EVENTS ||
@@ -2476,6 +2603,28 @@ static bool history_ui_graph_content_changed(
     return false;
 }
 
+static bool history_ui_calendar_grid_content_changed(
+    const touch_history_ui_t *ui,
+    const touch_history_ui_snapshot_t *snapshot)
+{
+    if (!ui->calendar_overlay || ui->rail_mode != snapshot->rail_mode)
+        return true;
+    bool next_has_month = snapshot->month != NULL;
+    if (ui->has_month != next_has_month)
+        return true;
+    if (next_has_month &&
+        (ui->month.year != snapshot->month->year ||
+         ui->month.month != snapshot->month->month ||
+         ui->month.days_in_month != snapshot->month->days_in_month ||
+         ui->month.therapy_days != snapshot->month->therapy_days ||
+         ui->month.oximetry_days != snapshot->month->oximetry_days))
+        return true;
+    bool next_has_night = snapshot->night != NULL;
+    if (ui->has_night != next_has_night)
+        return true;
+    return next_has_night && strcmp(ui->night.day, snapshot->night->day) != 0;
+}
+
 esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
                                  const touch_history_ui_snapshot_t *snapshot)
 {
@@ -2486,8 +2635,11 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
         return result;
     bool graph_content_changed =
         history_ui_graph_content_changed(ui, snapshot);
+    bool calendar_grid_content_changed =
+        history_ui_calendar_grid_content_changed(ui, snapshot);
 
     ui->state = snapshot->state;
+    ui->rail_mode = snapshot->rail_mode;
     ui->day_count = snapshot->day_count;
     memset(ui->days, 0, sizeof(ui->days));
     if (snapshot->day_count)
@@ -2532,6 +2684,8 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     }
     ui->can_previous_month = snapshot->can_previous_month;
     ui->can_next_month = snapshot->can_next_month;
+    ui->calendar_loading = snapshot->calendar_loading;
+    ui->calendar_read_error = snapshot->calendar_read_error;
     ui->signal = snapshot->selected_signal;
     for (size_t i = 0; i < TOUCH_HISTORY_UI_STAT_COUNT; ++i) {
         history_ui_copy_text(ui->stats[i].label,
@@ -2562,7 +2716,7 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     ui->cursor_valid = snapshot->cursor_valid;
     ui->cursor_ms = snapshot->cursor_valid ? snapshot->cursor_ms : 0;
 
-    if (ui->state == TOUCH_HISTORY_UI_STATE_CALENDAR) {
+    if (ui->rail_mode == TOUCH_HISTORY_UI_RAIL_CALENDAR) {
         result = history_ui_ensure_calendar(ui);
         if (result != ESP_OK)
             return result;
@@ -2575,7 +2729,7 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     history_ui_update_graph_header(ui);
     history_ui_update_event_status(ui);
     history_ui_update_state(ui);
-    history_ui_update_calendar(ui);
+    history_ui_update_calendar(ui, calendar_grid_content_changed);
     if (graph_content_changed)
         lv_obj_invalidate(ui->graph);
     return ESP_OK;

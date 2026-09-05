@@ -602,7 +602,7 @@ require(display, r"device_settings_set_lcd_therapy_mode", "native therapy displa
 require(display, r"netprov_save_config\(&cfg\)", "native Wi-Fi credential save")
 require(display, r"LV_KEYBOARD_MODE_TEXT_LOWER", "on-screen Wi-Fi keyboard")
 for api in (
-    "touch_history_load_page", "touch_history_load_night_ex",
+    "touch_history_load_page_ex", "touch_history_load_night_ex",
     "touch_history_load_view_ex", "touch_history_load_stats_ex",
 ):
     require(history_controller, rf"\b{api}\b",
