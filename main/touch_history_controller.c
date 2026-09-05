@@ -20,6 +20,7 @@
 #define HISTORY_CONTROLLER_ZOOM_22_MIN_MS (22LL * 60LL * 1000LL)
 #define HISTORY_CONTROLLER_ZOOM_10_MIN_MS (10LL * 60LL * 1000LL)
 #define HISTORY_CONTROLLER_ZOOM_5_MIN_MS  (5LL * 60LL * 1000LL)
+#define HISTORY_CONTROLLER_PROGRESS_STEP  20U
 
 static const char *const TAG = "history_ctl";
 
@@ -51,6 +52,8 @@ typedef struct {
     uint16_t year;
     uint8_t month;
     bool therapy_only;
+    /* Suppresses the user-facing Cancel control. The underlying read remains
+     * generation-cancellable so tab changes and newer intents stop stale I/O. */
     bool non_cancellable;
     char day[9];
 } history_job_t;
@@ -172,9 +175,13 @@ static void history_controller_progress(void *context, uint16_t per_mille)
         (uint32_t)operation->span * per_mille / 1000U);
     bool changed = false;
     if (xSemaphoreTake(controller->mutex, portMAX_DELAY) == pdTRUE) {
+        uint16_t current = controller->model.progress_per_mille;
+        bool meaningful_step = mapped > current &&
+            ((uint16_t)(mapped - current) >= HISTORY_CONTROLLER_PROGRESS_STEP ||
+             mapped >= 1000U);
         if (!controller->closing && controller->active &&
             controller->generation == operation->generation &&
-            controller->model.progress_per_mille < mapped) {
+            meaningful_step) {
             controller->model.progress_per_mille = mapped;
             controller->revision++;
             changed = true;
@@ -376,8 +383,12 @@ static esp_err_t history_controller_load_view(
     history_operation_context_t operation_context;
     touch_history_operation_t operation = history_controller_operation(
         &operation_context, controller, job->generation, 50, 900);
-    const touch_history_operation_t *cancellable = job->non_cancellable
-        ? NULL : &operation;
+    /* Zoom/pan overlays deliberately hide Cancel, but a newer generation or a
+     * deactivated History page must still interrupt the card read. Progress is
+     * not rendered for that overlay, so suppress its otherwise costly updates. */
+    if (job->non_cancellable)
+        operation.progress = NULL;
+    const touch_history_operation_t *interruptible = &operation;
 
     if (load_night) {
         bool same_night = model->has_night &&
@@ -386,7 +397,7 @@ static esp_err_t history_controller_load_view(
         memset(model->sessions, 0, sizeof(model->sessions));
         esp_err_t night_result = touch_history_load_night_ex(
             job->day, &model->night, model->sessions,
-            TOUCH_HISTORY_UI_MAX_SESSIONS, cancellable);
+            TOUCH_HISTORY_UI_MAX_SESSIONS, interruptible);
         if (night_result != ESP_OK) {
             ESP_LOGE(TAG, "night day=%s failed: %s (0x%x)", job->day,
                      esp_err_to_name(night_result), (unsigned)night_result);
@@ -433,7 +444,7 @@ static esp_err_t history_controller_load_view(
         job->day, model->signal,
         fit ? 0 : model->window_start_ms,
         fit ? 0 : model->window_end_ms,
-        model->therapy_only, next_overview, cancellable);
+        model->therapy_only, next_overview, interruptible);
     bool graph_missing = graph_result == ESP_ERR_NOT_FOUND;
     if (graph_result != ESP_OK && !graph_missing) {
         ESP_LOGE(TAG,
@@ -452,7 +463,7 @@ static esp_err_t history_controller_load_view(
     esp_err_t stats_result = touch_history_load_stats_ex(
         job->day, model->signal, model->window_start_ms,
         model->window_end_ms, model->therapy_only, next_stats,
-        cancellable);
+        interruptible);
     if (stats_result == TOUCH_HISTORY_ERR_CANCELLED ||
         stats_result == ESP_ERR_NO_MEM)
         return stats_result;
@@ -466,7 +477,7 @@ static esp_err_t history_controller_load_view(
                  esp_err_to_name(stats_result), (unsigned)stats_result);
 
     esp_err_t events_result = history_controller_load_events(
-        job, model, cancellable);
+        job, model, interruptible);
     if (events_result == TOUCH_HISTORY_ERR_CANCELLED ||
         events_result == ESP_ERR_NO_MEM)
         return events_result;
@@ -1540,9 +1551,10 @@ void touch_history_controller_handle_intent(
                 centre += intent->relative;
             int64_t start = 0, end = 0;
             history_controller_clamp_window(&model, centre, span, &start, &end);
-            history_controller_queue_view(
-                controller, &model, model.signal, start, end,
-                model.therapy_only, true);
+            if (start != model.window_start_ms || end != model.window_end_ms)
+                history_controller_queue_view(
+                    controller, &model, model.signal, start, end,
+                    model.therapy_only, true);
         }
         break;
     case TOUCH_HISTORY_UI_INTENT_SET_CURSOR: {

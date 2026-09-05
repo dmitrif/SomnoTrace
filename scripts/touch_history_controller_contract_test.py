@@ -74,8 +74,9 @@ require(SOURCE, r"controller->generation\s*==\s*job->generation.*?"
 require(SOURCE, r"history_controller_should_cancel.*?"
                 r"history_controller_generation_current",
         "cancellable initial operation")
-require(SOURCE, r"job->non_cancellable\s*\?\s*NULL\s*:\s*&operation",
-        "non-cancellable ranged read")
+require(SOURCE, r"job->non_cancellable.*?operation\.progress\s*=\s*NULL.*?"
+                r"interruptible\s*=\s*&operation",
+        "hidden-cancel ranged read remains generation-interruptible")
 require(SOURCE, r"ZOOM_LOADING", "explicit zoom-loading state")
 
 # Complete navigation surface: initial newest selection, seven-row paging,

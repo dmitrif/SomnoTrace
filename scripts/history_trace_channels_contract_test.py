@@ -61,8 +61,9 @@ require(CONTROLLER, r"HISTORY_CONTROLLER_QUEUE_LENGTH\s+1U.*?xQueueOverwrite",
 require(CONTROLLER, r"controller->generation\s*==\s*job->generation.*?"
                     r"controller->model\s*=\s*\*result",
         "stale result rejection")
-require(CONTROLLER, r"job->non_cancellable\s*\?\s*NULL\s*:\s*&operation",
-        "non-cancellable zoom read")
+require(CONTROLLER, r"job->non_cancellable.*?operation\.progress\s*=\s*NULL.*?"
+                    r"interruptible\s*=\s*&operation",
+        "hidden-cancel zoom remains generation-interruptible")
 require(CONTROLLER, r"touch_history_load_view_ex\(.*?window_start_ms.*?"
                     r"window_end_ms", "selected-window reread")
 

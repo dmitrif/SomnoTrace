@@ -179,8 +179,8 @@ struct touch_history_ui {
     bool therapy_only;
     bool cursor_valid;
     int64_t cursor_ms;
-    int64_t graph_press_timestamp_ms;
-    lv_coord_t graph_last_x;
+    lv_coord_t graph_press_x;
+    int32_t graph_drag_delta_x;
     bool graph_dragged;
     uint16_t progress_per_mille;
     char status_text[TOUCH_HISTORY_UI_TEXT_MAX];
@@ -692,25 +692,65 @@ static int64_t history_ui_graph_time_at_x(const touch_history_ui_t *ui,
            (duration * (absolute_x - left)) / (right - left);
 }
 
+static void history_ui_finish_graph_pan(touch_history_ui_t *ui)
+{
+    if (!ui)
+        return;
+
+    bool dragged = ui->graph_dragged;
+    int32_t delta_x = ui->graph_drag_delta_x;
+    ui->graph_drag_delta_x = 0;
+    if (!dragged || delta_x == 0 || !ui->has_overview)
+        return;
+
+    lv_area_t area;
+    lv_obj_get_content_coords(ui->graph, &area);
+    lv_coord_t width = lv_area_get_width(&area) -
+                       HISTORY_UI_GRAPH_PAD_L - HISTORY_UI_GRAPH_PAD_R;
+    int64_t duration = ui->overview.axis_end_ms - ui->overview.axis_start_ms;
+    if (width <= 0 || duration <= 0)
+        return;
+
+    int64_t delta_ms = -((int64_t)delta_x * duration) / width;
+    if (delta_ms == 0)
+        return;
+    history_ui_emit(ui, TOUCH_HISTORY_UI_INTENT_PAN_RELATIVE, delta_ms,
+                    ui->cursor_ms, ui->selected_row, ui->signal,
+                    ui->has_night ? ui->night.day : NULL);
+}
+
 static void history_ui_graph_touch(lv_event_t *event)
 {
     touch_history_ui_t *ui = lv_event_get_user_data(event);
+    if (!ui)
+        return;
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        history_ui_finish_graph_pan(ui);
+        return;
+    }
+    if (!ui->has_overview)
+        return;
+
     lv_indev_t *indev = lv_indev_get_act();
-    if (!ui || !indev || !ui->has_overview)
+    if (!indev)
         return;
     lv_point_t point;
     lv_indev_get_point(indev, &point);
-    lv_event_code_t code = lv_event_get_code(event);
     if (code == LV_EVENT_PRESSED) {
-        ui->graph_last_x = point.x;
+        ui->graph_press_x = point.x;
+        ui->graph_drag_delta_x = 0;
         ui->graph_dragged = false;
-        ui->graph_press_timestamp_ms = history_ui_graph_time_at_x(
-            ui, point.x);
         return;
     }
     if (code == LV_EVENT_SHORT_CLICKED) {
-        if (ui->graph_dragged)
+        /* LVGL sends RELEASED before SHORT_CLICKED. Keep the drag marker
+         * through the release handler so a completed pan cannot also place a
+         * cursor at the release point. */
+        if (ui->graph_dragged) {
+            ui->graph_dragged = false;
             return;
+        }
         bool clear_cursor = false;
         if (ui->cursor_valid &&
             ui->overview.axis_end_ms > ui->overview.axis_start_ms) {
@@ -744,22 +784,9 @@ static void history_ui_graph_touch(lv_event_t *event)
     }
     if (code != LV_EVENT_PRESSING)
         return;
-    lv_coord_t delta_x = point.x - ui->graph_last_x;
-    if (delta_x > -4 && delta_x < 4)
-        return;
-    lv_area_t area;
-    lv_obj_get_content_coords(ui->graph, &area);
-    lv_coord_t width = lv_area_get_width(&area) -
-                       HISTORY_UI_GRAPH_PAD_L - HISTORY_UI_GRAPH_PAD_R;
-    int64_t duration = ui->overview.axis_end_ms - ui->overview.axis_start_ms;
-    if (width <= 0 || duration <= 0)
-        return;
-    int64_t delta_ms = -((int64_t)delta_x * duration) / width;
-    ui->graph_last_x = point.x;
-    ui->graph_dragged = true;
-    history_ui_emit(ui, TOUCH_HISTORY_UI_INTENT_PAN_RELATIVE, delta_ms,
-                    ui->cursor_ms, ui->selected_row, ui->signal,
-                    ui->has_night ? ui->night.day : NULL);
+    ui->graph_drag_delta_x = (int32_t)point.x - (int32_t)ui->graph_press_x;
+    if (ui->graph_drag_delta_x <= -4 || ui->graph_drag_delta_x >= 4)
+        ui->graph_dragged = true;
 }
 
 static void history_ui_draw_line(lv_draw_ctx_t *draw_ctx, uint32_t color,
@@ -1731,6 +1758,10 @@ static esp_err_t history_ui_build_objects(touch_history_ui_t *ui,
                         LV_EVENT_PRESSING, ui);
     lv_obj_add_event_cb(ui->graph, history_ui_graph_touch,
                         LV_EVENT_SHORT_CLICKED, ui);
+    lv_obj_add_event_cb(ui->graph, history_ui_graph_touch,
+                        LV_EVENT_RELEASED, ui);
+    lv_obj_add_event_cb(ui->graph, history_ui_graph_touch,
+                        LV_EVENT_PRESS_LOST, ui);
     ui->graph_title = history_ui_label(
         ui->graph, "Breathing / Flow · L/s",
         &somnotrace_space_grotesk_semibold_15, HISTORY_UI_COLOR_TEXT,
@@ -2405,6 +2436,36 @@ static esp_err_t history_ui_validate_snapshot(
     return ESP_OK;
 }
 
+static bool history_ui_graph_content_changed(
+    const touch_history_ui_t *ui,
+    const touch_history_ui_snapshot_t *snapshot)
+{
+    bool next_has_overview = snapshot->overview != NULL;
+    if (ui->has_overview != next_has_overview ||
+        ui->signal != snapshot->selected_signal ||
+        ui->therapy_only != snapshot->therapy_only ||
+        ui->cursor_valid != snapshot->cursor_valid ||
+        (ui->cursor_valid && ui->cursor_ms != snapshot->cursor_ms) ||
+        ui->session_count != snapshot->session_count ||
+        ui->event_count != snapshot->event_count ||
+        (ui->state == TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN) !=
+            (snapshot->state == TOUCH_HISTORY_UI_STATE_DEGRADED_UNKNOWN))
+        return true;
+    if (next_has_overview &&
+        memcmp(&ui->overview, snapshot->overview,
+               sizeof(ui->overview)) != 0)
+        return true;
+    if (snapshot->session_count &&
+        memcmp(ui->sessions, snapshot->sessions,
+               snapshot->session_count * sizeof(ui->sessions[0])) != 0)
+        return true;
+    if (snapshot->event_count &&
+        memcmp(ui->events, snapshot->events,
+               snapshot->event_count * sizeof(ui->events[0])) != 0)
+        return true;
+    return false;
+}
+
 esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
                                  const touch_history_ui_snapshot_t *snapshot)
 {
@@ -2413,6 +2474,8 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     esp_err_t result = history_ui_validate_snapshot(snapshot);
     if (result != ESP_OK)
         return result;
+    bool graph_content_changed =
+        history_ui_graph_content_changed(ui, snapshot);
 
     ui->state = snapshot->state;
     ui->day_count = snapshot->day_count;
@@ -2503,6 +2566,7 @@ esp_err_t touch_history_ui_apply(touch_history_ui_t *ui,
     history_ui_update_event_status(ui);
     history_ui_update_state(ui);
     history_ui_update_calendar(ui);
-    lv_obj_invalidate(ui->graph);
+    if (graph_content_changed)
+        lv_obj_invalidate(ui->graph);
     return ESP_OK;
 }
