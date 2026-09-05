@@ -23,8 +23,19 @@
 
 #pragma once
 
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+/**
+ * Start the retained internal-RAM task that reclaims WithCaps tasks.
+ *
+ * ESP-IDF's self-delete path creates a temporary cleanup task for every
+ * vTaskDeleteWithCaps(NULL).  That allocation aborts when internal RAM is
+ * exhausted.  SomnoTrace instead creates one static reaper during boot, while
+ * memory pressure is bounded, and routes all later self-deletion through it.
+ */
+esp_err_t psram_task_init(void);
 
 /**
  * Create a FreeRTOS task with its stack in PSRAM and TCB in internal RAM.
@@ -38,9 +49,9 @@
  *
  * For long-lived tasks (run forever): just call this once and forget.
  * A self-deleting task MUST call psram_task_delete(NULL), never
- * vTaskDelete(NULL).  The ESP-IDF WithCaps deletion API arranges cleanup from
- * another task so both the PSRAM stack and the internal TCB are reclaimed
- * after the task can no longer be running on either core.
+ * vTaskDelete(NULL).  The retained reaper then calls the ESP-IDF WithCaps
+ * deletion API from another task, reclaiming both the PSRAM stack and internal
+ * TCB without allocating a one-shot cleanup task under peak memory pressure.
  *
  * @param task_func   Task function
  * @param name        FreeRTOS task name

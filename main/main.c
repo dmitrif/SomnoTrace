@@ -38,6 +38,7 @@
 #include "sd_storage.h"
 #include "session_writer.h"
 #include "nvs_writer.h"
+#include "psram_task.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
@@ -290,6 +291,10 @@ void app_main(void)
     /* 1c. Log reset reason and check for crash core dump from previous boot.
      * Must be after log_stream_init() so output is captured. */
     crash_diag_check();
+
+    /* Create the static WithCaps reaper before finite PSRAM-backed workers can
+     * start. Later task cleanup performs no internal-heap allocation. */
+    ESP_ERROR_CHECK(psram_task_init());
 
     /* 2. Start button monitors. */
     bsp_power_start_button_monitor(5000);   /* PWR 5 s = power off */

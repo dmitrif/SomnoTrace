@@ -7,6 +7,7 @@
 #include "first_run_setup.h"
 #include "log_stream.h"
 #include "nvs_writer.h"
+#include "psram_task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -54,6 +55,8 @@ void app_main(void)
         nvs = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs);
+
+    ESP_ERROR_CHECK(psram_task_init());
 
     /* Exercise the same bounded retained feed as hardware so the native Logs
      * screen is a live acceptance surface rather than a disconnected mock. */

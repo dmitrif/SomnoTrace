@@ -35,13 +35,25 @@ def function_body(source: str, name: str) -> str:
 
 # The ESP-IDF WithCaps API owns both buffers and has the matching deletion API.
 # Plain xTaskCreateStaticPinnedToCore leaves caller-provided buffers allocated
-# forever after vTaskDelete(), which was the original leak.
+# forever after vTaskDelete(), which was the original leak. ESP-IDF's NULL
+# deletion path creates a temporary internal-stack task and aborts on OOM, so a
+# retained static reaper must always invoke the non-self deletion path.
 create = function_body(HELPER_C, "psram_task_create")
 delete = function_body(HELPER_C, "psram_task_delete")
+init = function_body(HELPER_C, "psram_task_init")
+reaper = function_body(HELPER_C, "psram_task_reaper")
 assert "xTaskCreatePinnedToCoreWithCaps" in create
 assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in create
 assert "heap_caps_malloc(stack_size" not in create
 assert "vTaskDeleteWithCaps(task)" in delete
+assert "vTaskDeleteWithCaps(victim)" in reaper
+assert "xTaskCreateStaticPinnedToCore" in init
+assert "xQueueCreateStatic" in init
+assert "vTaskDeleteWithCaps(NULL)" not in HELPER_C
+assert "xQueueSend(s_reaper_queue, &current, portMAX_DELAY)" in delete
+assert "vTaskSuspend(NULL)" in delete
+assert "psram_task_init" in (MAIN / "main.c").read_text(encoding="utf-8")
+assert "psram_task_init" in (MAIN / "main_qemu.c").read_text(encoding="utf-8")
 assert "psram_task_delete(TaskHandle_t task)" in HELPER_H
 
 # Audit every concrete helper call. A WithCaps task must not use plain

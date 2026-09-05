@@ -22,11 +22,64 @@
  */
 
 #include "psram_task.h"
+#include <stdlib.h>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/idf_additions.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "psram_task";
+
+#define PSRAM_REAPER_QUEUE_DEPTH 8
+#define PSRAM_REAPER_PRIORITY    (configMAX_PRIORITIES - 1)
+
+static StaticQueue_t s_reaper_queue_control;
+static uint8_t s_reaper_queue_storage[
+    PSRAM_REAPER_QUEUE_DEPTH * sizeof(TaskHandle_t)];
+static QueueHandle_t s_reaper_queue;
+static StaticTask_t s_reaper_task_control;
+static StackType_t s_reaper_task_stack[configMINIMAL_STACK_SIZE];
+static TaskHandle_t s_reaper_task;
+
+static void psram_task_reaper(void *arg)
+{
+    (void)arg;
+    while (true) {
+        TaskHandle_t victim = NULL;
+        if (xQueueReceive(s_reaper_queue, &victim, portMAX_DELAY) == pdTRUE &&
+            victim != NULL) {
+            /* This is deliberately never a self-delete. ESP-IDF therefore
+             * reclaims the WithCaps buffers directly and does not allocate its
+             * temporary cleanup task. */
+            vTaskDeleteWithCaps(victim);
+        }
+    }
+}
+
+esp_err_t psram_task_init(void)
+{
+    if (s_reaper_task != NULL)
+        return ESP_OK;
+
+    s_reaper_queue = xQueueCreateStatic(
+        PSRAM_REAPER_QUEUE_DEPTH, sizeof(TaskHandle_t),
+        s_reaper_queue_storage, &s_reaper_queue_control);
+    if (s_reaper_queue == NULL) {
+        ESP_LOGE(TAG, "failed to create retained task-reaper queue");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_reaper_task = xTaskCreateStaticPinnedToCore(
+        psram_task_reaper, "psram_reaper", configMINIMAL_STACK_SIZE, NULL,
+        PSRAM_REAPER_PRIORITY, s_reaper_task_stack, &s_reaper_task_control,
+        tskNO_AFFINITY);
+    if (s_reaper_task == NULL) {
+        ESP_LOGE(TAG, "failed to create retained task reaper");
+        s_reaper_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
 
 TaskHandle_t psram_task_create(TaskFunction_t task_func,
                                const char *name,
@@ -38,11 +91,15 @@ TaskHandle_t psram_task_create(TaskFunction_t task_func,
                                StaticTask_t **out_tcb)
 {
     /* xTaskCreateStaticPinnedToCore() cannot reclaim caller-provided buffers
-     * when a task deletes itself.  ESP-IDF's WithCaps pair records the same
-     * PSRAM stack/internal-TCB ownership and vTaskDeleteWithCaps() safely frees
-     * both, including for self-deletion. */
+     * when a task deletes itself. ESP-IDF's WithCaps pair records the PSRAM
+     * stack/internal-TCB ownership; our retained reaper performs deletion. */
     if (out_stack) *out_stack = NULL;
     if (out_tcb) *out_tcb = NULL;
+
+    if (s_reaper_task == NULL) {
+        ESP_LOGE(TAG, "cannot create %s before psram_task_init", name);
+        return NULL;
+    }
 
     TaskHandle_t h = NULL;
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
@@ -61,5 +118,25 @@ TaskHandle_t psram_task_create(TaskFunction_t task_func,
 
 void psram_task_delete(TaskHandle_t task)
 {
-    vTaskDeleteWithCaps(task);
+    TaskHandle_t current = xTaskGetCurrentTaskHandle();
+    if (task != NULL && task != current) {
+        vTaskDeleteWithCaps(task);
+        return;
+    }
+
+    if (s_reaper_task == NULL || s_reaper_queue == NULL) {
+        ESP_LOGE(TAG, "retained task reaper unavailable");
+        abort();
+    }
+
+    if (xQueueSend(s_reaper_queue, &current, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "could not enqueue task for reclamation");
+        abort();
+    }
+
+    /* The higher-priority reaper normally deletes us before this executes.
+     * Suspending also makes the handoff correct if it runs on the other core. */
+    vTaskSuspend(NULL);
+    ESP_LOGE(TAG, "reclaimed task unexpectedly resumed");
+    abort();
 }
