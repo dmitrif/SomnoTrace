@@ -53,9 +53,13 @@ static void load_driver_type(void)
 {
     /* Try NVS first */
     nvs_handle_t h;
+    bool forgotten = false;
     nvs_writer_lock();
     if (nvs_open(OX_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         uint8_t drv;
+        uint8_t forgotten_value = 0;
+        forgotten = nvs_get_u8(h, "forgotten", &forgotten_value) == ESP_OK &&
+                    forgotten_value == 1;
         if (nvs_get_u8(h, "driver", &drv) == ESP_OK && drv <= OX_DRIVER_LEGACY)
             s_driver_type = (ox_driver_t)drv;
         nvs_close(h);
@@ -63,7 +67,7 @@ static void load_driver_type(void)
     nvs_writer_unlock();
 
     /* Fall back to paired.json on SD */
-    if (s_driver_type == OX_DRIVER_OXYII) {
+    if (!forgotten && s_driver_type == OX_DRIVER_OXYII) {
         char drv[16] = {0};
         if (ox_store_load_paired(NULL, 0, NULL, 0, NULL, 0, NULL, 0,
                                  drv, sizeof(drv), NULL, 0)) {
@@ -357,8 +361,7 @@ esp_err_t oximeter_pair(const char *addr_str, ox_driver_t driver)
 
 esp_err_t oximeter_forget(void)
 {
-    s_active->forget();
-    return ESP_OK;
+    return s_active->forget();
 }
 
 const char *oximeter_get_status(void)

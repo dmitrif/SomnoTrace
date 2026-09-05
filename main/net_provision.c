@@ -1554,7 +1554,11 @@ static esp_err_t ox_pair_handler(httpd_req_t *req)
 
 static esp_err_t ox_forget_handler(httpd_req_t *req)
 {
-    oximeter_forget();
+    esp_err_t e = oximeter_forget();
+    if (e != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "forget failed");
+        return ESP_FAIL;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
