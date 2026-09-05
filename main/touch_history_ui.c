@@ -970,26 +970,15 @@ static const touch_history_event_t *history_ui_cursor_event(
 {
     if (!ui || !ui->cursor_valid)
         return NULL;
-    const touch_history_event_t *nearest = NULL;
-    uint64_t nearest_distance = UINT64_MAX;
-    int64_t tolerance = ui->overview.bin_width_ms
-                            ? (int64_t)ui->overview.bin_width_ms
-                            : 30000;
-    if (tolerance < 30000)
-        tolerance = 30000;
     for (size_t i = 0; i < ui->event_count; ++i) {
         const touch_history_event_t *event = &ui->events[i];
         if (ui->cursor_ms >= event->start_ms &&
             ui->cursor_ms <= event->end_ms)
             return event;
-        int64_t delta = ui->cursor_ms - event->start_ms;
-        uint64_t distance = delta < 0 ? (uint64_t)-delta : (uint64_t)delta;
-        if (distance < nearest_distance) {
-            nearest_distance = distance;
-            nearest = event;
-        }
     }
-    return nearest_distance <= (uint64_t)tolerance ? nearest : NULL;
+    /* Do not attach a merely nearby event to the cursor. That would imply an
+     * exact temporal relationship which the selected display bin cannot prove. */
+    return NULL;
 }
 
 static void history_ui_draw_unreadable_spans(touch_history_ui_t *ui,
@@ -1362,20 +1351,43 @@ static void history_ui_graph_draw(lv_event_t *event)
             nearest_distance = distance;
         }
     }
-    char clock[16], value[24], tooltip[96];
+    char clock[16], value[24], upper[24], summary[64], tooltip[128];
     history_ui_format_clock(ui->cursor_ms, true, clock, sizeof(clock));
     bool value_available = history_ui_point_visible(ui, nearest);
     history_ui_format_x100(ui->overview.value_x100[nearest], value_available,
                            value, sizeof(value));
+    bool cursor_envelope = value_available &&
+                           ui->overview.aggregation ==
+                               TOUCH_HISTORY_AGGREGATION_ENVELOPE &&
+                           (ui->overview.flags[nearest] &
+                            TOUCH_HISTORY_POINT_UPPER_VALID);
+    if (cursor_envelope) {
+        history_ui_format_x100(ui->overview.upper_x100[nearest], true,
+                               upper, sizeof(upper));
+        snprintf(summary, sizeof(summary), "Bin min/max %s/%s %s",
+                 value, upper, s_signal_units[ui->signal]);
+    } else {
+        const char *summary_label = "Bin mean";
+        if (ui->overview.aggregation == TOUCH_HISTORY_AGGREGATION_MINIMUM)
+            summary_label = "Bin min";
+        else if (ui->overview.aggregation == TOUCH_HISTORY_AGGREGATION_MAXIMUM)
+            summary_label = "Bin max";
+        else if (ui->overview.aggregation == TOUCH_HISTORY_AGGREGATION_ENVELOPE)
+            summary_label = "Bin min/max";
+        snprintf(summary, sizeof(summary), "%s %s %s",
+                 summary_label, value, s_signal_units[ui->signal]);
+    }
     const touch_history_event_t *cursor_event = history_ui_cursor_event(ui);
-    snprintf(tooltip, sizeof(tooltip), "%s  %s %s%s%s",
-             clock, value, s_signal_units[ui->signal],
+    snprintf(tooltip, sizeof(tooltip), "%s  %s%s%s",
+             clock, summary,
              cursor_event ? "  Event " : "",
              cursor_event ? history_ui_event_code(cursor_event->type) : "");
-    lv_coord_t tooltip_width = 250;
+    lv_coord_t tooltip_width = 360;
     lv_coord_t tooltip_x = cursor_x + 8;
     if (tooltip_x + tooltip_width > right)
         tooltip_x = cursor_x - tooltip_width - 8;
+    if (tooltip_x < left)
+        tooltip_x = left;
     lv_area_t tooltip_area = {
         tooltip_x, top + 5, tooltip_x + tooltip_width, top + 38,
     };
@@ -2059,9 +2071,7 @@ static void history_ui_update_header(touch_history_ui_t *ui)
                                 start, sizeof(start));
         history_ui_format_clock(ui->night.axis_end_ms, false,
                                 end, sizeof(end));
-        snprintf(subtitle, sizeof(subtitle), "%u session%s · %s – %s",
-                 (unsigned)ui->night.session_count,
-                 ui->night.session_count == 1 ? "" : "s", start, end);
+        snprintf(subtitle, sizeof(subtitle), "Review window %s–%s", start, end);
     } else {
         history_ui_copy_text(subtitle, sizeof(subtitle),
                              "Newest completed night opens automatically");
@@ -2073,7 +2083,8 @@ static void history_ui_update_header(touch_history_ui_t *ui)
         if (ui->usage_target_known)
             snprintf(usage, sizeof(usage), "%d h %02d m · %s",
                      day->usage_min / 60, day->usage_min % 60,
-                     ui->usage_on_target ? "on target" : "below target");
+                     ui->usage_on_target ? "≥4 h adherence"
+                                         : "<4 h adherence");
         else
             snprintf(usage, sizeof(usage), "%d h %02d m",
                      day->usage_min / 60, day->usage_min % 60);
@@ -2290,7 +2301,7 @@ static void history_ui_update_event_status(touch_history_ui_t *ui)
             text = "Event markers truncated · zoom in";
             color = HISTORY_UI_COLOR_AMBER;
         } else if (ui->event_total_count == 0) {
-            text = "No OA/CA/H/RERA events recorded";
+            text = "No OA/CA/H/A/RERA events recorded";
         } else if (ui->event_count == 0) {
             text = "No respiratory events in this window";
         } else {

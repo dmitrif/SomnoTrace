@@ -2711,7 +2711,7 @@ static void build_home_page(lv_obj_t *home)
                     &s_pressure_label, &s_metric_bars[0]);
     make_value_card(home, 865, UI_PANEL_Y, "LEAK", "L/min",
                     &s_leak_label, &s_metric_bars[1]);
-    make_value_card(home, 710, 171, "RESP RATE", "bpm",
+    make_value_card(home, 710, 171, "RESP RATE", "br/min",
                     &s_resp_label, &s_metric_bars[2]);
     make_value_card(home, 865, 171, "FLOW LIMIT", "",
                     &s_flow_lim_label, &s_metric_bars[3]);

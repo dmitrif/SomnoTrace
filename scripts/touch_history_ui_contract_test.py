@@ -75,7 +75,7 @@ require(
     r"channels\[i\]\.pill = history_ui_container\(.*?,\s*31,",
     "31-pixel visual channel pill inside its 44-pixel target",
 )
-assert "on target" in SOURCE and "usage_target_known" in HEADER
+assert "≥4 h adherence" in SOURCE and "usage_target_known" in HEADER
 require(
     SOURCE,
     r"history_ui_format_day_compact.*?"
@@ -244,7 +244,7 @@ assert "cursor_valid" in SOURCE and "history_ui_cursor_event" in SOURCE
 for rich_graph_copy in (
     "SESSION %u · %s–%s",
     "Markers: OA · CA · H · A · RERA",
-    "No OA/CA/H/RERA events recorded",
+    "No OA/CA/H/A/RERA events recorded",
     "Event data unavailable",
     "Event markers truncated · zoom in",
     "Trend review only. Not a diagnosis or a prescription.",
@@ -265,7 +265,7 @@ require(
 require(
     SOURCE,
     r"event_state == TOUCH_HISTORY_UI_EVENT_STATE_COMPLETE.*?"
-    r"event_total_count == 0.*?No OA/CA/H/RERA events recorded.*?"
+    r"event_total_count == 0.*?No OA/CA/H/A/RERA events recorded.*?"
     r"event_count == 0.*?No respiratory events in this window",
     "complete-zero and empty-window event copy",
 )
