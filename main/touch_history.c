@@ -693,8 +693,12 @@ static bool valid_day(const char *name)
 static bool history_operation_cancelled(
     const touch_history_operation_t *operation)
 {
-    return operation && operation->should_cancel &&
-           operation->should_cancel(operation->context);
+    /* A real-time recording outranks all History I/O. This also covers web
+     * readers with no UI cancellation callback: once the writer publishes a
+     * pending claim, every bounded read loop unwinds and releases UPLOAD. */
+    return sd_storage_recording_pending() ||
+           (operation && operation->should_cancel &&
+            operation->should_cancel(operation->context));
 }
 
 static void history_operation_progress(

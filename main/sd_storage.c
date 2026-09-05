@@ -30,6 +30,7 @@
 #include <dirent.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
@@ -90,8 +91,12 @@ static void capacity_cache_store(uint64_t free_bytes, uint64_t total_bytes)
 static SemaphoreHandle_t s_lease_mutex = NULL;   /* guards the counters  */
 static SemaphoreHandle_t s_export_sem = NULL;    /* EXPORT/DESTRUCTIVE   */
 static volatile int s_recording = 0;
+static volatile int s_recording_waiters = 0;
 static volatile int s_uploading = 0;
 static volatile int s_destructive = 0;
+
+#define SD_RECORDING_PRIORITY_WAIT_MS 500U
+#define SD_RECORDING_PRIORITY_POLL_MS 5U
 
 static void lease_init_once(void)
 {
@@ -329,14 +334,30 @@ bool sd_storage_recording_begin(void)
 {
     lease_init_once();
     if (!s_lease_mutex) return false;
+
+    const int64_t deadline_us = esp_timer_get_time() +
+        (int64_t)SD_RECORDING_PRIORITY_WAIT_MS * 1000;
     xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
-    if (s_uploading > 0 || s_destructive > 0) {
+    s_recording_waiters++;
+    bool claimed = false;
+    while (s_destructive == 0) {
+        if (s_uploading == 0) {
+            s_recording++;
+            claimed = true;
+            break;
+        }
+        if (esp_timer_get_time() >= deadline_us)
+            break;
         xSemaphoreGive(s_lease_mutex);
-        return false;
+        vTaskDelay(pdMS_TO_TICKS(SD_RECORDING_PRIORITY_POLL_MS));
+        xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
     }
-    s_recording++;
+    s_recording_waiters--;
     xSemaphoreGive(s_lease_mutex);
-    return true;
+    if (!claimed) {
+        ESP_LOGW(TAG, "recording claim timed out behind card maintenance");
+    }
+    return claimed;
 }
 
 void sd_storage_recording_end(void)
@@ -350,6 +371,11 @@ void sd_storage_recording_end(void)
 bool sd_storage_recording_active(void)
 {
     return s_recording > 0;
+}
+
+bool sd_storage_recording_pending(void)
+{
+    return s_recording_waiters > 0;
 }
 
 bool sd_storage_lease_acquire(sd_lease_t role, uint32_t timeout_ms)
@@ -399,7 +425,8 @@ bool sd_storage_lease_acquire(sd_lease_t role, uint32_t timeout_ms)
             return false;
         }
         xSemaphoreTake(s_lease_mutex, portMAX_DELAY);
-        if (s_recording > 0 || s_destructive > 0) {
+        if (s_recording > 0 || s_recording_waiters > 0 ||
+            s_destructive > 0) {
             xSemaphoreGive(s_lease_mutex);
             xSemaphoreGiveRecursive(s_export_sem);
             ESP_LOGW(TAG, "upload lease refused: recording in progress");

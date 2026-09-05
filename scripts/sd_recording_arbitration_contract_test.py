@@ -37,15 +37,23 @@ discard = function_body(WRITER, "session_start_discard")
 assert "bool sd_storage_recording_begin(void);" in HEADER
 assert "s_destructive" in STORAGE
 
-# Recording checks reader/destructive ownership and publishes its claim while
-# holding the one arbitration mutex.
+# Recording publishes waiter priority, waits only for a bounded reader handoff,
+# and publishes its claim while holding the one arbitration mutex.
 lock_at = begin.find("xSemaphoreTake(s_lease_mutex")
-check_at = begin.find("s_uploading > 0 || s_destructive > 0")
+waiter_at = begin.find("s_recording_waiters++")
+destructive_check_at = begin.find("while (s_destructive == 0)")
+reader_check_at = begin.find("if (s_uploading == 0)")
 claim_at = begin.find("s_recording++")
 unlock_at = begin.rfind("xSemaphoreGive(s_lease_mutex")
-assert -1 not in (lock_at, check_at, claim_at, unlock_at)
-assert lock_at < check_at < claim_at < unlock_at
-assert "return false" in begin and "return true" in begin
+assert -1 not in (
+    lock_at, waiter_at, destructive_check_at, reader_check_at, claim_at,
+    unlock_at,
+)
+assert lock_at < waiter_at < destructive_check_at < reader_check_at \
+       < claim_at < unlock_at
+assert "SD_RECORDING_PRIORITY_WAIT_MS" in begin
+assert "s_recording_waiters--" in begin
+assert "return claimed" in begin
 
 # UPLOAD and DESTRUCTIVE publish their mutually-exclusive claim beneath that
 # same mutex after acquiring the file-operation gate. A recording claim that
@@ -53,7 +61,7 @@ assert "return false" in begin and "return true" in begin
 upload = acquire[acquire.find("case SD_LEASE_UPLOAD:") :]
 upload_sem = upload.find("xSemaphoreTakeRecursive(s_export_sem")
 upload_lock = upload.find("xSemaphoreTake(s_lease_mutex")
-upload_check = upload.find("s_recording > 0 || s_destructive > 0")
+upload_check = upload.find("s_recording > 0 || s_recording_waiters > 0")
 upload_claim = upload.find("s_uploading++")
 assert -1 not in (upload_sem, upload_lock, upload_check, upload_claim)
 assert upload_sem < upload_lock < upload_check < upload_claim

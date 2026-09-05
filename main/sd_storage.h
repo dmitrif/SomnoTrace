@@ -116,6 +116,9 @@ typedef enum {
 bool sd_storage_recording_begin(void);
 void sd_storage_recording_end(void);
 bool sd_storage_recording_active(void);
+/* True during the bounded priority handoff from a bulk reader to a new raw
+ * recording. Cancellable readers should stop promptly when this is set. */
+bool sd_storage_recording_pending(void);
 
 /* Acquire/release a storage lease.  timeout_ms may be 0 to fail fast.
  * Returns false if the lease could not be acquired (busy, or refused
