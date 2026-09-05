@@ -17,6 +17,8 @@ SCREEN_SCENARIOS = {
     "manage": (2, (694, 563)),
 }
 INTERACTION_SCENARIOS = (
+    "history-calendar",
+    "history-calendar-selection",
     "setup-wifi",
     "devices",
     "system-display-controls",
@@ -166,6 +168,23 @@ def drag(process, log_path, stream, start, end, steps=8):
 
 
 def interaction_sequence(name):
+    if name == "history-calendar":
+        return (
+            # The deterministic 480-bin graph still has to paint before the
+            # next emulated press can be sampled reliably on a loaded host.
+            ((512, 563), 2.5, "emulated touch selected page 1"),
+            ((232, 90), 0.75, None),
+        )
+    if name == "history-calendar-selection":
+        return (
+            ((512, 563), 2.5, "emulated touch selected page 1"),
+            ((232, 90), 0.5, None),
+            # Browse to August, then choose its final recorded night. Calendar
+            # must remain selected while only the right detail is replaced.
+            ((38, 135), 0.75, None),
+            ((36, 433), 1.0, "day=20260831"),
+            ((575, 204), 1.0, "signal=1"),
+        )
     if name == "setup-wifi":
         return (
             ((66, 31), 0.8, "QEMU setup preview ready"),
@@ -246,6 +265,19 @@ def bright_samples(payload, bounds, threshold=80, step=2):
     return count
 
 
+def light_surface_samples(payload, bounds, threshold=180, step=2):
+    """Count near-neutral light surface samples, excluding bright accent ink."""
+    x1, y1, x2, y2 = bounds
+    count = 0
+    for y in range(y1, y2, step):
+        row = y * 1024 * 3
+        for x in range(x1, x2, step):
+            offset = row + x * 3
+            if min(payload[offset:offset + 3]) >= threshold:
+                count += 1
+    return count
+
+
 def validate_persistent_shell(name, payload, representative, interaction):
     """Reject transient screenshots taken before a touch redraw has landed."""
     if name == "setup-wifi":
@@ -277,6 +309,24 @@ def validate_persistent_shell(name, payload, representative, interaction):
         # surface also proves the row release/click was processed.
         if bright_samples(payload, (27, 137, 326, 203), 120) < 800:
             raise AssertionError("representative History night is not selected")
+
+    if name in ("history-calendar", "history-calendar-selection"):
+        # Use the inverted Calendar segment and compact selected-day cell as
+        # calendar-specific signatures. A populated List cannot satisfy these
+        # checks, and a legacy detail-pane overlay cannot satisfy the graph.
+        if light_surface_samples(payload, (164, 72, 300, 110)) < 1000:
+            raise AssertionError("History Calendar segment is not selected")
+        if light_surface_samples(payload, (20, 72, 156, 110)) > 100:
+            raise AssertionError("History List segment remained selected")
+        selected_cell = ((60, 192, 100, 234)
+                         if name == "history-calendar"
+                         else (18, 410, 58, 452))
+        if light_surface_samples(payload, selected_cell) < 250:
+            raise AssertionError("selected calendar day is not highlighted")
+        if light_surface_samples(payload, (27, 137, 304, 203)) > 300:
+            raise AssertionError("History List content did not leave the rail")
+        if bright_samples(payload, (335, 125, 1000, 500)) < 800:
+            raise AssertionError("History calendar covered the night detail")
 
     if name in (
         "devices", "system-display-controls",
