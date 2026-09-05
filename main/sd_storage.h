@@ -93,10 +93,11 @@ bool sd_storage_reserve_for_recording(void);
  * itself and can be refused while a session is recording.
  *
  * Roles:
- *   EXPORT      — EDF generation / day rebuild.  Mutually exclusive with
- *                 other EXPORT work and with DESTRUCTIVE work.  Allowed
- *                 during recording (a mask-off break starts a new session
- *                 while the previous one still needs exporting).
+ *   EXPORT      — EDF generation / day rebuild and O2 Ring filesystem I/O.
+ *                 Mutually exclusive with other EXPORT work and with
+ *                 DESTRUCTIVE work.  Allowed during recording (a mask-off
+ *                 break starts a new session while the previous one still
+ *                 needs exporting).
  *   DESTRUCTIVE — recreate/delete/reset/format.  Refused while recording
  *                 or while an export or upload is in progress.
  *   UPLOAD      — reads a day folder.  Excluded from concurrent EXPORT so
