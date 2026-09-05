@@ -72,6 +72,7 @@ python3 scripts/first_run_setup_lifecycle_contract_test.py
 python3 scripts/timezone_catalog_contract_test.py
 python3 scripts/netprov_scan_contract_test.py
 python3 scripts/ota_memory_safety_contract_test.py
+python3 scripts/ota_rollback_contract_test.py
 python3 scripts/oximetry_contract_test.py
 python3 scripts/log_stream_retained_contract_test.py
 python3 scripts/log_stream_recent_contract_test.py
