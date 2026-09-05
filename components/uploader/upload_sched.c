@@ -320,6 +320,15 @@ static bool run_backend(backend_rt_t *r, int max_days)
         }
     }
 
+    /* Card discovery is part of the upload transaction too. Previously the
+     * bundle and O2 trees were walked before this lease, so format/unmount
+     * could invalidate FATFS while the scheduler was only building its work
+     * list. Hold one lease from the first card read through the last upload. */
+    if (!uploader_lease_take(LEASE_WAIT_MS)) {
+        ESP_LOGI(TAG, "%s: storage busy, deferring", be->id);
+        return false;
+    }
+
     /* Bundle changes on every export (STR.edf is cumulative), so a changed
      * bundle alone is reason enough to connect for SMB. */
     upload_bundle_ref_t bundle;
@@ -327,7 +336,11 @@ static bool run_backend(backend_rt_t *r, int max_days)
     bool bundle_changed = have_bundle &&
                           (upload_index_bundle_ok_fp(r->slot) != bundle.fp);
     upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs) { set_be_state(r, SB_IDLE); return false; }
+    if (!ox_refs) {
+        uploader_lease_give();
+        set_be_state(r, SB_IDLE);
+        return false;
+    }
     int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
     int ox_pending = upload_ox_pending(ox_refs, n_ox, r->slot);
 
@@ -337,6 +350,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
         xSemaphoreTake(s_lock, portMAX_DELAY);
         r->cur_day[0] = '\0';
         xSemaphoreGive(s_lock);
+        uploader_lease_give();
         return false;
     }
     if (!have_bundle && (n_days > 0 || bundle_changed)) {
@@ -344,6 +358,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
          * packages are self-contained and may upload before any EDF exists. */
         free(ox_refs);
         set_be_state(r, SB_IDLE);
+        uploader_lease_give();
         return false;
     }
 
@@ -357,6 +372,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
                      "next session upload", be->id);
             free(ox_refs);
             set_be_state(r, SB_IDLE);
+            uploader_lease_give();
             return false;
         }
 
@@ -378,16 +394,11 @@ static bool run_backend(backend_rt_t *r, int max_days)
                      "them to — nothing to do", be->id);
             free(ox_refs);
             set_be_state(r, SB_IDLE);
+            uploader_lease_give();
             return false;
         }
         days[n_days++] = attach;
         bundle_only_run = true;
-    }
-
-    if (!uploader_lease_take(LEASE_WAIT_MS)) {
-        ESP_LOGI(TAG, "%s: storage busy, deferring", be->id);
-        free(ox_refs);
-        return false;
     }
 
     set_be_state(r, SB_UPLOADING);
@@ -666,7 +677,13 @@ static void run_pass(void)
         set_status("Memory low");
         return;
     }
+    if (!uploader_lease_take(LEASE_WAIT_MS)) {
+        free(ox_refs);
+        set_status("Storage busy");
+        return;
+    }
     int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
+    uploader_lease_give();
     for (int i = 0; i < s_n_rt; i++) {
         if (s_rt[i].state == SB_DISABLED) continue;
         pending += upload_index_backend_pending(s_rt[i].slot, max_days);
@@ -826,7 +843,12 @@ esp_err_t upload_sched_init(void)
 
     s_lock = xSemaphoreCreateMutex();
     s_queue = xQueueCreate(SCHED_QUEUE_LEN, sizeof(sched_ev_t));
-    upload_ox_init();
+    if (uploader_lease_take(LEASE_WAIT_MS)) {
+        upload_ox_init();
+        uploader_lease_give();
+    } else {
+        ESP_LOGW(TAG, "O2 upload state init deferred: storage busy");
+    }
     if (!s_lock || !s_queue) return ESP_ERR_NO_MEM;
 
     /* Pre-create runtime slots so the progress API can report a backend
