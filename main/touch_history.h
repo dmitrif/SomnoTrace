@@ -317,17 +317,27 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
 esp_err_t touch_history_load_page(size_t offset, touch_history_day_t *days,
                                   size_t capacity,
                                   touch_history_index_page_t *page);
+esp_err_t touch_history_load_page_ex(
+    size_t offset, touch_history_day_t *days, size_t capacity,
+    touch_history_index_page_t *page,
+    const touch_history_operation_t *operation);
 
 /* Resolve one recorded day to its newest-first global row without imposing a
  * retention cap. Used by Calendar so Previous/Next remains meaningful even
  * when the selected date is outside the currently recycled seven-row page. */
 esp_err_t touch_history_find_day_index(const char *day, size_t *index_out,
                                        size_t *total_days_out);
+esp_err_t touch_history_find_day_index_ex(
+    const char *day, size_t *index_out, size_t *total_days_out,
+    const touch_history_operation_t *operation);
 
 /* Compact calendar metadata.  This scans ready terminal sessions and ready
  * canonical O2 Ring packages, but never loads trace samples into the result. */
 esp_err_t touch_history_load_month(uint16_t year, uint8_t month,
                                    touch_history_month_t *month_out);
+esp_err_t touch_history_load_month_ex(
+    uint16_t year, uint8_t month, touch_history_month_t *month_out,
+    const touch_history_operation_t *operation);
 
 /* Night detail and session-boundary discovery.  `sessions` may be NULL only
  * when session_capacity is zero; total/returned/truncated are always reported. */

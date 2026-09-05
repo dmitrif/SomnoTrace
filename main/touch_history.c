@@ -4206,8 +4206,9 @@ static esp_err_t history_day_index_get(
     return ESP_OK;
 }
 
-static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
-                                             size_t *count_out)
+static esp_err_t history_collect_days_leased(
+    history_day_index_t **days_out, size_t *count_out,
+    const touch_history_operation_t *operation, const char *month_prefix)
 {
     if (!days_out || !count_out) return ESP_ERR_INVALID_ARG;
     *days_out = NULL;
@@ -4219,6 +4220,10 @@ static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
     DIR *dir = opendir(SD_STREAMS_DIR);
     if (!dir && errno != ENOENT && errno != ENOTDIR) result = ESP_FAIL;
     while (dir && result == ESP_OK) {
+        if (history_operation_cancelled(operation)) {
+            result = TOUCH_HISTORY_ERR_CANCELLED;
+            break;
+        }
         errno = 0;
         struct dirent *directory = readdir(dir);
         if (!directory) {
@@ -4226,12 +4231,14 @@ static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
             break;
         }
         if (!valid_day(directory->d_name)) continue;
+        if (month_prefix && strncmp(directory->d_name, month_prefix, 6))
+            continue;
         history_session_info_t *sessions = NULL;
         size_t session_count_value = 0;
         size_t skipped_sessions = 0;
         esp_err_t load = history_load_sessions_leased(
             directory->d_name, &sessions, &session_count_value,
-            &skipped_sessions, NULL);
+            &skipped_sessions, operation);
         free(sessions);
         if (load == ESP_ERR_NOT_FOUND) continue;
         if (load != ESP_OK) {
@@ -4257,6 +4264,10 @@ static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
     if (!ox_dir && result == ESP_OK && errno != ENOENT && errno != ENOTDIR)
         result = ESP_FAIL;
     while (ox_dir && result == ESP_OK) {
+        if (history_operation_cancelled(operation)) {
+            result = TOUCH_HISTORY_ERR_CANCELLED;
+            break;
+        }
         errno = 0;
         struct dirent *directory = readdir(ox_dir);
         if (!directory) {
@@ -4264,8 +4275,10 @@ static esp_err_t history_collect_days_leased(history_day_index_t **days_out,
             break;
         }
         if (!valid_day(directory->d_name)) continue;
+        if (month_prefix && strncmp(directory->d_name, month_prefix, 6))
+            continue;
         esp_err_t found = history_ox_metadata(
-            directory->d_name, NULL, NULL, NULL, NULL);
+            directory->d_name, NULL, NULL, NULL, operation);
         if (found == ESP_ERR_NOT_FOUND) continue;
         if (found != ESP_OK) {
             result = found;
@@ -4322,11 +4335,13 @@ static esp_err_t history_fill_day_summary(touch_history_day_t *day)
 
 static esp_err_t history_load_page_leased(
     size_t offset, touch_history_day_t *days, size_t capacity,
-    touch_history_index_page_t *page)
+    touch_history_index_page_t *page,
+    const touch_history_operation_t *operation)
 {
     history_day_index_t *index = NULL;
     size_t total = 0;
-    esp_err_t result = history_collect_days_leased(&index, &total);
+    esp_err_t result = history_collect_days_leased(
+        &index, &total, operation, NULL);
     if (result == ESP_ERR_NOT_FOUND) {
         page->offset = offset;
         return result;
@@ -4335,6 +4350,10 @@ static esp_err_t history_load_page_leased(
     size_t available = offset < total ? total - offset : 0;
     size_t returned = available < capacity ? available : capacity;
     for (size_t i = 0; i < returned; ++i) {
+        if (history_operation_cancelled(operation)) {
+            result = TOUCH_HISTORY_ERR_CANCELLED;
+            break;
+        }
         touch_history_day_t *day = &days[i];
         memset(day, 0, sizeof(*day));
         strlcpy(day->day, index[offset + i].day, sizeof(day->day));
@@ -4350,25 +4369,37 @@ static esp_err_t history_load_page_leased(
             result = ESP_OK;
         }
     }
-    page->offset = offset;
-    page->returned = returned;
-    page->total_days = total;
-    page->has_more = offset + returned < total;
+    if (result == ESP_OK) {
+        page->offset = offset;
+        page->returned = returned;
+        page->total_days = total;
+        page->has_more = offset + returned < total;
+    }
     free(index);
-    return ESP_OK;
+    return result;
 }
 
 esp_err_t touch_history_load_page(size_t offset, touch_history_day_t *days,
                                   size_t capacity,
                                   touch_history_index_page_t *page)
 {
+    return touch_history_load_page_ex(
+        offset, days, capacity, page, NULL);
+}
+
+esp_err_t touch_history_load_page_ex(
+    size_t offset, touch_history_day_t *days, size_t capacity,
+    touch_history_index_page_t *page,
+    const touch_history_operation_t *operation)
+{
     if (!days || capacity == 0 || !page ||
         capacity > SIZE_MAX / sizeof(*days)) return ESP_ERR_INVALID_ARG;
     memset(days, 0, capacity * sizeof(*days));
     memset(page, 0, sizeof(*page));
-    esp_err_t lease = history_lease_acquire();
+    esp_err_t lease = history_lease_acquire_operation(operation);
     if (lease != ESP_OK) return lease;
-    esp_err_t result = history_load_page_leased(offset, days, capacity, page);
+    esp_err_t result = history_load_page_leased(
+        offset, days, capacity, page, operation);
     sd_storage_lease_release(SD_LEASE_UPLOAD);
     return result;
 }
@@ -4376,21 +4407,35 @@ esp_err_t touch_history_load_page(size_t offset, touch_history_day_t *days,
 esp_err_t touch_history_find_day_index(const char *day, size_t *index_out,
                                        size_t *total_days_out)
 {
+    return touch_history_find_day_index_ex(
+        day, index_out, total_days_out, NULL);
+}
+
+esp_err_t touch_history_find_day_index_ex(
+    const char *day, size_t *index_out, size_t *total_days_out,
+    const touch_history_operation_t *operation)
+{
     if (!valid_day(day) || !index_out) return ESP_ERR_INVALID_ARG;
     *index_out = SIZE_MAX;
     if (total_days_out) *total_days_out = 0;
-    esp_err_t lease = history_lease_acquire();
+    esp_err_t lease = history_lease_acquire_operation(operation);
     if (lease != ESP_OK) return lease;
     history_day_index_t *index = NULL;
     size_t total = 0;
-    esp_err_t result = history_collect_days_leased(&index, &total);
+    esp_err_t result = history_collect_days_leased(
+        &index, &total, operation, NULL);
     if (result == ESP_OK) {
         for (size_t i = 0; i < total; ++i) {
+            if (history_operation_cancelled(operation)) {
+                result = TOUCH_HISTORY_ERR_CANCELLED;
+                break;
+            }
             if (strcmp(index[i].day, day) != 0) continue;
             *index_out = i;
             break;
         }
-        if (*index_out == SIZE_MAX) result = ESP_ERR_NOT_FOUND;
+        if (result == ESP_OK && *index_out == SIZE_MAX)
+            result = ESP_ERR_NOT_FOUND;
     }
     if (total_days_out) *total_days_out = total;
     free(index);
@@ -4412,23 +4457,36 @@ esp_err_t touch_history_load(touch_history_day_t *days, size_t capacity,
 esp_err_t touch_history_load_month(uint16_t year, uint8_t month_number,
                                    touch_history_month_t *month_out)
 {
+    return touch_history_load_month_ex(
+        year, month_number, month_out, NULL);
+}
+
+esp_err_t touch_history_load_month_ex(
+    uint16_t year, uint8_t month_number, touch_history_month_t *month_out,
+    const touch_history_operation_t *operation)
+{
     if (!month_out || year < 2000 || year > 2200 ||
         month_number < 1 || month_number > 12) return ESP_ERR_INVALID_ARG;
     memset(month_out, 0, sizeof(*month_out));
     month_out->year = year;
     month_out->month = month_number;
     month_out->days_in_month = history_days_in_month(year, month_number);
-    esp_err_t lease = history_lease_acquire();
-    if (lease != ESP_OK) return lease;
-    history_day_index_t *index = NULL;
-    size_t count = 0;
-    esp_err_t result = history_collect_days_leased(&index, &count);
-    if (result == ESP_ERR_NOT_FOUND) result = ESP_OK;
     char prefix[7];
     snprintf(prefix, sizeof(prefix), "%04u%02u", (unsigned)year,
              (unsigned)month_number);
+    esp_err_t lease = history_lease_acquire_operation(operation);
+    if (lease != ESP_OK) return lease;
+    history_day_index_t *index = NULL;
+    size_t count = 0;
+    esp_err_t result = history_collect_days_leased(
+        &index, &count, operation, prefix);
+    if (result == ESP_ERR_NOT_FOUND) result = ESP_OK;
     if (result == ESP_OK) {
         for (size_t i = 0; i < count; ++i) {
+            if (history_operation_cancelled(operation)) {
+                result = TOUCH_HISTORY_ERR_CANCELLED;
+                break;
+            }
             if (strncmp(index[i].day, prefix, 6)) continue;
             unsigned day_number = (unsigned)(index[i].day[6] - '0') * 10U +
                                   (unsigned)(index[i].day[7] - '0');

@@ -92,18 +92,22 @@ require(SOURCE, r"device summary unavailable.*?has_summary_error\s*=\s*true.*?"
                 r"history_collect_events_leased",
         "nonfatal optional Summary metadata failure")
 
-# Every public SD reader takes one upload/read lease. Cancellable APIs delegate
-# through their _ex implementation so the wait itself can observe cancellation.
+# Every public SD reader takes one upload/read lease. Compatibility APIs
+# delegate through their _ex implementation so controller cancellation applies
+# while waiting for the lease and during long directory scans.
 for api in ("touch_history_load_page", "touch_history_find_day_index",
             "touch_history_load_month"):
-    start = SOURCE.index(f"esp_err_t {api}(")
-    body = SOURCE[start:SOURCE.find("\n}", start) + 2]
-    assert "history_lease_acquire()" in body, f"{api} must acquire SD lease"
-    assert "sd_storage_lease_release(SD_LEASE_UPLOAD)" in body, (
-        f"{api} must release SD lease"
+    wrapper = SOURCE[
+        SOURCE.index(f"esp_err_t {api}("):
+        SOURCE.index(f"esp_err_t {api}_ex(")
+    ]
+    assert f"{api}_ex(" in wrapper, (
+        f"{api} compatibility API must delegate to its cancellable reader"
     )
-for api in ("touch_history_load_night_ex", "touch_history_load_overview_ex",
-            "touch_history_load_range_ex", "touch_history_load_events_ex"):
+for api in ("touch_history_load_page_ex", "touch_history_find_day_index_ex",
+            "touch_history_load_month_ex", "touch_history_load_night_ex",
+            "touch_history_load_overview_ex", "touch_history_load_range_ex",
+            "touch_history_load_events_ex"):
     start = SOURCE.index(f"esp_err_t {api}(")
     body = SOURCE[start:SOURCE.find("\n}", start) + 2]
     assert "history_lease_acquire_operation(operation)" in body, (
@@ -113,10 +117,25 @@ for api in ("touch_history_load_night_ex", "touch_history_load_overview_ex",
         f"{api} must release SD lease"
     )
 
-require(HEADER, r"touch_history_operation_t.*?touch_history_load_night_ex.*?"
+require(HEADER, r"touch_history_operation_t.*?touch_history_load_page_ex.*?"
+                r"touch_history_find_day_index_ex.*?"
+                r"touch_history_load_month_ex.*?"
+                r"touch_history_load_night_ex.*?"
                 r"touch_history_load_overview_ex.*?touch_history_load_range_ex.*?"
                 r"touch_history_load_events_ex",
         "cancellable detail read APIs")
+require(SOURCE, r"history_collect_days_leased.*?history_operation_cancelled.*?"
+                r"month_prefix.*?history_load_sessions_leased\(.*?operation.*?"
+                r"history_operation_cancelled.*?"
+                r"month_prefix.*?history_ox_metadata\(.*?operation\)",
+        "cancellable calendar/index directory scan")
+require(SOURCE, r"touch_history_load_month_ex.*?snprintf\(prefix.*?"
+                r"history_collect_days_leased\(.*?operation, prefix\)",
+        "month reads filter days before opening session or O2 files")
+require(SOURCE, r"touch_history_find_day_index_ex.*?"
+                r"history_operation_cancelled.*?TOUCH_HISTORY_ERR_CANCELLED.*?"
+                r"result == ESP_OK && \*index_out == SIZE_MAX",
+        "day-index cancellation is not collapsed into not-found")
 require(HEADER, r"half-open wall-clock window \[start_ms, end_ms\).*?"
                 r"touch_history_load_range",
         "documented native range reread contract")
