@@ -2311,15 +2311,18 @@ void session_writer_on_stream_data_raw(const char *json, int len)
         && !s_in_mask_fit && !s_in_cooldown
         && has_active_flow && has_therapy_pressure) {
         ESP_LOGI(TAG, ">>> THERAPY detected via non-zero flow (reboot mid-therapy?)");
-        bsp_display_set_therapy_active(true);
-        bsp_display_set_therapy_start_time(esp_timer_get_time());
-        session_writer_t *started = session_writer_start();
-        if (started) {
-            s_started_from_event = false;
-            s = active_session_lock();
+        if (!bsp_display_set_therapy_active(true)) {
+            ESP_LOGW(TAG, "therapy recovery ignored: restart already committed");
         } else {
-            ESP_LOGW(TAG, "session_writer_start() failed — "
-                     "graph active but NOT recording to SD");
+            bsp_display_set_therapy_start_time(esp_timer_get_time());
+            session_writer_t *started = session_writer_start();
+            if (started) {
+                s_started_from_event = false;
+                s = active_session_lock();
+            } else {
+                ESP_LOGW(TAG, "session_writer_start() failed — "
+                         "graph active but NOT recording to SD");
+            }
         }
     }
 
@@ -2540,12 +2543,15 @@ void session_writer_on_notification(session_writer_t *s, const cJSON *msg)
         }
         if (ev_type == AS11_EV_THERAPY_START) {
             ESP_LOGI(TAG, ">>> THERAPY START detected");
+            if (!bsp_display_set_therapy_active(true)) {
+                ESP_LOGW(TAG, "TherapyStart ignored: restart already committed");
+                NOTIFY_RETURN();
+            }
             crash_diag_note_activity("therapy_start");
             s_therapy_stopped = false;
             s_in_mask_fit = false;
             s_in_cooldown = false;
             therapy_alert_on_therapy_start();
-            bsp_display_set_therapy_active(true);
             bsp_display_set_therapy_start_time(esp_timer_get_time());
 
             int64_t now_us = esp_timer_get_time();

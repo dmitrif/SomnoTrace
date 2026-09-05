@@ -19,7 +19,7 @@ def require(text: str, pattern: str, label: str) -> None:
 def function(name: str) -> str:
     match = re.search(rf"static\s+[^\n]+\s+{name}\([^\)]*\)\s*\{{", DISPLAY)
     if not match:
-        match = re.search(rf"(?:void|esp_err_t)\s+{name}\([^\)]*\)\s*\{{", DISPLAY)
+        match = re.search(rf"(?:bool|void|esp_err_t)\s+{name}\([^\)]*\)\s*\{{", DISPLAY)
     if not match:
         raise AssertionError(f"missing function {name}")
     start = match.start()

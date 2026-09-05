@@ -77,6 +77,11 @@ require(display, r"CONFIG_SOMNOTRACE_BOARD_QEMU.*?if\s*\(!lv_disp_flush_is_last\
         "single completed QEMU composition handoff")
 require(display, r"QEMU UI first frame published",
         "initial-frame input synchronization")
+require(display,
+        r"if\s*\(start\s*&&\s*!bsp_display_set_therapy_active\(true\)\).*?"
+        r"result\s*=\s*ESP_ERR_INVALID_STATE.*?"
+        r"if\s*\(!start\)\s*\(void\)bsp_display_set_therapy_active\(false\)",
+        "QEMU therapy action respects a committed restart")
 require(root_cmake, r"LV_MEM_CUSTOM_ALLOC=somnotrace_lvgl_alloc",
         "QEMU exercises the 7-inch PSRAM-first LVGL allocator")
 require(lvgl_allocator, r"heap_caps_malloc_prefer.*?MALLOC_CAP_SPIRAM.*?MALLOC_CAP_INTERNAL",

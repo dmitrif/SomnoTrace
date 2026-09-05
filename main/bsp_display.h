@@ -52,8 +52,21 @@ void bsp_display_set_as11_paired(bool paired);
 void bsp_display_set_sd_ready(bool ready);
 void bsp_display_set_battery(int percent, bool charging);
 
-/* Therapy graph mode. Flow samples are expressed in litres per minute. */
-void bsp_display_set_therapy_active(bool active);
+/* Therapy graph mode. Flow samples are expressed in litres per minute.
+ * Activating returns false only after a therapy-safe restart has atomically
+ * committed; callers starting a session must then abandon that start. */
+bool bsp_display_set_therapy_active(bool active);
+/* Two-phase therapy-safe restart gate. Reserve before acquiring the SD lease;
+ * then commit only after the lease is held. A concurrent therapy start waits
+ * for cancellation and forces commit to fail, so it cannot lose its recording
+ * claim to a restart that subsequently defers. No state lock spans SD calls. */
+bool bsp_display_try_reserve_therapy_safe_restart(void);
+bool bsp_display_try_commit_therapy_safe_restart(void);
+void bsp_display_cancel_therapy_safe_restart(void);
+/* Hold this short-lived claim around a local command that can start therapy.
+ * It participates in the same restart reservation and must always be released. */
+bool bsp_display_reserve_therapy_start(void);
+void bsp_display_release_therapy_start(void);
 void bsp_display_push_flow(float flow_lpm);
 void bsp_display_push_leak(float leak_lpm);
 /* Live two-second metrics. Pass NAN for an unavailable value. */

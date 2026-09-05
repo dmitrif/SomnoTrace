@@ -1203,9 +1203,13 @@ static esp_err_t send_fig(uint16_t vcid, const char *json)
     return ESP_OK;
 }
 
-/* Send a raw binary FIG packet (for encrypted payloads). */
-static esp_err_t send_fig_raw(uint16_t vcid, const uint8_t *data, int len)
+/* Send a raw binary FIG packet (for encrypted payloads).  Once a GATT write
+ * has been accepted locally, a later timeout/error is indeterminate: the AS11
+ * may already have received enough of the request to act on it. */
+static esp_err_t send_fig_raw(uint16_t vcid, const uint8_t *data, int len,
+                              bool *may_have_reached_peer)
 {
+    if (may_have_reached_peer) *may_have_reached_peer = false;
     uint8_t *pkt = fig_tx_pkt();
     if (!pkt) return ESP_ERR_NO_MEM;
     if (len > TX_PAYLOAD_MAX) return ESP_ERR_INVALID_SIZE;
@@ -1223,6 +1227,7 @@ static esp_err_t send_fig_raw(uint16_t vcid, const uint8_t *data, int len)
             ESP_LOGE(TAG, "write chunk failed rc=%d off=%d", rc, off);
             return ESP_FAIL;
         }
+        if (may_have_reached_peer) *may_have_reached_peer = true;
         if (wait_op(5000) != 0) {
             ESP_LOGE(TAG, "write chunk timeout off=%d", off);
             return ESP_FAIL;
@@ -1234,8 +1239,10 @@ static esp_err_t send_fig_raw(uint16_t vcid, const uint8_t *data, int len)
 /* Send an encrypted JSON-RPC request on VCID 0x0397.
  * Encrypts with AES-256-CBC using the session key, then sends via send_fig_raw.
  * Returns ESP_OK on success. Caller should call wait_response() to get reply. */
-static esp_err_t send_rpc_encrypted(const char *json)
+static esp_err_t send_rpc_encrypted_tracked(const char *json,
+                                             bool *may_have_reached_peer)
 {
+    if (may_have_reached_peer) *may_have_reached_peer = false;
     if (!s_session_encrypted) {
         ESP_LOGE(TAG, "send_rpc_encrypted: no session key");
         return ESP_ERR_INVALID_STATE;
@@ -1256,9 +1263,15 @@ static esp_err_t send_rpc_encrypted(const char *json)
         return ESP_FAIL;
     }
 
-    esp_err_t ret = send_fig_raw(FIG_VCID_TX_ENC, enc, enc_len);
+    esp_err_t ret = send_fig_raw(FIG_VCID_TX_ENC, enc, enc_len,
+                                 may_have_reached_peer);
     free(enc);
     return ret;
+}
+
+static esp_err_t send_rpc_encrypted(const char *json)
+{
+    return send_rpc_encrypted_tracked(json, NULL);
 }
 
 /* Clear any stale RPC response state before sending a new RPC. */
@@ -2995,8 +3008,10 @@ cJSON *as11_ble_get_values(const char *const *keys, int n_keys)
     return result;
 }
 
-static esp_err_t therapy_command(const char *operation, const char *rpc)
+static esp_err_t therapy_command(const char *operation, const char *rpc,
+                                 bool *may_have_run)
 {
+    if (may_have_run) *may_have_run = false;
     if (!s_session_encrypted || strcmp(as11_ble_get_status(), AS11_STATUS_PAIRED) != 0) {
         ESP_LOGW(TAG, "%s: encrypted session is not ready", operation);
         return ESP_ERR_INVALID_STATE;
@@ -3009,10 +3024,14 @@ static esp_err_t therapy_command(const char *operation, const char *rpc)
     }
 
     clear_response();
-    if (send_rpc_encrypted(rpc) != ESP_OK) {
+    bool request_may_have_run = false;
+    esp_err_t send_result =
+        send_rpc_encrypted_tracked(rpc, &request_may_have_run);
+    if (may_have_run) *may_have_run = request_may_have_run;
+    if (send_result != ESP_OK) {
         ESP_LOGW(TAG, "%s: send failed", operation);
         xSemaphoreGive(s_cmd_mtx);
-        return ESP_FAIL;
+        return send_result;
     }
 
     cJSON *resp = wait_response(10000);
@@ -3024,6 +3043,9 @@ static esp_err_t therapy_command(const char *operation, const char *rpc)
 
     cJSON *err = cJSON_GetObjectItem(resp, "error");
     if (err) {
+        /* A received JSON-RPC error is a definitive rejection, not an
+         * indeterminate post-send outcome. */
+        if (may_have_run) *may_have_run = false;
         char *s = cJSON_Print(err);
         ESP_LOGW(TAG, "%s: RPC error: %s", operation, s ? s : "?");
         if (s) free(s);
@@ -3042,18 +3064,26 @@ esp_err_t as11_ble_stop_therapy(void)
 {
     return therapy_command(
         "stop_therapy",
-        "{\"id\":50,\"jsonrpc\":\"1.0\",\"method\":\"EnterStandby\"}");
+        "{\"id\":50,\"jsonrpc\":\"1.0\",\"method\":\"EnterStandby\"}",
+        NULL);
 }
 
-esp_err_t as11_ble_start_therapy(void)
+esp_err_t as11_ble_start_therapy_tracked(bool *may_have_started)
 {
+    if (!may_have_started) return ESP_ERR_INVALID_ARG;
     return therapy_command(
         "start_therapy",
-        "{\"id\":51,\"jsonrpc\":\"1.0\",\"method\":\"EnterTherapy\"}");
+        "{\"id\":51,\"jsonrpc\":\"1.0\",\"method\":\"EnterTherapy\"}",
+        may_have_started);
 }
 
-esp_err_t as11_ble_passthrough_rpc(const char *json_in, char **json_out, uint32_t timeout_ms)
+esp_err_t as11_ble_passthrough_rpc_tracked(const char *json_in,
+                                           char **json_out,
+                                           uint32_t timeout_ms,
+                                           bool *may_have_run)
 {
+    if (!may_have_run) return ESP_ERR_INVALID_ARG;
+    *may_have_run = false;
     if (!json_in || !*json_in || !json_out) return ESP_ERR_INVALID_ARG;
     *json_out = NULL;
 
@@ -3068,10 +3098,12 @@ esp_err_t as11_ble_passthrough_rpc(const char *json_in, char **json_out, uint32_
     }
 
     clear_response();
-    if (send_rpc_encrypted(json_in) != ESP_OK) {
+    esp_err_t send_result =
+        send_rpc_encrypted_tracked(json_in, may_have_run);
+    if (send_result != ESP_OK) {
         ESP_LOGE(TAG, "passthrough_rpc: send_rpc_encrypted failed");
         xSemaphoreGive(s_cmd_mtx);
-        return ESP_FAIL;
+        return send_result;
     }
 
     cJSON *resp = wait_response((int)timeout_ms);

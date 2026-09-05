@@ -101,6 +101,21 @@ assert "xSemaphoreTake(s_active->fill_mutex, 0)" in try_lock
 assert "portMAX_DELAY" not in try_lock
 assert "producer_commit(" not in worker
 
+# Both real therapy-start publishers must win the display lifecycle gate before
+# starting recording or alert state. If OTA has already committed its restart,
+# the event/heuristic is abandoned instead of reopening the race window.
+gate_call = "if (!bsp_display_set_therapy_active(true))"
+assert gate_call in stream
+assert stream.index(gate_call) < stream.index("session_writer_start()")
+assert "therapy recovery ignored: restart already committed" in stream
+assert gate_call in notify
+therapy_start = notify[notify.index("if (ev_type == AS11_EV_THERAPY_START)"):]
+assert therapy_start.index(gate_call) < therapy_start.index(
+    'crash_diag_note_activity("therapy_start")'
+) < therapy_start.index("therapy_alert_on_therapy_start()") \
+  < therapy_start.index("session_writer_start()")
+assert "TherapyStart ignored: restart already committed" in therapy_start
+
 # The worker refuses to operate on a command whose writer does not own the
 # open descriptors.  OPEN is rejected even when it repeats the same pointer.
 assert "if (file_owner != NULL)" in worker

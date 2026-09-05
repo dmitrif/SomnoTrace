@@ -264,6 +264,12 @@ static const char *TAG = "display_7b";
 #endif
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static ui_state_t s_state;
+/* Protected by s_state_lock together with s_state.therapy. Start waiters force
+ * a pending restart reservation to release its SD lease before they publish. */
+static bool s_therapy_safe_restart_reserving;
+static bool s_therapy_safe_restart_committed;
+static unsigned s_therapy_start_waiters;
+static unsigned s_therapy_start_claims;
 static ui_service_state_t s_services;
 static ui_service_state_t *s_render_services;
 static esp_lcd_panel_handle_t s_panel;
@@ -1935,31 +1941,38 @@ static void reboot_task(void *arg)
 {
     bool from_wifi_save = (intptr_t)arg == 1;
     vTaskDelay(pdMS_TO_TICKS(500));
-    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
+    if (bsp_display_is_therapy_active() || sd_storage_recording_active() ||
+        !bsp_display_try_reserve_therapy_safe_restart()) {
         bsp_display_set_notice("Restart cancelled: therapy recording is active");
         portENTER_CRITICAL(&s_state_lock);
         s_reboot_busy = false;
         if (from_wifi_save) s_wifi_save_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
+        netprov_lifecycle_release();
         vTaskDelete(NULL);
         return;
     }
-    if (!sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 1000)) {
+    if (!sd_storage_lease_acquire(SD_LEASE_DESTRUCTIVE, 0)) {
+        bsp_display_cancel_therapy_safe_restart();
         bsp_display_set_notice("Restart cancelled: microSD is busy");
         portENTER_CRITICAL(&s_state_lock);
         s_reboot_busy = false;
         if (from_wifi_save) s_wifi_save_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
+        netprov_lifecycle_release();
         vTaskDelete(NULL);
         return;
     }
-    if (bsp_display_is_therapy_active() || sd_storage_recording_active()) {
+    if (bsp_display_is_therapy_active() || sd_storage_recording_active() ||
+        !bsp_display_try_commit_therapy_safe_restart()) {
         sd_storage_lease_release(SD_LEASE_DESTRUCTIVE);
+        bsp_display_cancel_therapy_safe_restart();
         bsp_display_set_notice("Restart cancelled: therapy recording started");
         portENTER_CRITICAL(&s_state_lock);
         s_reboot_busy = false;
         if (from_wifi_save) s_wifi_save_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
+        netprov_lifecycle_release();
         vTaskDelete(NULL);
         return;
     }
@@ -1979,8 +1992,16 @@ static void reboot_cb(lv_event_t *event)
     if (!busy) s_reboot_busy = true;
     portEXIT_CRITICAL(&s_state_lock);
     if (busy) return;
+    if (!netprov_lifecycle_try_claim("ui-reboot")) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_reboot_busy = false;
+        portEXIT_CRITICAL(&s_state_lock);
+        bsp_display_set_notice("Restart deferred: update or restart in progress");
+        return;
+    }
     bsp_display_set_notice("Restarting SomnoTrace...");
     if (xTaskCreate(reboot_task, "ui_reboot", 2048, NULL, 5, NULL) != pdPASS) {
+        netprov_lifecycle_release();
         portENTER_CRITICAL(&s_state_lock);
         s_reboot_busy = false;
         portEXIT_CRITICAL(&s_state_lock);
@@ -2283,6 +2304,28 @@ static void alert_test_cb(lv_event_t *event)
     }
 }
 
+#if !CONFIG_SOMNOTRACE_BOARD_QEMU
+static esp_err_t start_therapy_with_lifecycle_gate(void)
+{
+    if (!bsp_display_reserve_therapy_start()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    bool may_have_started = false;
+    esp_err_t result = as11_ble_start_therapy_tracked(&may_have_started);
+    bool published = result == ESP_OK || may_have_started;
+    if (published && !bsp_display_set_therapy_active(true)) {
+        /* The start claim excludes a restart commit, so this is defensive. */
+        result = ESP_ERR_INVALID_STATE;
+        published = false;
+    }
+    if (published) {
+        bsp_display_set_therapy_start_time(esp_timer_get_time());
+    }
+    bsp_display_release_therapy_start();
+    return result;
+}
+#endif
+
 static void action_task(void *arg)
 {
     intptr_t action = (intptr_t)arg;
@@ -2292,10 +2335,15 @@ static void action_task(void *arg)
         bool active = bsp_display_is_therapy_active();
         if (active != start) {
 #if CONFIG_SOMNOTRACE_BOARD_QEMU
-            bsp_display_set_therapy_active(start);
-            if (start) bsp_display_set_therapy_start_time(esp_timer_get_time());
+            if (start && !bsp_display_set_therapy_active(true)) {
+                result = ESP_ERR_INVALID_STATE;
+            } else {
+                if (!start) (void)bsp_display_set_therapy_active(false);
+                if (start) bsp_display_set_therapy_start_time(esp_timer_get_time());
+            }
 #else
-            result = start ? as11_ble_start_therapy() : as11_ble_stop_therapy();
+            result = start ? start_therapy_with_lifecycle_gate()
+                           : as11_ble_stop_therapy();
 #endif
         }
     } else if (action == 2) {
@@ -5964,9 +6012,25 @@ void bsp_display_set_battery(int percent, bool charging)
     portEXIT_CRITICAL(&s_state_lock);
 }
 
-void bsp_display_set_therapy_active(bool active)
+bool bsp_display_set_therapy_active(bool active)
 {
-    portENTER_CRITICAL(&s_state_lock);
+    bool waiting_for_restart = false;
+    for (;;) {
+        portENTER_CRITICAL(&s_state_lock);
+        if (!active || !s_therapy_safe_restart_reserving) break;
+        if (!waiting_for_restart) {
+            s_therapy_start_waiters++;
+            waiting_for_restart = true;
+        }
+        portEXIT_CRITICAL(&s_state_lock);
+        vTaskDelay(1);
+    }
+    if (waiting_for_restart) s_therapy_start_waiters--;
+    if (active && s_therapy_safe_restart_committed) {
+        portEXIT_CRITICAL(&s_state_lock);
+        ESP_LOGW(TAG, "therapy start refused: restart already committed");
+        return false;
+    }
     bool changed = s_state.therapy != active;
     s_state.therapy = active;
     if (changed) {
@@ -5996,6 +6060,68 @@ void bsp_display_set_therapy_active(bool active)
             ESP_LOGW(TAG, "refresh History after therapy: %s",
                      esp_err_to_name(result));
     }
+    return true;
+}
+
+bool bsp_display_try_reserve_therapy_safe_restart(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    bool reserved = !s_state.therapy && s_therapy_start_claims == 0 &&
+                    s_therapy_start_waiters == 0 &&
+                    !s_therapy_safe_restart_reserving &&
+                    !s_therapy_safe_restart_committed;
+    if (reserved) s_therapy_safe_restart_reserving = true;
+    portEXIT_CRITICAL(&s_state_lock);
+    return reserved;
+}
+
+bool bsp_display_try_commit_therapy_safe_restart(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    bool committed = s_therapy_safe_restart_reserving && !s_state.therapy &&
+                     s_therapy_start_waiters == 0;
+    if (committed) {
+        s_therapy_safe_restart_reserving = false;
+        s_therapy_safe_restart_committed = true;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return committed;
+}
+
+void bsp_display_cancel_therapy_safe_restart(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (!s_therapy_safe_restart_committed) {
+        s_therapy_safe_restart_reserving = false;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+bool bsp_display_reserve_therapy_start(void)
+{
+    bool waiting_for_restart = false;
+    for (;;) {
+        portENTER_CRITICAL(&s_state_lock);
+        if (!s_therapy_safe_restart_reserving) break;
+        if (!waiting_for_restart) {
+            s_therapy_start_waiters++;
+            waiting_for_restart = true;
+        }
+        portEXIT_CRITICAL(&s_state_lock);
+        vTaskDelay(1);
+    }
+    if (waiting_for_restart) s_therapy_start_waiters--;
+    bool reserved = !s_therapy_safe_restart_committed;
+    if (reserved) s_therapy_start_claims++;
+    portEXIT_CRITICAL(&s_state_lock);
+    return reserved;
+}
+
+void bsp_display_release_therapy_start(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_therapy_start_claims > 0) s_therapy_start_claims--;
+    portEXIT_CRITICAL(&s_state_lock);
 }
 
 void bsp_display_push_flow(float flow_lpm)

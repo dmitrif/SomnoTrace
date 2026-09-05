@@ -105,11 +105,20 @@ for filename, task_name in sorted(self_deleting):
             f"{filename}:{task_name} has no reclaiming self-delete path"
         )
 
-# OTA workers use ordinary xTaskCreate and must retain ordinary deletion.
-for task_name in ("ota_flash_task", "ota_url_task"):
-    body = function_body(sources["net_provision.c"], task_name)
-    assert "vTaskDelete(NULL)" in body
-    assert "psram_task_delete" not in body
+# OTA URL uses ordinary xTaskCreate and therefore self-deletes normally.  The
+# streamed flash worker is deliberately parent-joined: after publishing its
+# result it parks, and the owning HTTP task deletes it before freeing the
+# shared event group and buffers.
+ota_url = function_body(sources["net_provision.c"], "ota_url_task")
+assert "vTaskDelete(NULL)" in ota_url
+assert "psram_task_delete" not in ota_url
+
+ota_flash = function_body(sources["net_provision.c"], "ota_flash_task")
+ota_upload = function_body(sources["net_provision.c"], "ota_upload_handler")
+assert "vTaskSuspend(NULL)" in ota_flash
+assert "vTaskDelete(NULL)" not in ota_flash
+assert "vTaskDelete(flash_task)" in ota_upload
+assert "psram_task_delete" not in ota_flash
 
 assert "psram_task_lifecycle_contract_test.py" in HOST_TEST
 

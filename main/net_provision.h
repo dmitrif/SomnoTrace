@@ -119,6 +119,13 @@ esp_err_t netprov_scan_request(void);
 /* Copy the latest scan state/result. Safe from any task and before init. */
 void netprov_scan_get_snapshot(netprov_scan_snapshot_t *out);
 
+/* Serialize firmware updates and every controlled restart.  Callers must
+ * acquire this claim before publishing/scheduling an operation which can
+ * reach esp_restart(), keep it until restart, and release it on every path
+ * which returns without restarting.  owner must have static lifetime. */
+bool netprov_lifecycle_try_claim(const char *owner);
+void netprov_lifecycle_release(void);
+
 /* Load the full config from NVS. Returns true if at least one SSID is stored. */
 bool netprov_load_config(struct netprov_config *cfg);
 

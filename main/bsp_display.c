@@ -147,6 +147,13 @@ typedef enum {
 static SemaphoreHandle_t s_state_mutex = NULL;  /* protects all shared state below */
 static disp_mode_t s_mode = DISP_MODE_STATUS;
 static bool s_status_dirty = true;              /* status content changed, force redraw */
+/* Two-phase restart gate, protected by s_state_mutex together with s_mode.
+ * Start waiters make the final commit fail; the restart owner releases its SD
+ * lease before cancelling the reservation and waking them. */
+static bool s_therapy_safe_restart_reserving;
+static bool s_therapy_safe_restart_committed;
+static unsigned s_therapy_start_waiters;
+static unsigned s_therapy_start_claims;
 
 /* Status-screen content (copied from callers) */
 static char s_status_title[STATUS_TITLE_LEN];
@@ -177,12 +184,14 @@ static int64_t  s_therapy_start_us = 0;  /* monotonic time of TherapyStart */
 
 /* ── Public state-mutating API (never draws; render task handles drawing) ── */
 
-void bsp_display_set_therapy_active(bool active)
+bool bsp_display_set_therapy_active(bool active)
 {
     if (!s_state_mutex) {
         ESP_LOGW(TAG, "set_therapy_active(%s) called before init — ignored",
                  active ? "true" : "false");
-        return;
+        /* Display failure must not suppress therapy recording. OTA restart
+         * reservation remains unavailable while the mutex is absent. */
+        return true;
     }
 
     /* Check LCD therapy mode setting */
@@ -190,7 +199,23 @@ void bsp_display_set_therapy_active(bool active)
     bool lcd_off_mode = (dev->lcd_therapy_mode == LCD_THERAPY_OFF ||
                          dev->lcd_therapy_mode == LCD_THERAPY_ALWAYS_OFF);
 
-    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool waiting_for_restart = false;
+    for (;;) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (!active || !s_therapy_safe_restart_reserving) break;
+        if (!waiting_for_restart) {
+            s_therapy_start_waiters++;
+            waiting_for_restart = true;
+        }
+        xSemaphoreGive(s_state_mutex);
+        vTaskDelay(1);
+    }
+    if (waiting_for_restart) s_therapy_start_waiters--;
+    if (active && s_therapy_safe_restart_committed) {
+        xSemaphoreGive(s_state_mutex);
+        ESP_LOGW(TAG, "therapy start refused: restart already committed");
+        return false;
+    }
     disp_mode_t new_mode;
     if (active) {
         if (dev->lcd_therapy_mode == LCD_THERAPY_INFO)
@@ -238,6 +263,75 @@ void bsp_display_set_therapy_active(bool active)
 
     /* Wake the render task so the mode change is reflected immediately. */
     if (s_display_task) xTaskNotifyGive(s_display_task);
+    return true;
+}
+
+bool bsp_display_try_reserve_therapy_safe_restart(void)
+{
+    if (!s_state_mutex) return false;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool therapy_active = (s_mode == DISP_MODE_GRAPH || s_mode == DISP_MODE_INFO);
+    bool reserved = !therapy_active && s_therapy_start_claims == 0 &&
+                    s_therapy_start_waiters == 0 &&
+                    !s_therapy_safe_restart_reserving &&
+                    !s_therapy_safe_restart_committed;
+    if (reserved) s_therapy_safe_restart_reserving = true;
+    xSemaphoreGive(s_state_mutex);
+    return reserved;
+}
+
+bool bsp_display_try_commit_therapy_safe_restart(void)
+{
+    if (!s_state_mutex) return false;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool therapy_active = (s_mode == DISP_MODE_GRAPH || s_mode == DISP_MODE_INFO);
+    bool committed = s_therapy_safe_restart_reserving && !therapy_active &&
+                     s_therapy_start_waiters == 0;
+    if (committed) {
+        s_therapy_safe_restart_reserving = false;
+        s_therapy_safe_restart_committed = true;
+    }
+    xSemaphoreGive(s_state_mutex);
+    return committed;
+}
+
+void bsp_display_cancel_therapy_safe_restart(void)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (!s_therapy_safe_restart_committed) {
+        s_therapy_safe_restart_reserving = false;
+    }
+    xSemaphoreGive(s_state_mutex);
+}
+
+bool bsp_display_reserve_therapy_start(void)
+{
+    if (!s_state_mutex) return true;
+    bool waiting_for_restart = false;
+    for (;;) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (!s_therapy_safe_restart_reserving) break;
+        if (!waiting_for_restart) {
+            s_therapy_start_waiters++;
+            waiting_for_restart = true;
+        }
+        xSemaphoreGive(s_state_mutex);
+        vTaskDelay(1);
+    }
+    if (waiting_for_restart) s_therapy_start_waiters--;
+    bool reserved = !s_therapy_safe_restart_committed;
+    if (reserved) s_therapy_start_claims++;
+    xSemaphoreGive(s_state_mutex);
+    return reserved;
+}
+
+void bsp_display_release_therapy_start(void)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_therapy_start_claims > 0) s_therapy_start_claims--;
+    xSemaphoreGive(s_state_mutex);
 }
 
 bool bsp_display_is_therapy_active(void)

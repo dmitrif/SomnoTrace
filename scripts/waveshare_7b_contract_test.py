@@ -621,6 +621,14 @@ require(as11, r"as11_ble_get_values.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response
 require(as11, r"therapy_command.*?xSemaphoreTake\(s_cmd_mtx.*?clear_response\(\)",
         "serialized therapy RPC")
 require(display, r"s_therapy_command_busy", "single-flight therapy control")
+require(display,
+        r"start_therapy_with_lifecycle_gate.*?"
+        r"bsp_display_reserve_therapy_start\(\).*?"
+        r"as11_ble_start_therapy_tracked\(&may_have_started\).*?"
+        r"result\s*==\s*ESP_OK\s*\|\|\s*may_have_started.*?"
+        r"bsp_display_set_therapy_active\(true\).*?"
+        r"bsp_display_release_therapy_start\(\)",
+        "therapy start command excludes a concurrent restart commit")
 assert '"Therapy command sent"' not in display, \
        "successful start/stop must not raise a redundant confirmation notice"
 for toast in ('"Starting therapy..."', '"Stopping therapy..."'):
