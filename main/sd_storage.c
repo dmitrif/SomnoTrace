@@ -138,6 +138,33 @@ static void sdmmc_config_default(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
     *slot = s;
 }
 
+static esp_err_t sdmmc_mount_with_fallback(
+    sdmmc_host_t *host,
+    sdmmc_slot_config_t *slot,
+    const esp_vfs_fat_sdmmc_mount_config_t *mount_config,
+    sdmmc_card_t **card)
+{
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount(
+        SD_MOUNT_POINT, host, slot, mount_config, card);
+
+    if (ret != ESP_OK && slot->width != 1) {
+        ESP_LOGW(TAG, "4-bit mount failed (%s), trying 1-bit high speed",
+                 esp_err_to_name(ret));
+        slot->width = 1;
+        ret = esp_vfs_fat_sdmmc_mount(
+            SD_MOUNT_POINT, host, slot, mount_config, card);
+    }
+
+    if (ret != ESP_OK && host->max_freq_khz > SDMMC_FREQ_DEFAULT) {
+        ESP_LOGW(TAG, "high-speed mount failed (%s), trying %d kHz",
+                 esp_err_to_name(ret), SDMMC_FREQ_DEFAULT);
+        host->max_freq_khz = SDMMC_FREQ_DEFAULT;
+        ret = esp_vfs_fat_sdmmc_mount(
+            SD_MOUNT_POINT, host, slot, mount_config, card);
+    }
+    return ret;
+}
+
 esp_err_t sd_storage_init(void)
 {
     capacity_cache_invalidate();
@@ -164,14 +191,8 @@ esp_err_t sd_storage_init(void)
     };
 
     sdmmc_card_t *card;
-    esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot_config,
-                                             &mount_config, &card);
-    if (ret != ESP_OK && slot_config.width != 1) {
-        ESP_LOGW(TAG, "4-bit mount failed (%s), trying 1-bit mode", esp_err_to_name(ret));
-        slot_config.width = 1;
-        ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot_config,
-                                       &mount_config, &card);
-    }
+    esp_err_t ret = sdmmc_mount_with_fallback(
+        &host, &slot_config, &mount_config, &card);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "failed to mount SD card: %s (0x%x)", esp_err_to_name(ret), ret);
 #if CONFIG_SOMNOTRACE_BOARD_WAVESHARE_7B
@@ -482,12 +503,12 @@ esp_err_t sd_storage_format(void)
             .allocation_unit_size   = SD_FORMAT_ALLOC_UNIT,
         };
 
-        /* Single 4-bit attempt.  A 1-bit retry after this fails is a no-op:
-         * esp_vfs_fat_sdmmc_mount() leaves the VFS path registered on failure,
-         * so the retry just returns ESP_ERR_INVALID_STATE and hides the real
-         * error.  sd_storage_init() already handles 4->1-bit for normal mounts. */
+        /* The IDF 5.5 mount helper unregisters FATFS and deinitialises the host
+         * on failure, so the same width/frequency fallback used at boot is safe
+         * here too. This matters for marginal cards that initialise at 20 MHz
+         * but not at the preferred 40 MHz. */
         sdmmc_card_t *card = NULL;
-        ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot, &cfg, &card);
+        ret = sdmmc_mount_with_fallback(&host, &slot, &cfg, &card);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "format: mount+format failed: %s", esp_err_to_name(ret));
             bsp_display_set_sd_ready(false);
