@@ -3146,6 +3146,7 @@ typedef struct {
     int total_size;
     esp_err_t result;
     bool aborted_by_input;
+    bool aborted_by_therapy;
 } ota_ctx_t;
 
 static ota_ctx_t *ota_upload_context_create(int total_size)
@@ -3225,6 +3226,12 @@ static void ota_flash_task(void *arg)
     ota_started = true;
 
     while (true) {
+        if (bsp_display_therapy_safe_maintenance_should_abort()) {
+            ESP_LOGW(TAG, "OTA: therapy start arrived; abandoning update");
+            ctx->aborted_by_therapy = true;
+            result = ESP_ERR_INVALID_STATE;
+            goto finished;
+        }
         EventBits_t bits = xEventGroupGetBits(ctx->events);
         size_t available = xStreamBufferBytesAvailable(ctx->sbuf);
         if (bits & OTA_INPUT_ABORT_BIT) {
@@ -3365,12 +3372,23 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
                                        OTA_UPLOAD_MIN_INTERNAL_LARGEST);
     }
 
+    /* OTA maintenance never blocks therapy publication. A local, physical,
+     * or flow-detected start changes the guard to abort; the flash worker
+     * abandons the partial image before its next sector write. */
+    if (!bsp_display_try_begin_therapy_safe_maintenance()) {
+        free(recv_buf);
+        ota_upload_context_destroy(ctx);
+        netprov_lifecycle_release();
+        return ota_send_storage_busy(req);
+    }
+
     /* Launch flash task on an INTERNAL RAM stack (not PSRAM) — required for
      * cache-freeze safety during esp_ota_write. */
     TaskHandle_t flash_task = NULL;
     BaseType_t tr = xTaskCreate(ota_flash_task, "ota_flash",
                                 OTA_UPLOAD_TASK_STACK_BYTES, ctx, 5, &flash_task);
     if (tr != pdPASS) {
+        bsp_display_end_therapy_safe_maintenance();
         free(recv_buf);
         ota_upload_context_destroy(ctx);
         ota_heap_snapshot_t failed = ota_heap_snapshot();
@@ -3454,9 +3472,21 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     vTaskDelete(flash_task);
     esp_err_t flash_result = ctx->result;
     bool aborted_by_input = ctx->aborted_by_input;
+    bool aborted_by_therapy = ctx->aborted_by_therapy;
     ota_upload_context_destroy(ctx);
 
+    if (aborted_by_therapy) {
+        bsp_display_end_therapy_safe_maintenance();
+        netprov_lifecycle_release();
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Retry-After", "5");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"error\":\"therapy started; update cancelled\"}");
+    }
+
     if (flash_result != ESP_OK && !aborted_by_input) {
+        bsp_display_end_therapy_safe_maintenance();
         netprov_lifecycle_release();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             esp_err_to_name(flash_result));
@@ -3464,6 +3494,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     }
 
     if (input_error) {
+        bsp_display_end_therapy_safe_maintenance();
         netprov_lifecycle_release();
         httpd_resp_set_status(req, input_status);
         httpd_resp_set_type(req, "application/json");
@@ -3474,6 +3505,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     }
 
     if (flash_result != ESP_OK) {
+        bsp_display_end_therapy_safe_maintenance();
         netprov_lifecycle_release();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             esp_err_to_name(flash_result));
@@ -3481,6 +3513,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "OTA: upload complete (%d bytes), scheduling reboot", received);
+    bsp_display_end_therapy_safe_maintenance();
 
     /* The normal path moves deferral off the sole httpd worker. If task
      * creation fails, keep the handler for at most five seconds while trying
@@ -3625,11 +3658,28 @@ static void ota_url_task(void *arg)
 
     /* Pump the download/flash loop, updating progress as we go. */
     while (1) {
+        if (bsp_display_therapy_safe_maintenance_should_abort()) {
+            ESP_LOGW(TAG, "OTA URL: therapy start arrived; abandoning update");
+            ota_progress_set_error("therapy started; update cancelled");
+            esp_https_ota_abort(handle);
+            handle = NULL;
+            goto out;
+        }
         err = esp_https_ota_perform(handle);
         if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
 
         int read = esp_https_ota_get_image_len_read(handle);
         ota_progress_set_transfer(read);
+    }
+
+    /* esp_https_ota_perform() may complete the final network read and flash
+     * in one call. Recheck before validating or selecting that image. */
+    if (bsp_display_therapy_safe_maintenance_should_abort()) {
+        ESP_LOGW(TAG, "OTA URL: therapy start arrived at completion boundary");
+        ota_progress_set_error("therapy started; update cancelled");
+        esp_https_ota_abort(handle);
+        handle = NULL;
+        goto out;
     }
 
     if (err != ESP_OK) {
@@ -3654,6 +3704,7 @@ static void ota_url_task(void *arg)
     }
 
     ESP_LOGI(TAG, "OTA URL: flash complete, scheduling reboot");
+    bsp_display_end_therapy_safe_maintenance();
     ota_progress_set_active(false);
     ota_heap_snapshot_t finish_heap = ota_heap_snapshot();
     ESP_LOGI(TAG, "OTA URL finish: internal8 free=%u largest=%u",
@@ -3675,6 +3726,7 @@ static void ota_url_task(void *arg)
     return;
 
 out:
+    bsp_display_end_therapy_safe_maintenance();
     ota_progress_finish(false, NULL);
     ota_heap_snapshot_t failed_heap = ota_heap_snapshot();
     ESP_LOGE(TAG, "OTA URL stopped: internal8 free=%u largest=%u",
@@ -3775,6 +3827,15 @@ static esp_err_t ota_url_handler(httpd_req_t *req)
                                        OTA_URL_MIN_INTERNAL_LARGEST);
     }
 
+    /* The background updater owns a cancellable maintenance gate. It does not
+     * delay therapy publication; the next perform iteration observes the
+     * start and abandons the partial image. */
+    if (!bsp_display_try_begin_therapy_safe_maintenance()) {
+        free(url_copy);
+        netprov_lifecycle_release();
+        return ota_send_storage_busy(req);
+    }
+
     ota_progress_start();
 
     /* Launch the download+flash task on an internal RAM stack. */
@@ -3782,6 +3843,7 @@ static esp_err_t ota_url_handler(httpd_req_t *req)
     BaseType_t tr = xTaskCreate(ota_url_task, "ota_url",
                                 OTA_URL_TASK_STACK_BYTES, url_copy, 5, &task);
     if (tr != pdPASS) {
+        bsp_display_end_therapy_safe_maintenance();
         free(url_copy);
         ota_progress_finish(false, "internal task allocation failed");
         ota_heap_snapshot_t failed = ota_heap_snapshot();

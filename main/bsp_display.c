@@ -154,6 +154,8 @@ static bool s_therapy_safe_restart_reserving;
 static bool s_therapy_safe_restart_committed;
 static unsigned s_therapy_start_waiters;
 static unsigned s_therapy_start_claims;
+static unsigned s_as11_notifications_pending;
+static bool s_therapy_safe_maintenance;
 
 /* Status-screen content (copied from callers) */
 static char s_status_title[STATUS_TITLE_LEN];
@@ -273,6 +275,8 @@ bool bsp_display_try_reserve_therapy_safe_restart(void)
     bool therapy_active = (s_mode == DISP_MODE_GRAPH || s_mode == DISP_MODE_INFO);
     bool reserved = !therapy_active && s_therapy_start_claims == 0 &&
                     s_therapy_start_waiters == 0 &&
+                    s_as11_notifications_pending == 0 &&
+                    !s_therapy_safe_maintenance &&
                     !s_therapy_safe_restart_reserving &&
                     !s_therapy_safe_restart_committed;
     if (reserved) s_therapy_safe_restart_reserving = true;
@@ -286,7 +290,8 @@ bool bsp_display_try_commit_therapy_safe_restart(void)
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     bool therapy_active = (s_mode == DISP_MODE_GRAPH || s_mode == DISP_MODE_INFO);
     bool committed = s_therapy_safe_restart_reserving && !therapy_active &&
-                     s_therapy_start_waiters == 0;
+                     s_therapy_start_waiters == 0 &&
+                     s_as11_notifications_pending == 0;
     if (committed) {
         s_therapy_safe_restart_reserving = false;
         s_therapy_safe_restart_committed = true;
@@ -331,6 +336,57 @@ void bsp_display_release_therapy_start(void)
     if (!s_state_mutex) return;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     if (s_therapy_start_claims > 0) s_therapy_start_claims--;
+    xSemaphoreGive(s_state_mutex);
+}
+
+void bsp_display_note_as11_notification_queued(void)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    s_as11_notifications_pending++;
+    xSemaphoreGive(s_state_mutex);
+}
+
+void bsp_display_note_as11_notification_processed(void)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_as11_notifications_pending > 0) s_as11_notifications_pending--;
+    xSemaphoreGive(s_state_mutex);
+}
+
+bool bsp_display_try_begin_therapy_safe_maintenance(void)
+{
+    if (!s_state_mutex) return false;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool therapy_active = (s_mode == DISP_MODE_GRAPH || s_mode == DISP_MODE_INFO);
+    bool begun = !therapy_active && s_therapy_start_claims == 0 &&
+                 s_therapy_start_waiters == 0 &&
+                 s_as11_notifications_pending == 0 &&
+                 !s_therapy_safe_maintenance &&
+                 !s_therapy_safe_restart_reserving &&
+                 !s_therapy_safe_restart_committed;
+    if (begun) s_therapy_safe_maintenance = true;
+    xSemaphoreGive(s_state_mutex);
+    return begun;
+}
+
+bool bsp_display_therapy_safe_maintenance_should_abort(void)
+{
+    if (!s_state_mutex) return true;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool therapy_active = (s_mode == DISP_MODE_GRAPH || s_mode == DISP_MODE_INFO);
+    bool abort = !s_therapy_safe_maintenance || therapy_active ||
+                 s_therapy_start_claims > 0 || s_therapy_start_waiters > 0;
+    xSemaphoreGive(s_state_mutex);
+    return abort;
+}
+
+void bsp_display_end_therapy_safe_maintenance(void)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    s_therapy_safe_maintenance = false;
     xSemaphoreGive(s_state_mutex);
 }
 

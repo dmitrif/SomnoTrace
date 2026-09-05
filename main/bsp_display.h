@@ -67,6 +67,17 @@ void bsp_display_cancel_therapy_safe_restart(void);
  * It participates in the same restart reservation and must always be released. */
 bool bsp_display_reserve_therapy_start(void);
 void bsp_display_release_therapy_start(void);
+/* Account for raw AirSense notifications from enqueue through dispatch.  A
+ * queued TherapyStart must be visible to the restart gate before its JSON is
+ * decrypted and classified by the worker. */
+void bsp_display_note_as11_notification_queued(void);
+void bsp_display_note_as11_notification_processed(void);
+/* Cancellable maintenance gate used by OTA. Unlike the final restart gate,
+ * it never blocks therapy publication: an independent start makes
+ * should_abort true so recording wins immediately. */
+bool bsp_display_try_begin_therapy_safe_maintenance(void);
+bool bsp_display_therapy_safe_maintenance_should_abort(void);
+void bsp_display_end_therapy_safe_maintenance(void);
 void bsp_display_push_flow(float flow_lpm);
 void bsp_display_push_leak(float leak_lpm);
 /* Live two-second metrics. Pass NAN for an unavailable value. */

@@ -270,6 +270,8 @@ static bool s_therapy_safe_restart_reserving;
 static bool s_therapy_safe_restart_committed;
 static unsigned s_therapy_start_waiters;
 static unsigned s_therapy_start_claims;
+static unsigned s_as11_notifications_pending;
+static bool s_therapy_safe_maintenance;
 static ui_service_state_t s_services;
 static ui_service_state_t *s_render_services;
 static esp_lcd_panel_handle_t s_panel;
@@ -6068,6 +6070,8 @@ bool bsp_display_try_reserve_therapy_safe_restart(void)
     portENTER_CRITICAL(&s_state_lock);
     bool reserved = !s_state.therapy && s_therapy_start_claims == 0 &&
                     s_therapy_start_waiters == 0 &&
+                    s_as11_notifications_pending == 0 &&
+                    !s_therapy_safe_maintenance &&
                     !s_therapy_safe_restart_reserving &&
                     !s_therapy_safe_restart_committed;
     if (reserved) s_therapy_safe_restart_reserving = true;
@@ -6079,7 +6083,8 @@ bool bsp_display_try_commit_therapy_safe_restart(void)
 {
     portENTER_CRITICAL(&s_state_lock);
     bool committed = s_therapy_safe_restart_reserving && !s_state.therapy &&
-                     s_therapy_start_waiters == 0;
+                     s_therapy_start_waiters == 0 &&
+                     s_as11_notifications_pending == 0;
     if (committed) {
         s_therapy_safe_restart_reserving = false;
         s_therapy_safe_restart_committed = true;
@@ -6121,6 +6126,50 @@ void bsp_display_release_therapy_start(void)
 {
     portENTER_CRITICAL(&s_state_lock);
     if (s_therapy_start_claims > 0) s_therapy_start_claims--;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+void bsp_display_note_as11_notification_queued(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_as11_notifications_pending++;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+void bsp_display_note_as11_notification_processed(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_as11_notifications_pending > 0) s_as11_notifications_pending--;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+bool bsp_display_try_begin_therapy_safe_maintenance(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    bool begun = !s_state.therapy && s_therapy_start_claims == 0 &&
+                 s_therapy_start_waiters == 0 &&
+                 s_as11_notifications_pending == 0 &&
+                 !s_therapy_safe_maintenance &&
+                 !s_therapy_safe_restart_reserving &&
+                 !s_therapy_safe_restart_committed;
+    if (begun) s_therapy_safe_maintenance = true;
+    portEXIT_CRITICAL(&s_state_lock);
+    return begun;
+}
+
+bool bsp_display_therapy_safe_maintenance_should_abort(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    bool abort = !s_therapy_safe_maintenance || s_state.therapy ||
+                 s_therapy_start_claims > 0 || s_therapy_start_waiters > 0;
+    portEXIT_CRITICAL(&s_state_lock);
+    return abort;
+}
+
+void bsp_display_end_therapy_safe_maintenance(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_therapy_safe_maintenance = false;
     portEXIT_CRITICAL(&s_state_lock);
 }
 

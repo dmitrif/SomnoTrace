@@ -744,6 +744,10 @@ static void notif_proc_task(void *arg)
         if (xQueueReceive(s_notif_queue, &item, portMAX_DELAY) == pdTRUE) {
             handle_notify(item.data, item.len);
             free(item.data);
+            /* Keep the restart gate closed until decrypted dispatch has
+             * completed. TherapyStart is only identifiable inside
+             * handle_notify(), well after the NimBLE callback enqueues it. */
+            bsp_display_note_as11_notification_processed();
         }
     }
 }
@@ -1078,6 +1082,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_NOTIFY_RX: {
         uint16_t notif_len = OS_MBUF_PKTLEN(event->notify_rx.om);
         ESP_LOGD(TAG, "Notification RX: handle=%d len=%d", event->notify_rx.attr_handle, notif_len);
+        /* Close the raw-RX-to-worker race before allocation, copy, or queue
+         * publication. Every failure path below gives this accounting back. */
+        bool lifecycle_accounted = notif_len > 0;
+        if (lifecycle_accounted)
+            bsp_display_note_as11_notification_queued();
         if (notif_len > 0 && s_notif_queue) {
             /* Queue-depth metrics.  Each element owns a separately malloc'd
              * payload, so depth translates into a real worst-case backlog —
@@ -1102,18 +1111,28 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                     if (xQueueSend(s_notif_queue, &item, 0) != pdTRUE) {
                         /* Queue full — drop oldest, then enqueue */
                         notif_item_t dropped;
-                        xQueueReceive(s_notif_queue, &dropped, 0);
-                        s_notif_dropped++;
-                        s_notif_dropped_bytes += (uint32_t)dropped.len;
-                        free(dropped.data);
-                        xQueueSend(s_notif_queue, &item, 0);
-                        notif_data = NULL;  /* owned by queue now */
-                        ESP_LOGW(TAG, "notif queue full, dropped 1 item "
-                                 "(total %u items / %u bytes)",
-                                 (unsigned)s_notif_dropped,
-                                 (unsigned)s_notif_dropped_bytes);
+                        if (xQueueReceive(s_notif_queue, &dropped, 0) == pdTRUE) {
+                            bsp_display_note_as11_notification_processed();
+                            s_notif_dropped++;
+                            s_notif_dropped_bytes += (uint32_t)dropped.len;
+                            free(dropped.data);
+                        }
+                        if (xQueueSend(s_notif_queue, &item, 0) == pdTRUE) {
+                            notif_data = NULL;  /* owned by queue now */
+                            lifecycle_accounted = false;
+                            ESP_LOGW(TAG, "notif queue full, dropped 1 item "
+                                     "(total %u items / %u bytes)",
+                                     (unsigned)s_notif_dropped,
+                                     (unsigned)s_notif_dropped_bytes);
+                        } else {
+                            /* Undo this frame's pre-publication accounting if
+                             * the retry could not transfer queue ownership. */
+                            bsp_display_note_as11_notification_processed();
+                            lifecycle_accounted = false;
+                        }
                     } else {
                         notif_data = NULL;  /* owned by queue now */
+                        lifecycle_accounted = false;
                     }
                 } else {
                     ESP_LOGE(TAG, "os_mbuf_copydata failed: %d", rc);
@@ -1126,6 +1145,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                          (unsigned)s_notif_alloc_fail);
             }
         }
+        if (lifecycle_accounted)
+            bsp_display_note_as11_notification_processed();
         return 0;
     }
 
